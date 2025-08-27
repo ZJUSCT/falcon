@@ -1,0 +1,13 @@
+Configs/
+.cursor
+
+node_modules
+.next
+
+state.db*
+
+mirrorgo
+
+logs
+
+dist

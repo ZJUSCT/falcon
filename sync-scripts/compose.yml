@@ -1,0 +1,7 @@
+services:
+  debian-ftpsync:
+    build: dockerfiles/debian-ftpsync
+    image: debian-ftpsync:latest
+
+
+# build only
