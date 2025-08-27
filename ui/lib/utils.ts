@@ -107,9 +107,9 @@ export function formatRFC3339(dateString: string): string {
 export function getStatusColor(status: string): string {
   switch (status) {
     case 'Running':
-      return 'text-blue-600 bg-blue-50 border-blue-200';
+      return 'bg-blue-600 border-blue-200';
     case 'Succeeded':
-      return 'text-green-600 bg-green-50 border-green-200';
+      return 'bg-green-600 border-green-200';
     case 'Failed':
       return 'text-red-600 bg-red-50 border-red-200';
     case 'Waiting':

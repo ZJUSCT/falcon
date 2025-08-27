@@ -62,8 +62,7 @@ export function LogViewer({ actionId }: LogViewerProps) {
   const isAtBottom = () => {
     if (!logContentRef.current) return false;
     const { scrollTop, scrollHeight, clientHeight } = logContentRef.current;
-    // Consider "at bottom" if within 30px of the bottom
-    return scrollHeight - scrollTop - clientHeight < 30;
+    return scrollHeight - scrollTop - clientHeight < 50;
   };
 
   // Handle scroll events to update auto-scroll state
