@@ -6,6 +6,7 @@ import { RelativeTime } from '@/components/relative-time';
 import { apiClient } from '@/lib/api';
 import { LogEntry, LogListResponse } from '@/types';
 import { FileText, Folder, Download, ExternalLink, RefreshCw, ArrowDown } from 'lucide-react';
+import { formatBytes } from '@/lib/utils';
 
 interface LogViewerProps {
   actionId: string;
@@ -370,7 +371,7 @@ export function LogViewer({ actionId }: LogViewerProps) {
                     </div>
                     <div className="flex items-center gap-1 flex-shrink-0">
                       <span className="text-xs text-muted-foreground">
-                        {(entry.size / 1024).toFixed(1)}KB
+                        {formatBytes(entry.size)}
                       </span>
                       <a
                         href={getRawUrl(entry.name)}
