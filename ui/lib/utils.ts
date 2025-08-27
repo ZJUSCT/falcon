@@ -115,9 +115,9 @@ export function getStatusColor(status: string): string {
     case 'Waiting':
       return 'text-yellow-600 bg-yellow-50 border-yellow-200';
     case 'Scheduled':
-      return 'text-purple-600 bg-purple-50 border-purple-200';
+      return 'bg-purple-600 border-purple-200';
     case 'Orphan':
-      return 'text-gray-600 bg-gray-50 border-gray-200';
+      return 'bg-gray-600 border-gray-200';
     default:
       return 'text-gray-600 bg-gray-50 border-gray-200';
   }
