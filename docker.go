@@ -12,8 +12,8 @@ import (
 )
 
 var (
-	BASEDIR, _ = filepath.Abs(".")
-	REPODIR    = "/test1/mirrors/"
+	BASEDIR = "/home/zjusct/mirrorgo"
+	REPODIR = "/test1/mirrors/"
 )
 
 func StartContainer(act *Action) error {
@@ -57,6 +57,13 @@ func StartContainer(act *Action) error {
 			Name: "no",
 		},
 		Mounts: mounts,
+		LogConfig: container.LogConfig{
+			Type: "json-file",
+			Config: map[string]string{
+				"max-size": "1000m",
+				"max-file": "1",
+			},
+		},
 	}, nil, nil, act.ContainerName)
 
 	act.ContainerID = resp.ID
@@ -83,7 +90,10 @@ func StartContainer(act *Action) error {
 		return err
 	}
 
-	os.Link(inspect.LogPath, filepath.Join(logDir, "container.log"))
+	err = os.Symlink(inspect.LogPath, filepath.Join(logDir, "container.log"))
+	if err != nil {
+		log.Error().Err(err).Str("job", act.JobID).Str("action", act.ID).Str("image", act.ContainerImage).Msg("Failed to link container log")
+	}
 
 	return nil
 }
@@ -115,6 +125,29 @@ func CheckContainer(act *Action) (bool, error) {
 }
 
 func DeleteContainer(act *Action) error {
+
+	// deal with log
+
+	logDir := GetLogDir(act)
+
+	// remove symlink
+	err := os.Remove(filepath.Join(logDir, "container.log"))
+	if err != nil {
+		log.Error().Err(err).Str("job", act.JobID).Str("action", act.ID).Str("image", act.ContainerImage).Msg("Failed to remove container log symlink")
+	}
+
+	// inspect to get container logs
+	inspect, err := dockerClient.ContainerInspect(context.Background(), act.ContainerID)
+	if err != nil {
+		log.Error().Err(err).Str("job", act.JobID).Str("action", act.ID).Str("image", act.ContainerImage).Msg("Failed to inspect container")
+	}
+
+	// copy logs to logDir
+
+	err = copyFile(inspect.LogPath, filepath.Join(logDir, "container.log"))
+	if err != nil {
+		log.Error().Err(err).Str("job", act.JobID).Str("action", act.ID).Str("image", act.ContainerImage).Msg("Failed to move container log")
+	}
 
 	if err := dockerClient.ContainerRemove(context.Background(), act.ContainerID, container.RemoveOptions{
 		Force: true,

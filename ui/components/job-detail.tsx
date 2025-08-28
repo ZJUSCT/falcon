@@ -36,7 +36,13 @@ export function JobDetail({ jobId, onBack, onActionClick }: JobDetailProps) {
         setJob(jobData);
       }
       
-      setActions(actionsData);
+      // Sort actions by started_at descending (most recent first)
+      const sortedActions = actionsData.sort((a, b) => {
+        const aTime = new Date(a.started_at || a.created_at || 0).getTime();
+        const bTime = new Date(b.started_at || b.created_at || 0).getTime();
+        return bTime - aTime; // Descending order (newest first)
+      });
+      setActions(sortedActions);
       setError(null);
     } catch (err) {
       // Don't update error state for background refresh failures
@@ -72,7 +78,13 @@ export function JobDetail({ jobId, onBack, onActionClick }: JobDetailProps) {
         
         // Fetch last 10 actions for this job
         const actionsData = await apiClient.getActionsByRepo(jobId, 10);
-        setActions(actionsData);
+        // Sort actions by started_at descending (most recent first)
+        const sortedActions = actionsData.sort((a, b) => {
+          const aTime = new Date(a.started_at || a.created_at || 0).getTime();
+          const bTime = new Date(b.started_at || b.created_at || 0).getTime();
+          return bTime - aTime; // Descending order (newest first)
+        });
+        setActions(sortedActions);
         
         setError(null);
       } catch (err) {

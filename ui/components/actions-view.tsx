@@ -27,8 +27,21 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
           apiClient.getActions(),
           apiClient.getRecentActions(20)
         ]);
-        setActiveActions(active);
-        setRecentActions(recent);
+        
+        // Sort actions by started_at descending (most recent first)
+        const sortedActive = active.sort((a, b) => {
+          const aTime = new Date(a.started_at || a.created_at || 0).getTime();
+          const bTime = new Date(b.started_at || b.created_at || 0).getTime();
+          return bTime - aTime; // Descending order (newest first)
+        });
+        const sortedRecent = recent.sort((a, b) => {
+          const aTime = new Date(a.started_at || a.created_at || 0).getTime();
+          const bTime = new Date(b.started_at || b.created_at || 0).getTime();
+          return bTime - aTime; // Descending order (newest first)
+        });
+        
+        setActiveActions(sortedActive);
+        setRecentActions(sortedRecent);
         setError(null);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to fetch actions');
@@ -43,8 +56,21 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
           apiClient.getActions(),
           apiClient.getRecentActions(20)
         ]);
-        setActiveActions(active);
-        setRecentActions(recent);
+        
+        // Sort actions by started_at descending (most recent first)
+        const sortedActive = active.sort((a, b) => {
+          const aTime = new Date(a.started_at || a.created_at || 0).getTime();
+          const bTime = new Date(b.started_at || b.created_at || 0).getTime();
+          return bTime - aTime; // Descending order (newest first)
+        });
+        const sortedRecent = recent.sort((a, b) => {
+          const aTime = new Date(a.started_at || a.created_at || 0).getTime();
+          const bTime = new Date(b.started_at || b.created_at || 0).getTime();
+          return bTime - aTime; // Descending order (newest first)
+        });
+        
+        setActiveActions(sortedActive);
+        setRecentActions(sortedRecent);
         setError(null);
       } catch (err) {
         // Don't update error state for background refresh failures
