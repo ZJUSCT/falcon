@@ -88,7 +88,7 @@ fi
 rsync \
 	--quiet \
 	--log-file $MIRRORGO_LOGS_PATH/rsync.log \
-	-6 \
+	-4 \
 	--bwlimit=0 \
 	-prltvHSB8192 \
 	--delete-delay \

@@ -72,7 +72,6 @@ export default function Dashboard() {
     updateHash(route);
     setIsMobileMenuOpen(false); // Close mobile menu on navigation
   };
-
   // Navigate to job detail
   const handleJobClick = (jobId: string) => {
     handleNavigate({ type: 'job-detail', jobId });
@@ -102,6 +101,8 @@ export default function Dashboard() {
     const handleHashChange = () => {
       const newRoute = getRouteFromHash();
       setCurrentRoute(newRoute);
+      
+      // Don't reset scroll on browser navigation - let browser preserve scroll position
     };
 
     window.addEventListener('hashchange', handleHashChange);
