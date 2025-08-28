@@ -5,16 +5,18 @@ import { ReposView } from '@/components/repos-view';
 import { JobsView } from '@/components/jobs-view';
 import { ActionsView } from '@/components/actions-view';
 import { QueueView } from '@/components/queue-view';
+import { OverviewView } from '@/components/overview-view';
 import { JobDetail } from '@/components/job-detail';
 import { ActionDetail } from '@/components/action-detail';
 import { Card, CardContent } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
-import { Database, Briefcase, Play, Clock, Menu, X } from 'lucide-react';
+import { Database, Briefcase, Play, Clock, Menu, X, Eye } from 'lucide-react';
 
-type ViewType = 'repos' | 'jobs' | 'actions' | 'queue';
+type ViewType = 'overview' | 'repos' | 'jobs' | 'actions' | 'queue';
 type RouteType = ViewType | { type: 'job-detail'; jobId: string } | { type: 'action-detail'; actionId: string };
 
 const tabs = [
+  { id: 'overview', label: 'Overview', icon: Eye },
   { id: 'repos', label: 'Repositories', icon: Database },
   { id: 'jobs', label: 'Jobs', icon: Briefcase },
   { id: 'actions', label: 'Actions', icon: Play },
@@ -22,12 +24,12 @@ const tabs = [
 ] as const;
 
 export default function Dashboard() {
-  const [currentRoute, setCurrentRoute] = useState<RouteType>('repos');
+  const [currentRoute, setCurrentRoute] = useState<RouteType>('overview');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   // Function to parse route from URL hash
   const getRouteFromHash = (): RouteType => {
-    if (typeof window === 'undefined') return 'repos';
+    if (typeof window === 'undefined') return 'overview';
     const hash = window.location.hash.replace('#', '');
     
     // Handle job detail routes: #jobs/job-id
@@ -47,8 +49,8 @@ export default function Dashboard() {
     }
     
     // Handle simple view routes
-    const validViews: ViewType[] = ['repos', 'jobs', 'actions', 'queue'];
-    return validViews.includes(hash as ViewType) ? (hash as ViewType) : 'repos';
+    const validViews: ViewType[] = ['overview', 'repos', 'jobs', 'actions', 'queue'];
+    return validViews.includes(hash as ViewType) ? (hash as ViewType) : 'overview';
   };
 
   // Function to update URL hash
@@ -116,6 +118,8 @@ export default function Dashboard() {
     }
     
     switch (currentRoute) {
+      case 'overview':
+        return <OverviewView />;
       case 'repos':
         return <ReposView />;
       case 'jobs':
@@ -125,7 +129,7 @@ export default function Dashboard() {
       case 'queue':
         return <QueueView />;
       default:
-        return <ReposView />;
+        return <OverviewView />;
     }
   };
 
@@ -182,11 +186,11 @@ export default function Dashboard() {
               <div className="flex items-center gap-2">
                 {(() => {
                   const activeTab = tabs.find(tab => tab.id === getActiveTab());
-                  const Icon = activeTab?.icon || Database;
+                  const Icon = activeTab?.icon || Eye;
                   return (
                     <>
                       <Icon className="h-5 w-5" />
-                      <span className="font-medium">{activeTab?.label || 'Repositories'}</span>
+                      <span className="font-medium">{activeTab?.label || 'Overview'}</span>
                     </>
                   );
                 })()}
