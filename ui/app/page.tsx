@@ -119,7 +119,7 @@ export default function Dashboard() {
     
     switch (currentRoute) {
       case 'overview':
-        return <OverviewView />;
+        return <OverviewView onNavigateToJob={(jobId) => handleNavigate({ type: 'job-detail', jobId })} />;
       case 'repos':
         return <ReposView />;
       case 'jobs':
@@ -129,7 +129,7 @@ export default function Dashboard() {
       case 'queue':
         return <QueueView />;
       default:
-        return <OverviewView />;
+        return <OverviewView onNavigateToJob={(jobId) => handleNavigate({ type: 'job-detail', jobId })} />;
     }
   };
 

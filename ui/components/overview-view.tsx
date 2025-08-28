@@ -23,7 +23,11 @@ interface ClockDimensions {
   centerY: number;
 }
 
-export function OverviewView() {
+interface OverviewViewProps {
+  onNavigateToJob?: (jobId: string) => void;
+}
+
+export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -114,10 +118,11 @@ export function OverviewView() {
     const twelveHoursLater = new Date(now.getTime() + 12 * 60 * 60 * 1000);
 
     jobs.forEach(job => {
-      // Next attempt (skip for running jobs)
+      // Next attempt (skip for running jobs, show all scheduled regardless of time)
       if (job.next_attempt_at && job.next_attempt_at !== '0001-01-01T00:00:00Z' && job.status !== 'Running') {
         const nextAttempt = new Date(job.next_attempt_at);
-        if (nextAttempt >= twelveHoursAgo && nextAttempt <= twelveHoursLater) {
+        // Show all scheduled jobs regardless of time, others within 12h window
+        if (job.status === 'Scheduled' || (nextAttempt >= twelveHoursAgo && nextAttempt <= twelveHoursLater)) {
           events.push({
             time: nextAttempt,
             type: 'nextAttempt',
@@ -153,17 +158,15 @@ export function OverviewView() {
         }
       }
 
-      // Last attempt (only for running jobs)
+      // Last attempt (only for running jobs - show all running regardless of time)
       if (job.last_attempt_at && job.last_attempt_at !== '0001-01-01T00:00:00Z' && job.status === 'Running') {
         const lastAttempt = new Date(job.last_attempt_at);
-        if (lastAttempt >= twelveHoursAgo && lastAttempt <= twelveHoursLater) {
-          events.push({
-            time: lastAttempt,
-            type: 'lastAttempt',
-            jobId: job.id,
-            jobStatus: job.status
-          });
-        }
+        events.push({
+          time: lastAttempt,
+          type: 'lastAttempt',
+          jobId: job.id,
+          jobStatus: job.status
+        });
       }
     });
 
@@ -258,7 +261,8 @@ export function OverviewView() {
 
   const getEventColor = (type: TimeEvent['type'], jobStatus?: string) => {
     switch (type) {
-      case 'nextAttempt': return '#eab308'; // yellow-500
+      case 'nextAttempt': 
+        return jobStatus === 'Scheduled' ? '#8b5cf6' : '#eab308'; // purple-500 for Scheduled, yellow-500 for others
       case 'lastSuccess': return '#22c55e'; // green-500
       case 'lastFailure': return '#ef4444'; // red-500
       case 'lastAttempt': return '#3b82f6'; // blue-500 (only for running jobs now)
@@ -527,6 +531,11 @@ export function OverviewView() {
                         setHoveredEvent(null);
                         setTooltipPosition(null);
                       }}
+                      onClick={() => {
+                        if (onNavigateToJob) {
+                          onNavigateToJob(eventPos.jobId);
+                        }
+                      }}
                       className="cursor-pointer"
                     >
                       {/* Event line to clock */}
@@ -590,10 +599,17 @@ export function OverviewView() {
             <CardContent>
               <div className="space-y-4">
                 <div className="flex items-center gap-3">
+                  <div className="w-5 h-5 rounded-full bg-purple-500 shadow-sm"></div>
+                  <div className="flex-1">
+                    <div className="text-sm font-medium">Next Attempt (Scheduled)</div>
+                    <div className="text-xs text-muted-foreground">Scheduled status jobs</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
                   <div className="w-5 h-5 rounded-full bg-yellow-500 shadow-sm"></div>
                   <div className="flex-1">
-                    <div className="text-sm font-medium">Next Attempt</div>
-                    <div className="text-xs text-muted-foreground">Scheduled runs</div>
+                    <div className="text-sm font-medium">Next Attempt (Waiting)</div>
+                    <div className="text-xs text-muted-foreground">Waiting status jobs</div>
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
@@ -635,11 +651,19 @@ export function OverviewView() {
             </CardHeader>
             <CardContent>
               <div className="space-y-3">
-                <div className="text-center p-3 rounded-lg bg-yellow-50 border border-yellow-200">
-                  <div className="text-3xl font-bold text-yellow-700">
-                    {timeEvents.filter(e => e.type === 'nextAttempt').length}
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="text-center p-2 rounded-lg bg-purple-50 border border-purple-200">
+                    <div className="text-lg font-bold text-purple-700">
+                      {timeEvents.filter(e => e.type === 'nextAttempt' && e.jobStatus === 'Scheduled').length}
+                    </div>
+                    <div className="text-xs text-purple-600 font-medium">Scheduled</div>
                   </div>
-                  <div className="text-sm text-yellow-600 font-medium">Scheduled</div>
+                  <div className="text-center p-2 rounded-lg bg-yellow-50 border border-yellow-200">
+                    <div className="text-lg font-bold text-yellow-700">
+                      {timeEvents.filter(e => e.type === 'nextAttempt' && e.jobStatus !== 'Scheduled').length}
+                    </div>
+                    <div className="text-xs text-yellow-600 font-medium">Other Next</div>
+                  </div>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div className="text-center p-2 rounded-lg bg-green-50 border border-green-200">
@@ -674,8 +698,7 @@ export function OverviewView() {
               <div className="space-y-2 max-h-80 overflow-y-auto">
                 {timeEvents.length > 0 ? (
                   timeEvents
-                    .sort((a, b) => b.time.getTime() - a.time.getTime())
-                    .slice(0, 8)
+                    .sort((a, b) => a.time.getTime() - b.time.getTime())
                     .map((event, index) => (
                       <div 
                         key={`${event.jobId}-${event.type}-${event.time.getTime()}`}
@@ -702,6 +725,11 @@ export function OverviewView() {
                         onMouseLeave={() => {
                           setHoveredEvent(null);
                           setTooltipPosition(null);
+                        }}
+                        onClick={() => {
+                          if (onNavigateToJob) {
+                            onNavigateToJob(event.jobId);
+                          }
                         }}
                       >
                         <div 
