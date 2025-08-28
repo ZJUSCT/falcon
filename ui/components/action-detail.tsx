@@ -8,6 +8,7 @@ import { apiClient } from '@/lib/api';
 import { Action, Job, Volume } from '@/types';
 import { LogViewer } from '@/components/log-viewer';
 import { ArrowLeft, Container, Clock, Terminal, Code, HardDrive, Settings, AlertCircle } from 'lucide-react';
+import { formatDuration2 } from '@/lib/utils';
 
 interface ActionDetailProps {
   actionId: string;
@@ -119,13 +120,10 @@ export function ActionDetail({ actionId, onBack, onJobClick }: ActionDetailProps
 
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-4xl font-bold tracking-tight font-mono">{action.id}</h1>
+          <h1 className="text-3xl font-bold tracking-tight font-mono">{action.id}</h1>
           <p className="text-muted-foreground">
-            Action details for job <span className="font-mono">{action.job_id}</span>
+            Action details for job <span className="font-mono font-bold">{action.job_id}</span>
           </p>
-        </div>
-        <div className="flex items-center gap-4">
-          <StatusBadge status={action.status} />
         </div>
       </div>
 
@@ -139,7 +137,7 @@ export function ActionDetail({ actionId, onBack, onJobClick }: ActionDetailProps
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-1 gap-4 text-sm">
+            <div className="grid grid-cols-1 gap-4 text-sm font-mono">
               <div>
                 <div className="font-medium text-muted-foreground">Status</div>
                 <div><StatusBadge status={action.status} /></div>
@@ -170,6 +168,12 @@ export function ActionDetail({ actionId, onBack, onJobClick }: ActionDetailProps
                 <div>
                   <div className="font-medium text-muted-foreground">Finished</div>
                   <div><RelativeTime date={action.finished_at} /></div>
+                </div>
+              )}
+              {action.started_at && action.finished_at && new Date(action.finished_at).getTime() - new Date(action.started_at).getTime() > 0 && (
+                <div>
+                  <div className="font-medium text-muted-foreground">Duration</div>
+                  <div>{formatDuration2(new Date(action.finished_at).getTime() - new Date(action.started_at).getTime())}</div>
                 </div>
               )}
             </div>
@@ -338,7 +342,7 @@ export function ActionDetail({ actionId, onBack, onJobClick }: ActionDetailProps
               <CardTitle className="hover:text-primary transition-colors">Related Job</CardTitle>
             </div>
             <CardDescription>
-              Information about the job that created this action • Click to view job details
+              Information about the job that created this action
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">

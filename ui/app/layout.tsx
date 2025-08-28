@@ -21,14 +21,14 @@ export default function RootLayout({
           <header className="border-b">
             <div className="container mx-auto px-4 py-4">
               <div className="flex items-center justify-between">
-                <h1 className="text-2xl font-bold">MirrorGo</h1>
-                <div className="text-sm text-muted-foreground">
+                <h1 className="text-xl sm:text-2xl font-bold">MirrorGo</h1>
+                <div className="hidden sm:block text-sm text-muted-foreground">
                   Mirror Management Dashboard
                 </div>
               </div>
             </div>
           </header>
-          <main className="container mx-auto px-4 py-8">
+          <main className="container mx-auto px-2 sm:px-4 py-4 sm:py-8">
             {children}
           </main>
         </div>

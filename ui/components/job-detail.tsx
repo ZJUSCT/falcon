@@ -8,6 +8,7 @@ import { TriggerButton } from '@/components/trigger-button';
 import { apiClient } from '@/lib/api';
 import { Job, Action, Repo } from '@/types';
 import { ArrowLeft, Container, Clock, Terminal, Globe, HardDrive, Settings } from 'lucide-react';
+import { formatDuration2 } from '@/lib/utils';
 
 interface JobDetailProps {
   jobId: string;
@@ -257,7 +258,7 @@ export function JobDetail({ jobId, onBack, onActionClick }: JobDetailProps) {
             </div>
           </div>
           <CardDescription>
-            Last 10 sync attempts for this repository • Click on actions for details
+            Last 10 sync attempts for this repository
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -278,9 +279,7 @@ export function JobDetail({ jobId, onBack, onActionClick }: JobDetailProps) {
                       <StatusBadge status={action.status} />
                       <span className="font-mono text-sm text-muted-foreground hover:text-primary transition-colors">{action.id}</span>
                     </div>
-                    <RelativeTime date={action.updated_at} className="text-sm" />
                   </div>
-                  
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
                     <div className="space-y-1">
                       <div className="flex items-center gap-2">
@@ -319,6 +318,10 @@ export function JobDetail({ jobId, onBack, onActionClick }: JobDetailProps) {
                         )}
                         {action.finished_at && (
                           <div>Finished: <RelativeTime date={action.finished_at} /></div>
+                        )}
+                        {/* duration */}
+                        {action.started_at && action.finished_at && new Date(action.finished_at).getTime() - new Date(action.started_at).getTime() > 0 && (
+                          <div>Duration: {formatDuration2(new Date(action.finished_at).getTime() - new Date(action.started_at).getTime())}</div>
                         )}
                       </div>
                     </div>

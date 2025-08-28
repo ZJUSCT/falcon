@@ -7,6 +7,7 @@ import { RelativeTime } from '@/components/relative-time';
 import { apiClient } from '@/lib/api';
 import { Action } from '@/types';
 import { Container, Clock, Terminal } from 'lucide-react';
+import { formatDuration2 } from '@/lib/utils';
 
 interface ActionsViewProps {
   onActionClick: (actionId: string) => void;
@@ -53,7 +54,7 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
 
     // Initial load with loading state
     fetchInitialActions();
-    
+
     // Background updates without loading state
     const interval = setInterval(fetchActionUpdates, 2000); // Refresh every 2 seconds
 
@@ -77,8 +78,8 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
   }
 
   const renderActionCard = (action: Action) => (
-    <Card 
-      key={action.id} 
+    <Card
+      key={action.id}
       className="hover:shadow-md transition-shadow cursor-pointer"
       onClick={() => onActionClick(action.id)}
     >
@@ -105,7 +106,7 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
               <div className="text-muted-foreground font-mono text-xs">{action.container_image}</div>
             </div>
           </div>
-          
+
           <div className="space-y-2">
             <div className="flex items-center gap-2">
               <Terminal className="h-4 w-4 text-muted-foreground" />
@@ -118,18 +119,45 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
                   Exit code: {action.container_exit_code}
                 </div>
               )}
+              {action.container_exit_code !== 0 && action.container_exit_reason && (
+                <div className="text-destructive font-mono text-xs">
+                  Exit reason: {action.container_exit_reason}
+                </div>
+              )}
             </div>
           </div>
-
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <Clock className="h-4 w-4 text-muted-foreground" />
+              <span className="font-medium">Timing</span>
+            </div>
+            <div className="pl-6 text-xs">
+              {action.started_at && (
+                <div>Started:  <RelativeTime date={action.started_at} /></div>
+              )}
+              {action.finished_at && (
+                <div>Finished: <RelativeTime date={action.finished_at} /></div>
+              )}
+              {/* duration */}
+              {action.started_at && action.finished_at && new Date(action.finished_at).getTime() - new Date(action.started_at).getTime() > 0 && (
+                <div>Duration: {formatDuration2(new Date(action.finished_at).getTime() - new Date(action.started_at).getTime())}</div>
+              )}
+            </div>
+          </div>
           <div className="space-y-2">
             <div className="flex items-center gap-2">
               <Clock className="h-4 w-4 text-muted-foreground" />
               <span className="font-medium">Details</span>
             </div>
             <div className="pl-6">
-              <div className="font-mono text-xs">{action.id}</div>
+              <div className="font-mono text-xs">id: {action.id}</div>
               {action.message && (
                 <div className="text-muted-foreground mt-1 font-mono text-xs">{action.message}</div>
+              )}
+              {action.container_name && (
+                <div className="text-muted-foreground mt-1 font-mono text-xs">
+                  container_name: {action.container_name}
+                </div>
               )}
             </div>
           </div>
@@ -146,7 +174,7 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
           {activeActions.length} active • {recentActions.length} recent
         </div>
       </div>
-      
+
       {/* Active Actions Section */}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
@@ -155,7 +183,7 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
             {activeActions.length} active actions
           </div>
         </div>
-        
+
         {activeActions.length === 0 ? (
           <Card>
             <CardContent className="flex items-center justify-center h-24">
@@ -177,7 +205,7 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
             Last {recentActions.length} actions
           </div>
         </div>
-        
+
         {recentActions.length === 0 ? (
           <Card>
             <CardContent className="flex items-center justify-center h-24">

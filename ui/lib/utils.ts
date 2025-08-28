@@ -34,7 +34,7 @@ export function formatRelativeTime(dateString: string): string {
   return `${parts} ago`;
 }
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   const seconds = Math.floor(ms / 1000);
   const minutes = Math.floor(seconds / 60);
   const hours = Math.floor(minutes / 60);
@@ -76,6 +76,48 @@ function formatDuration(ms: number): string {
   } else {
     const lastPart = parts.pop();
     return parts.join(', ') + ' and ' + lastPart;
+  }
+}
+
+export function formatDuration2(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  
+  const remainingHours = hours % 24;
+  const remainingMinutes = minutes % 60;
+  const remainingSeconds = seconds % 60;
+  
+  const parts: string[] = [];
+  
+  if (days > 0) {
+    parts.push(`${days}d`);
+  }
+  
+  if (remainingHours > 0) {
+    parts.push(`${remainingHours}h`);
+  }
+  
+  if (remainingMinutes > 0) {
+    parts.push(`${remainingMinutes}min`);
+  }
+  
+  // Only show seconds if no days are shown (to avoid too much detail for long periods)
+  if (days === 0 && remainingSeconds > 0) {
+    parts.push(`${remainingSeconds}s`);
+  }
+  
+  // If no parts, it means less than 1 second
+  if (parts.length === 0) {
+    return '<1s';
+  }
+  
+  // Join with commas and "and" for the last item
+  if (parts.length === 1) {
+    return parts[0];
+  } else {
+    return parts.join(' ');
   }
 }
 

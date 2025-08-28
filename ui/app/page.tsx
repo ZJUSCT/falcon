@@ -9,7 +9,7 @@ import { JobDetail } from '@/components/job-detail';
 import { ActionDetail } from '@/components/action-detail';
 import { Card, CardContent } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
-import { Database, Briefcase, Play, Clock } from 'lucide-react';
+import { Database, Briefcase, Play, Clock, Menu, X } from 'lucide-react';
 
 type ViewType = 'repos' | 'jobs' | 'actions' | 'queue';
 type RouteType = ViewType | { type: 'job-detail'; jobId: string } | { type: 'action-detail'; actionId: string };
@@ -23,6 +23,7 @@ const tabs = [
 
 export default function Dashboard() {
   const [currentRoute, setCurrentRoute] = useState<RouteType>('repos');
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   // Function to parse route from URL hash
   const getRouteFromHash = (): RouteType => {
@@ -67,6 +68,7 @@ export default function Dashboard() {
   const handleNavigate = (route: RouteType) => {
     setCurrentRoute(route);
     updateHash(route);
+    setIsMobileMenuOpen(false); // Close mobile menu on navigation
   };
 
   // Navigate to job detail
@@ -140,11 +142,11 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-4xl font-bold tracking-tight">Dashboard</h1>
-          <p className="text-muted-foreground">
+          <h1 className="text-2xl sm:text-4xl font-bold tracking-tight">Dashboard</h1>
+          <p className="text-sm sm:text-base text-muted-foreground">
             Monitor and manage your mirror repositories
           </p>
         </div>
@@ -152,7 +154,8 @@ export default function Dashboard() {
 
       <Card>
         <CardContent className="p-0">
-          <nav className="flex border-b">
+          {/* Desktop Navigation */}
+          <nav className="hidden sm:flex border-b">
             {tabs.map((tab) => {
               const Icon = tab.icon;
               return (
@@ -172,10 +175,62 @@ export default function Dashboard() {
               );
             })}
           </nav>
+
+          {/* Mobile Navigation */}
+          <div className="sm:hidden">
+            <div className="flex items-center justify-between p-4 border-b">
+              <div className="flex items-center gap-2">
+                {(() => {
+                  const activeTab = tabs.find(tab => tab.id === getActiveTab());
+                  const Icon = activeTab?.icon || Database;
+                  return (
+                    <>
+                      <Icon className="h-5 w-5" />
+                      <span className="font-medium">{activeTab?.label || 'Repositories'}</span>
+                    </>
+                  );
+                })()}
+              </div>
+              <button
+                onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+                className="p-2 -mr-2 text-muted-foreground hover:text-foreground"
+              >
+                {isMobileMenuOpen ? (
+                  <X className="h-5 w-5" />
+                ) : (
+                  <Menu className="h-5 w-5" />
+                )}
+              </button>
+            </div>
+
+            {/* Mobile Menu Dropdown */}
+            {isMobileMenuOpen && (
+              <div className="border-b bg-muted/30">
+                {tabs.map((tab) => {
+                  const Icon = tab.icon;
+                  return (
+                    <button
+                      key={tab.id}
+                      onClick={() => handleNavigate(tab.id)}
+                      className={cn(
+                        'w-full flex items-center gap-3 px-4 py-3 text-left transition-colors',
+                        getActiveTab() === tab.id
+                          ? 'text-primary bg-primary/10'
+                          : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+                      )}
+                    >
+                      <Icon className="h-5 w-5" />
+                      <span className="font-medium">{tab.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </CardContent>
       </Card>
 
-      <div className="min-h-[600px]">
+      <div className="min-h-[400px] sm:min-h-[600px]">
         {renderView()}
       </div>
     </div>

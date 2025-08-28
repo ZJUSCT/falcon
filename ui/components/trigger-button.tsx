@@ -139,11 +139,11 @@ export function TriggerButton({
         </div>
       )}
       
-      {!canTrigger && (
+      {/* {!canTrigger && (
         <div className="text-xs text-muted-foreground">
           Only waiting jobs can be triggered
         </div>
-      )}
+      )} */}
     </div>
   );
 }
