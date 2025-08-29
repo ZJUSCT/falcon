@@ -34,7 +34,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [hoveredEvent, setHoveredEvent] = useState<TimeEvent | null>(null);
   const [tooltipPosition, setTooltipPosition] = useState<{ x: number; y: number } | null>(null);
-  
+
   // Canvas state for zoom and pan
   const [scale, setScale] = useState(1);
   const [translateX, setTranslateX] = useState(0);
@@ -91,19 +91,19 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     if (!ready) return;
     const el = canvasRef.current;
     if (!el) return;
-  
+
     const onWheel = (e: WheelEvent) => {
       // console.log('[wheel-zoom] fired', e.deltaY, e.deltaMode, e.ctrlKey, e.cancelable);
       if (e.cancelable) e.preventDefault();
       e.stopPropagation();
-  
+
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 800 : 1;
       const dy = e.deltaY * unit;
-  
+
       const factor = dy > 0 ? 0.9 : 1.1;
       setScale(prev => Math.max(0.3, Math.min(3, prev * factor)));
     };
-  
+
     el.addEventListener('wheel', onWheel as EventListener, { passive: false, capture: true });
     return () => el.removeEventListener('wheel', onWheel as EventListener);
   }, [ready]);
@@ -144,7 +144,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     const size = Math.min(700, Math.max(400, window?.innerWidth > 1200 ? 650 : window?.innerWidth > 768 ? 550 : 400));
     const radius = size * 0.32; // Larger radius for better visibility
     const eventRadius = radius + size * 0.08;
-    
+
     return {
       size,
       radius,
@@ -275,28 +275,28 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     // Assign radius levels to prevent overlap (adjusted for 24h)
     const OVERLAP_THRESHOLD = 15; // degrees (smaller for 24h density)
     const radiusLevels: number[] = new Array(positions.length).fill(0);
-    
+
     for (let i = 0; i < positions.length; i++) {
       const currentPos = positions[i];
       let maxNearbyLevel = -1;
-      
+
       // Check all other positions for overlap
       for (let j = 0; j < positions.length; j++) {
         if (i === j) continue;
-        
+
         const otherPos = positions[j];
         let angleDiff = Math.abs(currentPos.angle - otherPos.angle);
-        
+
         // Handle angle wrapping (e.g., 350° and 10°)
         if (angleDiff > 180) {
           angleDiff = 360 - angleDiff;
         }
-        
+
         if (angleDiff < OVERLAP_THRESHOLD) {
           maxNearbyLevel = Math.max(maxNearbyLevel, radiusLevels[j]);
         }
       }
-      
+
       radiusLevels[i] = maxNearbyLevel + 1;
     }
 
@@ -327,7 +327,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
 
   const getEventColor = (type: TimeEvent['type'], jobStatus?: string) => {
     switch (type) {
-      case 'nextAttempt': 
+      case 'nextAttempt':
         return jobStatus === 'Scheduled' ? '#8b5cf6' : '#eab308'; // purple-500 for Scheduled, yellow-500 for others
       case 'lastSuccess': return '#22c55e'; // green-500
       case 'lastFailure': return '#ef4444'; // red-500
@@ -367,13 +367,319 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
           <CardHeader className="text-center">
             <div className="flex items-center justify-center gap-2">
               <Eye className="h-6 w-6" />
-              <CardTitle className="text-2xl">24-Hour Activity Clock</CardTitle>
+              <CardTitle className="text-2xl">Activity Clock</CardTitle>
             </div>
             <CardDescription className="text-base">
-              Complete daily job activity timeline • Hover over events for details • Drag to pan, scroll to zoom
+              Complete daily job activity timeline
             </CardDescription>
           </CardHeader>
-          
+
+
+          <CardContent className="flex justify-center p-4 sm:p-8" style={{ overscrollBehavior: 'contain' }}>
+            <div
+              ref={canvasRef}
+              className="relative overflow-hidden border rounded-lg bg-muted/20 overscroll-none touch-none select-none"
+              style={{
+                width: clockDims.size + 200,
+                height: clockDims.size + 200,
+                cursor: isDragging ? 'grabbing' : 'grab',
+                overscrollBehavior: 'contain'
+              }}
+              onMouseDown={handleMouseDown}
+              onMouseMove={handleMouseMove}
+              onMouseUp={handleMouseUp}
+              onMouseLeave={handleMouseUp}
+            >
+              <div
+                className="transition-transform duration-200 ease-out"
+                style={{
+                  transform: `translate(${translateX}px, ${translateY}px) scale(${scale})`,
+                  transformOrigin: 'center center',
+                  width: '100%',
+                  height: '100%',
+                  display: 'flex',
+                  justifyContent: 'center',
+                  alignItems: 'center'
+                }}
+              >
+                <svg
+                  width={clockDims.size + 300}
+                  height={clockDims.size + 300}
+                  className="drop-shadow-lg"
+                  viewBox={`0 0 ${clockDims.size + 300} ${clockDims.size + 300}`}
+                >
+                  {/* Background gradient */}
+                  <defs>
+                    <radialGradient id="clockGradient" cx="50%" cy="50%" r="50%">
+                      <stop offset="0%" stopColor="hsl(var(--card))" />
+                      <stop offset="100%" stopColor="hsl(var(--muted))" />
+                    </radialGradient>
+                    <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
+                      <feDropShadow dx="0" dy="1" stdDeviation="2" floodOpacity="0.1" />
+                    </filter>
+                  </defs>
+
+                  {/* Clock background */}
+                  <circle
+                    cx={clockDims.centerX + 100}
+                    cy={clockDims.centerY + 100}
+                    r={clockDims.radius + 12}
+                    fill="url(#clockGradient)"
+                    filter="url(#shadow)"
+                  />
+
+                  {/* Clock face */}
+                  <circle
+                    cx={clockDims.centerX + 100}
+                    cy={clockDims.centerY + 100}
+                    r={clockDims.radius}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                    className="text-border opacity-60"
+                  />
+
+                  {/* Major hour markers and labels (24h) */}
+                  {[0, 6, 12, 18].map((hour) => {
+                    const angle = hour * 15 - 90; // -90 to start from top, 15 degrees per hour
+                    const radian = (angle * Math.PI) / 180;
+                    const labelX = clockDims.centerX + 100 + Math.cos(radian) * (clockDims.radius - 30);
+                    const labelY = clockDims.centerY + 100 + Math.sin(radian) * (clockDims.radius - 30);
+                    const markerInnerX = clockDims.centerX + 100 + Math.cos(radian) * (clockDims.radius - 20);
+                    const markerInnerY = clockDims.centerY + 100 + Math.sin(radian) * (clockDims.radius - 20);
+                    const markerOuterX = clockDims.centerX + 100 + Math.cos(radian) * clockDims.radius;
+                    const markerOuterY = clockDims.centerY + 100 + Math.sin(radian) * clockDims.radius;
+
+                    return (
+                      <g key={hour}>
+                        {/* Hour marker */}
+                        <line
+                          x1={markerInnerX}
+                          y1={markerInnerY}
+                          x2={markerOuterX}
+                          y2={markerOuterY}
+                          stroke="currentColor"
+                          strokeWidth="4"
+                          className="text-foreground"
+                          strokeLinecap="round"
+                        />
+                        {/* Hour label */}
+                        <text
+                          x={labelX}
+                          y={labelY}
+                          textAnchor="middle"
+                          dominantBaseline="central"
+                          className="text-lg font-bold fill-current"
+                          style={{ fontSize: clockDims.size > 500 ? '20px' : '16px' }}
+                        >
+                          {hour.toString().padStart(2, '0')}
+                        </text>
+                      </g>
+                    );
+                  })}
+
+                  {/* Minor hour markers (24h) */}
+                  {Array.from({ length: 24 }, (_, i) => i).filter(h => ![0, 6, 12, 18].includes(h)).map((hour) => {
+                    const angle = hour * 15 - 90; // 15 degrees per hour
+                    const radian = (angle * Math.PI) / 180;
+                    const markerInnerX = clockDims.centerX + 100 + Math.cos(radian) * (clockDims.radius - 10);
+                    const markerInnerY = clockDims.centerY + 100 + Math.sin(radian) * (clockDims.radius - 10);
+                    const markerOuterX = clockDims.centerX + 100 + Math.cos(radian) * clockDims.radius;
+                    const markerOuterY = clockDims.centerY + 100 + Math.sin(radian) * clockDims.radius;
+
+                    // Different stroke width for intermediate major hours (3, 9, 15, 21)
+                    const isMidHour = [3, 9, 15, 21].includes(hour);
+
+                    return (
+                      <g key={hour}>
+                        <line
+                          x1={markerInnerX}
+                          y1={markerInnerY}
+                          x2={markerOuterX}
+                          y2={markerOuterY}
+                          stroke="currentColor"
+                          strokeWidth={isMidHour ? "3" : "1"}
+                          className="text-muted-foreground opacity-50"
+                        />
+                        {/* Optional: show small labels for intermediate major hours */}
+                        {isMidHour && clockDims.size > 500 && (
+                          <text
+                            x={clockDims.centerX + 100 + Math.cos(radian) * (clockDims.radius - 25)}
+                            y={clockDims.centerY + 100 + Math.sin(radian) * (clockDims.radius - 25)}
+                            textAnchor="middle"
+                            dominantBaseline="central"
+                            className="text-xs fill-current text-muted-foreground"
+                            style={{ fontSize: '12px' }}
+                          >
+                            {hour.toString().padStart(2, '0')}
+                          </text>
+                        )}
+                      </g>
+                    );
+                  })}
+
+                  {/* Current time hand */}
+                  <g>
+                    <line
+                      x1={clockDims.centerX + 100}
+                      y1={clockDims.centerY + 100}
+                      x2={clockDims.centerX + 100 + Math.cos((currentAngle - 90) * Math.PI / 180) * (clockDims.radius - 60)}
+                      y2={clockDims.centerY + 100 + Math.sin((currentAngle - 90) * Math.PI / 180) * (clockDims.radius - 60)}
+                      stroke="currentColor"
+                      strokeWidth="6"
+                      className="text-primary"
+                      strokeLinecap="round"
+                      filter="url(#shadow)"
+                    />
+
+                    {/* Center time display background */}
+                    <circle
+                      cx={clockDims.centerX + 100}
+                      cy={clockDims.centerY + 100}
+                      r="35"
+                      fill="hsl(var(--card))"
+                      filter="url(#shadow)"
+                      stroke="hsl(var(--border))"
+                      strokeWidth="2"
+                    />
+
+                    {/* Current time text */}
+                    <text
+                      x={clockDims.centerX + 100}
+                      y={clockDims.centerY + 100 - 8}
+                      textAnchor="middle"
+                      dominantBaseline="central"
+                      className="fill-current text-foreground font-bold"
+                      style={{ fontSize: clockDims.size > 500 ? '16px' : '12px' }}
+                    >
+                      {currentTime.toLocaleTimeString('en-US', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: false
+                      })}
+                    </text>
+
+                    {/* Date text */}
+                    <text
+                      x={clockDims.centerX + 100}
+                      y={clockDims.centerY + 100 + 10}
+                      textAnchor="middle"
+                      dominantBaseline="central"
+                      className="fill-current text-muted-foreground"
+                      style={{ fontSize: clockDims.size > 500 ? '10px' : '8px' }}
+                    >
+                      {currentTime.toLocaleDateString('en-US', {
+                        month: 'short',
+                        day: 'numeric'
+                      })}
+                    </text>
+
+                    {/* Center dot */}
+                    <circle
+                      cx={clockDims.centerX + 100}
+                      cy={clockDims.centerY + 100}
+                      r="3"
+                      fill="currentColor"
+                      className="text-primary"
+                    />
+                  </g>
+
+                  {/* Job events */}
+                  {calculateLabelPositions.map((eventPos) => {
+                    const angle = eventPos.angle - 90; // -90 to start from top
+                    const radian = (angle * Math.PI) / 180;
+
+                    // Calculate label position with radius level offset (primary position)
+                    const baseLabelRadius = clockDims.eventRadius + 45;
+                    const levelOffset = eventPos.radiusLevel * 30; // 30px between levels for larger clock
+                    const labelRadius = baseLabelRadius + levelOffset;
+                    const labelX = clockDims.centerX + 100 + Math.cos(radian) * labelRadius;
+                    const labelY = clockDims.centerY + 100 + Math.sin(radian) * labelRadius;
+
+                    // Calculate event position (aligned with label)
+                    const eventX = labelX;
+                    const eventY = labelY;
+
+                    const isHovered = hoveredEvent?.jobId === eventPos.jobId && hoveredEvent?.type === eventPos.type;
+
+                    return (
+                      <g
+                        key={`${eventPos.jobId}-${eventPos.type}-${eventPos.index}`}
+                        onMouseEnter={(e: React.MouseEvent) => {
+                          setHoveredEvent(eventPos);
+                          setTooltipPosition({
+                            x: e.clientX + 15,
+                            y: e.clientY - 10
+                          });
+                        }}
+                        onMouseMove={(e: React.MouseEvent) => {
+                          if (hoveredEvent) {
+                            setTooltipPosition({
+                              x: e.clientX + 15,
+                              y: e.clientY - 10
+                            });
+                          }
+                        }}
+                        onMouseLeave={() => {
+                          setHoveredEvent(null);
+                          setTooltipPosition(null);
+                        }}
+                        onClick={() => {
+                          if (onNavigateToJob) {
+                            onNavigateToJob(eventPos.jobId);
+                          }
+                        }}
+                        className="cursor-pointer"
+                      >
+                        {/* Event line to clock */}
+                        <line
+                          x1={clockDims.centerX + 100 + Math.cos(radian) * clockDims.radius}
+                          y1={clockDims.centerY + 100 + Math.sin(radian) * clockDims.radius}
+                          x2={eventX}
+                          y2={eventY}
+                          stroke={getEventColor(eventPos.type, eventPos.jobStatus)}
+                          strokeWidth={isHovered ? "4" : "3"}
+                          className={isHovered ? "opacity-80" : "opacity-50"}
+                          strokeDasharray={eventPos.type === 'nextAttempt' ? "6,3" : "none"}
+                        />
+
+                        {/* Event circle */}
+                        <circle
+                          cx={eventX}
+                          cy={eventY}
+                          r={isHovered ? "12" : "9"}
+                          fill={getEventColor(eventPos.type, eventPos.jobStatus)}
+                          stroke="white"
+                          strokeWidth="3"
+                          filter="url(#shadow)"
+                          className="transition-all duration-200"
+                        />
+
+                        {/* Job name label with level-based styling - positioned next to event circle */}
+                        <text
+                          x={labelX + (isHovered ? 18 : 15)} // Offset to the right of the larger circle
+                          y={labelY}
+                          textAnchor="start"
+                          dominantBaseline="central"
+                          className={`fill-current text-sm font-mono transition-all duration-200 ${isHovered ? 'text-foreground opacity-100' : 'text-muted-foreground opacity-80'
+                            }`}
+                          style={{
+                            fontSize: clockDims.size > 500 ? (14 - eventPos.radiusLevel * 0.5) + 'px' : (12 - eventPos.radiusLevel * 0.5) + 'px',
+                            fontWeight: isHovered ? 'bold' : 'normal'
+                          }}
+                        >
+                          {shortenJobName(eventPos.jobId)}
+                        </text>
+
+
+                      </g>
+                    );
+                  })}
+                </svg>
+              </div>
+            </div>
+          </CardContent>
+
           {/* Canvas Controls */}
           <div className="flex justify-center gap-2 pb-4">
             <button
@@ -405,312 +711,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
               {Math.round(scale * 100)}%
             </div>
           </div>
-          
-          <CardContent className="flex justify-center p-4 sm:p-8" style={{ overscrollBehavior: 'contain' }}>
-            <div 
-              ref={canvasRef}
-              className="relative overflow-hidden border rounded-lg bg-muted/20 overscroll-none touch-none select-none"
-              style={{ 
-                width: clockDims.size + 200, 
-                height: clockDims.size + 200,
-                cursor: isDragging ? 'grabbing' : 'grab',
-                overscrollBehavior: 'contain'
-              }}
-              onMouseDown={handleMouseDown}
-              onMouseMove={handleMouseMove}
-              onMouseUp={handleMouseUp}
-              onMouseLeave={handleMouseUp}
-            >
-              <div
-                className="transition-transform duration-200 ease-out"
-                style={{
-                  transform: `translate(${translateX}px, ${translateY}px) scale(${scale})`,
-                  transformOrigin: 'center center',
-                  width: '100%',
-                  height: '100%',
-                  display: 'flex',
-                  justifyContent: 'center',
-                  alignItems: 'center'
-                }}
-              >
-              <svg 
-                width={clockDims.size + 300} 
-                height={clockDims.size + 300} 
-                className="drop-shadow-lg"
-                viewBox={`0 0 ${clockDims.size + 300} ${clockDims.size + 300}`}
-              >
-                {/* Background gradient */}
-                <defs>
-                  <radialGradient id="clockGradient" cx="50%" cy="50%" r="50%">
-                    <stop offset="0%" stopColor="hsl(var(--card))" />
-                    <stop offset="100%" stopColor="hsl(var(--muted))" />
-                  </radialGradient>
-                  <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
-                    <feDropShadow dx="0" dy="1" stdDeviation="2" floodOpacity="0.1"/>
-                  </filter>
-                </defs>
-                
-                {/* Clock background */}
-                <circle
-                  cx={clockDims.centerX + 100}
-                  cy={clockDims.centerY + 100}
-                  r={clockDims.radius + 12}
-                  fill="url(#clockGradient)"
-                  filter="url(#shadow)"
-                />
-                
-                {/* Clock face */}
-                <circle
-                  cx={clockDims.centerX + 100}
-                  cy={clockDims.centerY + 100}
-                  r={clockDims.radius}
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="4"
-                  className="text-border opacity-60"
-                />
-                
-                {/* Major hour markers and labels (24h) */}
-                {[0, 6, 12, 18].map((hour) => {
-                  const angle = hour * 15 - 90; // -90 to start from top, 15 degrees per hour
-                  const radian = (angle * Math.PI) / 180;
-                  const labelX = clockDims.centerX + 100 + Math.cos(radian) * (clockDims.radius - 30);
-                  const labelY = clockDims.centerY + 100 + Math.sin(radian) * (clockDims.radius - 30);
-                  const markerInnerX = clockDims.centerX + 100 + Math.cos(radian) * (clockDims.radius - 20);
-                  const markerInnerY = clockDims.centerY + 100 + Math.sin(radian) * (clockDims.radius - 20);
-                  const markerOuterX = clockDims.centerX + 100 + Math.cos(radian) * clockDims.radius;
-                  const markerOuterY = clockDims.centerY + 100 + Math.sin(radian) * clockDims.radius;
 
-                  return (
-                    <g key={hour}>
-                      {/* Hour marker */}
-                      <line
-                        x1={markerInnerX}
-                        y1={markerInnerY}
-                        x2={markerOuterX}
-                        y2={markerOuterY}
-                        stroke="currentColor"
-                        strokeWidth="4"
-                        className="text-foreground"
-                        strokeLinecap="round"
-                      />
-                      {/* Hour label */}
-                      <text
-                        x={labelX}
-                        y={labelY}
-                        textAnchor="middle"
-                        dominantBaseline="central"
-                        className="text-lg font-bold fill-current"
-                        style={{ fontSize: clockDims.size > 500 ? '20px' : '16px' }}
-                      >
-                        {hour.toString().padStart(2, '0')}
-                      </text>
-                    </g>
-                  );
-                })}
-
-                {/* Minor hour markers (24h) */}
-                {Array.from({ length: 24 }, (_, i) => i).filter(h => ![0, 6, 12, 18].includes(h)).map((hour) => {
-                  const angle = hour * 15 - 90; // 15 degrees per hour
-                  const radian = (angle * Math.PI) / 180;
-                  const markerInnerX = clockDims.centerX + 100 + Math.cos(radian) * (clockDims.radius - 10);
-                  const markerInnerY = clockDims.centerY + 100 + Math.sin(radian) * (clockDims.radius - 10);
-                  const markerOuterX = clockDims.centerX + 100 + Math.cos(radian) * clockDims.radius;
-                  const markerOuterY = clockDims.centerY + 100 + Math.sin(radian) * clockDims.radius;
-
-                  // Different stroke width for intermediate major hours (3, 9, 15, 21)
-                  const isMidHour = [3, 9, 15, 21].includes(hour);
-
-                  return (
-                    <g key={hour}>
-                      <line
-                        x1={markerInnerX}
-                        y1={markerInnerY}
-                        x2={markerOuterX}
-                        y2={markerOuterY}
-                        stroke="currentColor"
-                        strokeWidth={isMidHour ? "3" : "1"}
-                        className="text-muted-foreground opacity-50"
-                      />
-                      {/* Optional: show small labels for intermediate major hours */}
-                      {isMidHour && clockDims.size > 500 && (
-                        <text
-                          x={clockDims.centerX + 100 + Math.cos(radian) * (clockDims.radius - 25)}
-                          y={clockDims.centerY + 100 + Math.sin(radian) * (clockDims.radius - 25)}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          className="text-xs fill-current text-muted-foreground"
-                          style={{ fontSize: '12px' }}
-                        >
-                          {hour.toString().padStart(2, '0')}
-                        </text>
-                      )}
-                    </g>
-                  );
-                })}
-
-                {/* Current time hand */}
-                <g>
-                  <line
-                    x1={clockDims.centerX + 100}
-                    y1={clockDims.centerY + 100}
-                    x2={clockDims.centerX + 100 + Math.cos((currentAngle - 90) * Math.PI / 180) * (clockDims.radius - 60)}
-                    y2={clockDims.centerY + 100 + Math.sin((currentAngle - 90) * Math.PI / 180) * (clockDims.radius - 60)}
-                    stroke="currentColor"
-                    strokeWidth="6"
-                    className="text-primary"
-                    strokeLinecap="round"
-                    filter="url(#shadow)"
-                  />
-                  
-                  {/* Center time display background */}
-                  <circle
-                    cx={clockDims.centerX + 100}
-                    cy={clockDims.centerY + 100}
-                    r="35"
-                    fill="hsl(var(--card))"
-                    filter="url(#shadow)"
-                    stroke="hsl(var(--border))"
-                    strokeWidth="2"
-                  />
-                  
-                  {/* Current time text */}
-                  <text
-                    x={clockDims.centerX + 100}
-                    y={clockDims.centerY + 100 - 8}
-                    textAnchor="middle"
-                    dominantBaseline="central"
-                    className="fill-current text-foreground font-bold"
-                    style={{ fontSize: clockDims.size > 500 ? '16px' : '12px' }}
-                  >
-                    {currentTime.toLocaleTimeString('en-US', { 
-                      hour: '2-digit', 
-                      minute: '2-digit',
-                      hour12: false 
-                    })}
-                  </text>
-                  
-                  {/* Date text */}
-                  <text
-                    x={clockDims.centerX + 100}
-                    y={clockDims.centerY + 100 + 10}
-                    textAnchor="middle"
-                    dominantBaseline="central"
-                    className="fill-current text-muted-foreground"
-                    style={{ fontSize: clockDims.size > 500 ? '10px' : '8px' }}
-                  >
-                    {currentTime.toLocaleDateString('en-US', { 
-                      month: 'short', 
-                      day: 'numeric' 
-                    })}
-                  </text>
-                  
-                  {/* Center dot */}
-                  <circle
-                    cx={clockDims.centerX + 100}
-                    cy={clockDims.centerY + 100}
-                    r="3"
-                    fill="currentColor"
-                    className="text-primary"
-                  />
-                </g>
-
-                {/* Job events */}
-                {calculateLabelPositions.map((eventPos) => {
-                  const angle = eventPos.angle - 90; // -90 to start from top
-                  const radian = (angle * Math.PI) / 180;
-                  
-                  // Calculate label position with radius level offset (primary position)
-                  const baseLabelRadius = clockDims.eventRadius + 45;
-                  const levelOffset = eventPos.radiusLevel * 30; // 30px between levels for larger clock
-                  const labelRadius = baseLabelRadius + levelOffset;
-                  const labelX = clockDims.centerX + 100 + Math.cos(radian) * labelRadius;
-                  const labelY = clockDims.centerY + 100 + Math.sin(radian) * labelRadius;
-                  
-                  // Calculate event position (aligned with label)
-                  const eventX = labelX;
-                  const eventY = labelY;
-                  
-                  const isHovered = hoveredEvent?.jobId === eventPos.jobId && hoveredEvent?.type === eventPos.type;
-
-                  return (
-                    <g 
-                      key={`${eventPos.jobId}-${eventPos.type}-${eventPos.index}`}
-                      onMouseEnter={(e: React.MouseEvent) => {
-                        setHoveredEvent(eventPos);
-                        setTooltipPosition({
-                          x: e.clientX + 15,
-                          y: e.clientY - 10
-                        });
-                      }}
-                      onMouseMove={(e: React.MouseEvent) => {
-                        if (hoveredEvent) {
-                          setTooltipPosition({
-                            x: e.clientX + 15,
-                            y: e.clientY - 10
-                          });
-                        }
-                      }}
-                      onMouseLeave={() => {
-                        setHoveredEvent(null);
-                        setTooltipPosition(null);
-                      }}
-                      onClick={() => {
-                        if (onNavigateToJob) {
-                          onNavigateToJob(eventPos.jobId);
-                        }
-                      }}
-                      className="cursor-pointer"
-                    >
-                      {/* Event line to clock */}
-                      <line
-                        x1={clockDims.centerX + 100 + Math.cos(radian) * clockDims.radius}
-                        y1={clockDims.centerY + 100 + Math.sin(radian) * clockDims.radius}
-                        x2={eventX}
-                        y2={eventY}
-                        stroke={getEventColor(eventPos.type, eventPos.jobStatus)}
-                        strokeWidth={isHovered ? "4" : "3"}
-                        className={isHovered ? "opacity-80" : "opacity-50"}
-                        strokeDasharray={eventPos.type === 'nextAttempt' ? "6,3" : "none"}
-                      />
-                      
-                      {/* Event circle */}
-                      <circle
-                        cx={eventX}
-                        cy={eventY}
-                        r={isHovered ? "12" : "9"}
-                        fill={getEventColor(eventPos.type, eventPos.jobStatus)}
-                        stroke="white"
-                        strokeWidth="3"
-                        filter="url(#shadow)"
-                        className="transition-all duration-200"
-                      />
-                      
-                      {/* Job name label with level-based styling - positioned next to event circle */}
-                      <text
-                        x={labelX + (isHovered ? 18 : 15)} // Offset to the right of the larger circle
-                        y={labelY}
-                        textAnchor="start"
-                        dominantBaseline="central"
-                        className={`fill-current text-sm font-mono transition-all duration-200 ${
-                          isHovered ? 'text-foreground opacity-100' : 'text-muted-foreground opacity-80'
-                        }`}
-                        style={{ 
-                          fontSize: clockDims.size > 500 ? (14 - eventPos.radiusLevel * 0.5) + 'px' : (12 - eventPos.radiusLevel * 0.5) + 'px',
-                          fontWeight: isHovered ? 'bold' : 'normal'
-                        }}
-                      >
-                        {shortenJobName(eventPos.jobId)}
-                      </text>
-                      
-
-                    </g>
-                  );
-                })}
-              </svg>
-              </div>
-            </div>
-          </CardContent>
         </Card>
 
         {/* Information Panels Below Clock */}
@@ -825,13 +826,12 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                   timeEvents
                     .sort((a, b) => a.time.getTime() - b.time.getTime())
                     .map((event, index) => (
-                      <div 
+                      <div
                         key={`${event.jobId}-${event.type}-${event.time.getTime()}`}
-                        className={`flex items-center gap-2 p-2 rounded-lg transition-all duration-200 cursor-pointer ${
-                          hoveredEvent?.jobId === event.jobId && hoveredEvent?.type === event.type
-                            ? 'bg-primary/10 shadow-sm' 
+                        className={`flex items-center gap-2 p-2 rounded-lg transition-all duration-200 cursor-pointer ${hoveredEvent?.jobId === event.jobId && hoveredEvent?.type === event.type
+                            ? 'bg-primary/10 shadow-sm'
                             : 'hover:bg-muted/50'
-                        }`}
+                          }`}
                         onMouseEnter={(e: React.MouseEvent) => {
                           setHoveredEvent(event);
                           setTooltipPosition({
@@ -857,9 +857,9 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                           }
                         }}
                       >
-                        <div 
+                        <div
                           className="w-3 h-3 rounded-full flex-shrink-0 shadow-sm transition-all duration-200"
-                          style={{ 
+                          style={{
                             backgroundColor: getEventColor(event.type, event.jobStatus),
                             transform: hoveredEvent?.jobId === event.jobId && hoveredEvent?.type === event.type ? 'scale(1.3)' : 'scale(1)'
                           }}
@@ -894,7 +894,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
           <div className="bg-popover text-popover-foreground p-3 rounded-lg shadow-lg border border-border max-w-xs animate-in fade-in-0 zoom-in-95 duration-200">
             <div className="space-y-2">
               <div className="flex items-center gap-2">
-                <div 
+                <div
                   className="w-3 h-3 rounded-full"
                   style={{ backgroundColor: getEventColor(hoveredEvent.type, hoveredEvent.jobStatus) }}
                 />
