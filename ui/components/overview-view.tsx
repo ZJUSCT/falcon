@@ -87,26 +87,26 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
 
   const ready = !loading && !error;
 
-  useEffect(() => {
-    if (!ready) return;
-    const el = canvasRef.current;
-    if (!el) return;
+  // useEffect(() => {
+  //   if (!ready) return;
+  //   const el = canvasRef.current;
+  //   if (!el) return;
 
-    const onWheel = (e: WheelEvent) => {
-      // console.log('[wheel-zoom] fired', e.deltaY, e.deltaMode, e.ctrlKey, e.cancelable);
-      if (e.cancelable) e.preventDefault();
-      e.stopPropagation();
+  //   const onWheel = (e: WheelEvent) => {
+  //     // console.log('[wheel-zoom] fired', e.deltaY, e.deltaMode, e.ctrlKey, e.cancelable);
+  //     if (e.cancelable) e.preventDefault();
+  //     e.stopPropagation();
 
-      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 800 : 1;
-      const dy = e.deltaY * unit;
+  //     const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 800 : 1;
+  //     const dy = e.deltaY * unit;
 
-      const factor = dy > 0 ? 0.9 : 1.1;
-      setScale(prev => Math.max(0.3, Math.min(3, prev * factor)));
-    };
+  //     const factor = dy > 0 ? 0.9 : 1.1;
+  //     setScale(prev => Math.max(0.3, Math.min(3, prev * factor)));
+  //   };
 
-    el.addEventListener('wheel', onWheel as EventListener, { passive: false, capture: true });
-    return () => el.removeEventListener('wheel', onWheel as EventListener);
-  }, [ready]);
+  //   el.addEventListener('wheel', onWheel as EventListener, { passive: false, capture: true });
+  //   return () => el.removeEventListener('wheel', onWheel as EventListener);
+  // }, [ready]);
 
 
   const fetchJobs = async () => {
