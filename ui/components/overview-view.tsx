@@ -250,59 +250,190 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     return jobId;
   };
 
-  // Calculate label positions with overlap prevention
+
+  const stepping_radius = 120;
+
+  // Calculate label positions with bucket-based collision detection
   const calculateLabelPositions = useMemo(() => {
     if (timeEvents.length === 0) return [];
 
+    // Sort events by time (oldest first)
+    const sortedEvents = [...timeEvents].sort((a, b) => a.time.getTime() - b.time.getTime());
+
+    // Create 360 buckets (one for each degree)
+    const buckets: Array<Array<{ event: TimeEvent; radiusLevel: number }>> = Array(360).fill(null).map(() => []);
+
+    const BASE_RADIUS = clockDims.eventRadius + 45; // Base radius for labels
+    const CHAR_WIDTH = 32; // Approximate width per character in pixels
+    const MIN_LABEL_WIDTH = 60; // Minimum label width in pixels
+
+    const getLabelWidth = (jobId: string): number => {
+      const textWidth = jobId.length * CHAR_WIDTH;
+      return Math.max(textWidth, MIN_LABEL_WIDTH);
+    };
+
+    // Function to check if two labels overlap (horizontal labels with circle detection)
+    const doLabelsOverlap = (angle1: number, radius1: number, labelWidth1: number, angle2: number, radius2: number, labelWidth2: number): boolean => {
+      // Convert angles to radians
+      const rad1 = (angle1 - 90) * Math.PI / 180; // -90 to start from top
+      const rad2 = (angle2 - 90) * Math.PI / 180;
+      
+      // Calculate positions of the circles (event dots)
+      const circleX1 = Math.cos(rad1) * radius1;
+      const circleY1 = Math.sin(rad1) * radius1;
+      const circleX2 = Math.cos(rad2) * radius2;
+      const circleY2 = Math.sin(rad2) * radius2;
+      
+      // Circle radius for overlap detection
+      const circleRadius = 12; // Event circle radius
+            
+      // Calculate positions of the text labels (horizontal, offset from circles)
+      const textOffset = 15; // Distance from circle to text start
+      const labelHeight = circleRadius * 2 + 20 + 10; // Circle height + padding
+      
+      // Calculate label rectangles (horizontal, no rotation)
+      const rect1 = {
+        x: circleX1 - textOffset, // Start at text offset from circle
+        y: circleY1 - labelHeight / 2, // Center vertically on circle
+        width: labelWidth1 + circleRadius,
+        height: labelHeight
+      };
+      
+      const rect2 = {
+        x: circleX2 - textOffset, // Start at text offset from circle
+        y: circleY2 - labelHeight / 2, // Center vertically on circle
+        width: labelWidth2 + circleRadius,
+        height: labelHeight
+      };
+      
+      // Check rectangle-to-rectangle overlap (AABB for horizontal rectangles)
+      if (rect1.x < rect2.x + rect2.width &&
+          rect1.x + rect1.width > rect2.x &&
+          rect1.y < rect2.y + rect2.height &&
+          rect1.y + rect1.height > rect2.y) {
+        return true;
+      }
+      
+      return false;
+    };
+
+    // Function to get all buckets that a label spans (considering complete label rectangle)
+    const getLabelBuckets = (angle: number, labelWidth: number): number[] => {
+      const buckets: number[] = [];
+      const textOffset = 15; // Distance from circle to text start
+      const circleRadius = 15; // Event circle radius
+      
+      // Calculate the total width of the label area (10px left of circle to 10px right of text)
+      const totalWidth = 10 + circleRadius + textOffset + labelWidth + 10;
+      
+      // Convert total width to degrees
+      const labelSpanDegrees = (totalWidth / BASE_RADIUS) * (180 / Math.PI);
+      const halfSpan = labelSpanDegrees / 2;
+      
+      // Add 10 degrees of extra span for better spacing
+      const extraSpan = 10;
+      const totalHalfSpan = halfSpan + extraSpan;
+      
+      const startAngle = (angle - totalHalfSpan + 360) % 360;
+      const endAngle = (angle + totalHalfSpan) % 360;
+      
+      if (startAngle <= endAngle) {
+        // Normal case: label spans within 0-360 range
+        for (let i = Math.floor(startAngle); i <= Math.ceil(endAngle); i++) {
+          buckets.push(i % 360);
+        }
+      } else {
+        // Wrapping case: label spans across 0/360 boundary
+        for (let i = Math.floor(startAngle); i < 360; i++) {
+          buckets.push(i);
+        }
+        for (let i = 0; i <= Math.ceil(endAngle); i++) {
+          buckets.push(i);
+        }
+      }
+      
+      return buckets;
+    };
+
+    // Process each event in chronological order
+    sortedEvents.forEach((event) => {
+      const angle = timeToAngle(event.time);
+      const labelWidth = getLabelWidth(event.jobId);
+      const labelBuckets = getLabelBuckets(angle, labelWidth);
+      
+      // Find the minimum radius level that doesn't cause overlaps
+      let radiusLevel = 0;
+      let hasOverlap = true;
+      
+      while (hasOverlap) {
+        hasOverlap = false;
+        const currentRadius = BASE_RADIUS + radiusLevel * stepping_radius; // 30px between levels
+        
+        // Check surrounding buckets for potential overlaps
+        const exactBucketIndex = Math.floor(angle) % 360;
+        const surroundingBuckets = [];
+        
+        // Check buckets within the label span plus some buffer
+        for (let offset = -10; offset <= 10; offset++) {
+          const checkBucketIndex = (exactBucketIndex + offset + 360) % 360;
+          surroundingBuckets.push(checkBucketIndex);
+        }
+        
+        // Remove duplicates
+        const uniqueBuckets = Array.from(new Set(surroundingBuckets));
+        
+        for (const checkBucketIndex of uniqueBuckets) {
+          const bucket = buckets[checkBucketIndex];
+          
+          // Check against all existing labels in this bucket
+          for (const existingLabel of bucket) {
+            const existingAngle = timeToAngle(existingLabel.event.time);
+            const existingRadius = BASE_RADIUS + existingLabel.radiusLevel * stepping_radius;
+            const existingLabelWidth = getLabelWidth(existingLabel.event.jobId);
+            
+            console.log(event.jobId, existingLabel.event.jobId ,angle, currentRadius, labelWidth, existingAngle, existingRadius, existingLabelWidth);
+            
+            if (doLabelsOverlap(angle, currentRadius, labelWidth, existingAngle, existingRadius, existingLabelWidth)) {
+              hasOverlap = true;
+              break;
+            }
+          }
+          
+          if (hasOverlap) break;
+        }
+        
+        if (hasOverlap) {
+          radiusLevel++;
+        }
+      }
+      
+      // Add this label only to the bucket corresponding to its exact angle
+      const exactBucketIndex = Math.floor(angle) % 360;
+      buckets[exactBucketIndex].push({ event, radiusLevel });
+    });
+
+    // Convert back to the original format
     const positions = timeEvents.map((event, index) => {
       const angle = timeToAngle(event.time);
+      const exactBucketIndex = Math.floor(angle) % 360;
+      const bucket = buckets[exactBucketIndex];
+      
+      // Find the radius level for this event
+      const existingLabel = bucket.find(label => 
+        label.event.jobId === event.jobId && label.event.type === event.type
+      );
+      const radiusLevel = existingLabel ? existingLabel.radiusLevel : 0;
+      
       return {
         ...event,
         index,
         angle,
-        radiusLevel: 0 // Will be assigned to prevent overlap
+        radiusLevel
       };
     });
 
-    // Sort by angle to process neighbors
-    positions.sort((a, b) => a.angle - b.angle);
-
-    // Assign radius levels to prevent overlap (adjusted for 24h)
-    const OVERLAP_THRESHOLD = 15; // degrees (smaller for 24h density)
-    const radiusLevels: number[] = new Array(positions.length).fill(0);
-    
-    for (let i = 0; i < positions.length; i++) {
-      const currentPos = positions[i];
-      let maxNearbyLevel = -1;
-      
-      // Check all other positions for overlap
-      for (let j = 0; j < positions.length; j++) {
-        if (i === j) continue;
-        
-        const otherPos = positions[j];
-        let angleDiff = Math.abs(currentPos.angle - otherPos.angle);
-        
-        // Handle angle wrapping (e.g., 350° and 10°)
-        if (angleDiff > 180) {
-          angleDiff = 360 - angleDiff;
-        }
-        
-        if (angleDiff < OVERLAP_THRESHOLD) {
-          maxNearbyLevel = Math.max(maxNearbyLevel, radiusLevels[j]);
-        }
-      }
-      
-      radiusLevels[i] = maxNearbyLevel + 1;
-    }
-
-    // Apply radius levels back to positions
-    positions.forEach((pos, i) => {
-      pos.radiusLevel = radiusLevels[i];
-    });
-
-    // Sort back to original order for consistent rendering
-    return positions.sort((a, b) => a.index - b.index);
-  }, [timeEvents, currentTime]);
+    return positions;
+  }, [timeEvents, currentTime, clockDims.eventRadius]);
 
   if (loading) {
     return (
@@ -917,3 +1048,4 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     </div>
   );
 }
+
