@@ -374,8 +374,8 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
               ref={canvasRef}
               className="relative overflow-hidden border rounded-lg bg-muted/20 overscroll-none touch-none select-none"
               style={{ 
-                width: clockDims.size + 200, 
-                height: clockDims.size + 200,
+                width: clockDims.size + 300, 
+                height: clockDims.size + 300,
                 cursor: isDragging ? 'grabbing' : 'grab',
                 overscrollBehavior: 'contain'
               }}
@@ -401,10 +401,11 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                 }}
               >
                 <svg 
-                  width={clockDims.size + 300} 
-                  height={clockDims.size + 300} 
+                  width={clockDims.size + 400} 
+                  height={clockDims.size + 400} 
                   className="drop-shadow-lg"
-                  viewBox={`0 0 ${clockDims.size + 300} ${clockDims.size + 300}`}
+                  viewBox={`0 0 ${clockDims.size + 400} ${clockDims.size + 400}`}
+                  style={{ overflow: 'visible' }}
                 >
                   {/* Background gradient */}
                   <defs>
@@ -419,8 +420,8 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                   
                   {/* Clock background */}
                   <circle
-                    cx={clockDims.centerX + 100}
-                    cy={clockDims.centerY + 100}
+                    cx={clockDims.centerX + 200}
+                    cy={clockDims.centerY + 200}
                     r={clockDims.radius + 12}
                     fill="url(#clockGradient)"
                     filter="url(#shadow)"
@@ -428,8 +429,8 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                   
                   {/* Clock face */}
                   <circle
-                    cx={clockDims.centerX + 100}
-                    cy={clockDims.centerY + 100}
+                    cx={clockDims.centerX + 200}
+                    cy={clockDims.centerY + 200}
                     r={clockDims.radius}
                     fill="none"
                     stroke="currentColor"
@@ -441,12 +442,12 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                   {[0, 6, 12, 18].map((hour) => {
                     const angle = hour * 15 - 90; // -90 to start from top, 15 degrees per hour
                     const radian = (angle * Math.PI) / 180;
-                    const labelX = clockDims.centerX + 100 + Math.cos(radian) * (clockDims.radius - 30);
-                    const labelY = clockDims.centerY + 100 + Math.sin(radian) * (clockDims.radius - 30);
-                    const markerInnerX = clockDims.centerX + 100 + Math.cos(radian) * (clockDims.radius - 20);
-                    const markerInnerY = clockDims.centerY + 100 + Math.sin(radian) * (clockDims.radius - 20);
-                    const markerOuterX = clockDims.centerX + 100 + Math.cos(radian) * clockDims.radius;
-                    const markerOuterY = clockDims.centerY + 100 + Math.sin(radian) * clockDims.radius;
+                    const labelX = clockDims.centerX + 200 + Math.cos(radian) * (clockDims.radius - 30);
+                    const labelY = clockDims.centerY + 200 + Math.sin(radian) * (clockDims.radius - 30);
+                    const markerInnerX = clockDims.centerX + 200 + Math.cos(radian) * (clockDims.radius - 20);
+                    const markerInnerY = clockDims.centerY + 200 + Math.sin(radian) * (clockDims.radius - 20);
+                    const markerOuterX = clockDims.centerX + 200 + Math.cos(radian) * clockDims.radius;
+                    const markerOuterY = clockDims.centerY + 200 + Math.sin(radian) * clockDims.radius;
 
                     return (
                       <g key={hour}>
@@ -480,10 +481,10 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                   {Array.from({ length: 24 }, (_, i) => i).filter(h => ![0, 6, 12, 18].includes(h)).map((hour) => {
                     const angle = hour * 15 - 90; // 15 degrees per hour
                     const radian = (angle * Math.PI) / 180;
-                    const markerInnerX = clockDims.centerX + 100 + Math.cos(radian) * (clockDims.radius - 10);
-                    const markerInnerY = clockDims.centerY + 100 + Math.sin(radian) * (clockDims.radius - 10);
-                    const markerOuterX = clockDims.centerX + 100 + Math.cos(radian) * clockDims.radius;
-                    const markerOuterY = clockDims.centerY + 100 + Math.sin(radian) * clockDims.radius;
+                    const markerInnerX = clockDims.centerX + 200 + Math.cos(radian) * (clockDims.radius - 10);
+                    const markerInnerY = clockDims.centerY + 200 + Math.sin(radian) * (clockDims.radius - 10);
+                    const markerOuterX = clockDims.centerX + 200 + Math.cos(radian) * clockDims.radius;
+                    const markerOuterY = clockDims.centerY + 200 + Math.sin(radian) * clockDims.radius;
 
                     // Different stroke width for intermediate major hours (3, 9, 15, 21)
                     const isMidHour = [3, 9, 15, 21].includes(hour);
@@ -502,8 +503,8 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                         {/* Optional: show small labels for intermediate major hours */}
                         {isMidHour && clockDims.size > 500 && (
                           <text
-                            x={clockDims.centerX + 100 + Math.cos(radian) * (clockDims.radius - 25)}
-                            y={clockDims.centerY + 100 + Math.sin(radian) * (clockDims.radius - 25)}
+                            x={clockDims.centerX + 200 + Math.cos(radian) * (clockDims.radius - 25)}
+                            y={clockDims.centerY + 200 + Math.sin(radian) * (clockDims.radius - 25)}
                             textAnchor="middle"
                             dominantBaseline="central"
                             className="text-xs fill-current text-muted-foreground"
@@ -519,10 +520,10 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                   {/* Current time hand */}
                   <g>
                     <line
-                      x1={clockDims.centerX + 100}
-                      y1={clockDims.centerY + 100}
-                      x2={clockDims.centerX + 100 + Math.cos((currentAngle - 90) * Math.PI / 180) * (clockDims.radius - 60)}
-                      y2={clockDims.centerY + 100 + Math.sin((currentAngle - 90) * Math.PI / 180) * (clockDims.radius - 60)}
+                      x1={clockDims.centerX + 200}
+                      y1={clockDims.centerY + 200}
+                      x2={clockDims.centerX + 200 + Math.cos((currentAngle - 90) * Math.PI / 180) * (clockDims.radius - 60)}
+                      y2={clockDims.centerY + 200 + Math.sin((currentAngle - 90) * Math.PI / 180) * (clockDims.radius - 60)}
                       stroke="currentColor"
                       strokeWidth="6"
                       className="text-primary"
@@ -532,8 +533,8 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                     
                     {/* Center time display background */}
                     <circle
-                      cx={clockDims.centerX + 100}
-                      cy={clockDims.centerY + 100}
+                      cx={clockDims.centerX + 200}
+                      cy={clockDims.centerY + 200}
                       r="35"
                       fill="hsl(var(--card))"
                       filter="url(#shadow)"
@@ -543,8 +544,8 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                     
                     {/* Current time text */}
                     <text
-                      x={clockDims.centerX + 100}
-                      y={clockDims.centerY + 100 - 8}
+                      x={clockDims.centerX + 200}
+                      y={clockDims.centerY + 200 - 8}
                       textAnchor="middle"
                       dominantBaseline="central"
                       className="fill-current text-foreground font-bold"
@@ -559,8 +560,8 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                     
                     {/* Date text */}
                     <text
-                      x={clockDims.centerX + 100}
-                      y={clockDims.centerY + 100 + 10}
+                      x={clockDims.centerX + 200}
+                      y={clockDims.centerY + 200 + 10}
                       textAnchor="middle"
                       dominantBaseline="central"
                       className="fill-current text-muted-foreground"
@@ -574,8 +575,8 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                     
                     {/* Center dot */}
                     <circle
-                      cx={clockDims.centerX + 100}
-                      cy={clockDims.centerY + 100}
+                      cx={clockDims.centerX + 200}
+                      cy={clockDims.centerY + 200}
                       r="3"
                       fill="currentColor"
                       className="text-primary"
@@ -591,8 +592,8 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                     const baseLabelRadius = clockDims.eventRadius + 45;
                     const levelOffset = eventPos.radiusLevel * 30; // 30px between levels for larger clock
                     const labelRadius = baseLabelRadius + levelOffset;
-                    const labelX = clockDims.centerX + 100 + Math.cos(radian) * labelRadius;
-                    const labelY = clockDims.centerY + 100 + Math.sin(radian) * labelRadius;
+                    const labelX = clockDims.centerX + 200 + Math.cos(radian) * labelRadius;
+                    const labelY = clockDims.centerY + 200 + Math.sin(radian) * labelRadius;
                     
                     // Calculate event position (aligned with label)
                     const eventX = labelX;
@@ -631,8 +632,8 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                       >
                         {/* Event line to clock */}
                         <line
-                          x1={clockDims.centerX + 100 + Math.cos(radian) * clockDims.radius}
-                          y1={clockDims.centerY + 100 + Math.sin(radian) * clockDims.radius}
+                          x1={clockDims.centerX + 200 + Math.cos(radian) * clockDims.radius}
+                          y1={clockDims.centerY + 200 + Math.sin(radian) * clockDims.radius}
                           x2={eventX}
                           y2={eventY}
                           stroke={getEventColor(eventPos.type, eventPos.jobStatus)}
