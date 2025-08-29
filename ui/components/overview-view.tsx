@@ -34,7 +34,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [hoveredEvent, setHoveredEvent] = useState<TimeEvent | null>(null);
   const [tooltipPosition, setTooltipPosition] = useState<{ x: number; y: number } | null>(null);
-
+  
   // Canvas state for zoom and pan
   const [scale, setScale] = useState(1);
   const [translateX, setTranslateX] = useState(0);
@@ -67,7 +67,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   }, []);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    if (e.button === 0) { // Left click only
+    if (e.button === 0) {
       setIsDragging(true);
       setDragStart({ x: e.clientX - translateX, y: e.clientY - translateY });
     }
@@ -84,30 +84,26 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     setIsDragging(false);
   }, []);
 
+  // Touch drag handlers (no zoom)
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    if (e.touches.length !== 1) return;
+    e.preventDefault();
+    const t = e.touches[0];
+    setIsDragging(true);
+    setDragStart({ x: t.clientX - translateX, y: t.clientY - translateY });
+  }, [translateX, translateY]);
 
-  const ready = !loading && !error;
+  const handleTouchMove = useCallback((e: React.TouchEvent) => {
+    if (!isDragging || e.touches.length !== 1) return;
+    e.preventDefault();
+    const t = e.touches[0];
+    setTranslateX(t.clientX - dragStart.x);
+    setTranslateY(t.clientY - dragStart.y);
+  }, [isDragging, dragStart]);
 
-  // useEffect(() => {
-  //   if (!ready) return;
-  //   const el = canvasRef.current;
-  //   if (!el) return;
-
-  //   const onWheel = (e: WheelEvent) => {
-  //     // console.log('[wheel-zoom] fired', e.deltaY, e.deltaMode, e.ctrlKey, e.cancelable);
-  //     if (e.cancelable) e.preventDefault();
-  //     e.stopPropagation();
-
-  //     const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 800 : 1;
-  //     const dy = e.deltaY * unit;
-
-  //     const factor = dy > 0 ? 0.9 : 1.1;
-  //     setScale(prev => Math.max(0.3, Math.min(3, prev * factor)));
-  //   };
-
-  //   el.addEventListener('wheel', onWheel as EventListener, { passive: false, capture: true });
-  //   return () => el.removeEventListener('wheel', onWheel as EventListener);
-  // }, [ready]);
-
+  const handleTouchEnd = useCallback(() => {
+    setIsDragging(false);
+  }, []);
 
   const fetchJobs = async () => {
     try {
@@ -144,7 +140,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     const size = Math.min(700, Math.max(400, window?.innerWidth > 1200 ? 650 : window?.innerWidth > 768 ? 550 : 400));
     const radius = size * 0.32; // Larger radius for better visibility
     const eventRadius = radius + size * 0.08;
-
+    
     return {
       size,
       radius,
@@ -252,7 +248,6 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   // Shorten job name for display
   const shortenJobName = (jobId: string) => {
     return jobId;
-    // return jobId.substring(0, 9) + '...';
   };
 
   // Calculate label positions with overlap prevention
@@ -275,28 +270,28 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     // Assign radius levels to prevent overlap (adjusted for 24h)
     const OVERLAP_THRESHOLD = 15; // degrees (smaller for 24h density)
     const radiusLevels: number[] = new Array(positions.length).fill(0);
-
+    
     for (let i = 0; i < positions.length; i++) {
       const currentPos = positions[i];
       let maxNearbyLevel = -1;
-
+      
       // Check all other positions for overlap
       for (let j = 0; j < positions.length; j++) {
         if (i === j) continue;
-
+        
         const otherPos = positions[j];
         let angleDiff = Math.abs(currentPos.angle - otherPos.angle);
-
+        
         // Handle angle wrapping (e.g., 350° and 10°)
         if (angleDiff > 180) {
           angleDiff = 360 - angleDiff;
         }
-
+        
         if (angleDiff < OVERLAP_THRESHOLD) {
           maxNearbyLevel = Math.max(maxNearbyLevel, radiusLevels[j]);
         }
       }
-
+      
       radiusLevels[i] = maxNearbyLevel + 1;
     }
 
@@ -373,14 +368,13 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
               Complete daily job activity timeline
             </CardDescription>
           </CardHeader>
-
-
+          
           <CardContent className="flex justify-center p-4 sm:p-8" style={{ overscrollBehavior: 'contain' }}>
-            <div
+            <div 
               ref={canvasRef}
               className="relative overflow-hidden border rounded-lg bg-muted/20 overscroll-none touch-none select-none"
-              style={{
-                width: clockDims.size + 200,
+              style={{ 
+                width: clockDims.size + 200, 
                 height: clockDims.size + 200,
                 cursor: isDragging ? 'grabbing' : 'grab',
                 overscrollBehavior: 'contain'
@@ -389,6 +383,10 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
               onMouseLeave={handleMouseUp}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              onTouchCancel={handleTouchEnd}
             >
               <div
                 className="transition-transform duration-200 ease-out"
@@ -402,9 +400,9 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                   alignItems: 'center'
                 }}
               >
-                <svg
-                  width={clockDims.size + 300}
-                  height={clockDims.size + 300}
+                <svg 
+                  width={clockDims.size + 300} 
+                  height={clockDims.size + 300} 
                   className="drop-shadow-lg"
                   viewBox={`0 0 ${clockDims.size + 300} ${clockDims.size + 300}`}
                 >
@@ -415,10 +413,10 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                       <stop offset="100%" stopColor="hsl(var(--muted))" />
                     </radialGradient>
                     <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
-                      <feDropShadow dx="0" dy="1" stdDeviation="2" floodOpacity="0.1" />
+                      <feDropShadow dx="0" dy="1" stdDeviation="2" floodOpacity="0.1"/>
                     </filter>
                   </defs>
-
+                  
                   {/* Clock background */}
                   <circle
                     cx={clockDims.centerX + 100}
@@ -427,7 +425,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                     fill="url(#clockGradient)"
                     filter="url(#shadow)"
                   />
-
+                  
                   {/* Clock face */}
                   <circle
                     cx={clockDims.centerX + 100}
@@ -438,7 +436,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                     strokeWidth="4"
                     className="text-border opacity-60"
                   />
-
+                  
                   {/* Major hour markers and labels (24h) */}
                   {[0, 6, 12, 18].map((hour) => {
                     const angle = hour * 15 - 90; // -90 to start from top, 15 degrees per hour
@@ -531,7 +529,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                       strokeLinecap="round"
                       filter="url(#shadow)"
                     />
-
+                    
                     {/* Center time display background */}
                     <circle
                       cx={clockDims.centerX + 100}
@@ -542,7 +540,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                       stroke="hsl(var(--border))"
                       strokeWidth="2"
                     />
-
+                    
                     {/* Current time text */}
                     <text
                       x={clockDims.centerX + 100}
@@ -552,13 +550,13 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                       className="fill-current text-foreground font-bold"
                       style={{ fontSize: clockDims.size > 500 ? '16px' : '12px' }}
                     >
-                      {currentTime.toLocaleTimeString('en-US', {
-                        hour: '2-digit',
+                      {currentTime.toLocaleTimeString('en-US', { 
+                        hour: '2-digit', 
                         minute: '2-digit',
-                        hour12: false
+                        hour12: false 
                       })}
                     </text>
-
+                    
                     {/* Date text */}
                     <text
                       x={clockDims.centerX + 100}
@@ -568,12 +566,12 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                       className="fill-current text-muted-foreground"
                       style={{ fontSize: clockDims.size > 500 ? '10px' : '8px' }}
                     >
-                      {currentTime.toLocaleDateString('en-US', {
-                        month: 'short',
-                        day: 'numeric'
+                      {currentTime.toLocaleDateString('en-US', { 
+                        month: 'short', 
+                        day: 'numeric' 
                       })}
                     </text>
-
+                    
                     {/* Center dot */}
                     <circle
                       cx={clockDims.centerX + 100}
@@ -588,22 +586,22 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                   {calculateLabelPositions.map((eventPos) => {
                     const angle = eventPos.angle - 90; // -90 to start from top
                     const radian = (angle * Math.PI) / 180;
-
+                    
                     // Calculate label position with radius level offset (primary position)
                     const baseLabelRadius = clockDims.eventRadius + 45;
                     const levelOffset = eventPos.radiusLevel * 30; // 30px between levels for larger clock
                     const labelRadius = baseLabelRadius + levelOffset;
                     const labelX = clockDims.centerX + 100 + Math.cos(radian) * labelRadius;
                     const labelY = clockDims.centerY + 100 + Math.sin(radian) * labelRadius;
-
+                    
                     // Calculate event position (aligned with label)
                     const eventX = labelX;
                     const eventY = labelY;
-
+                    
                     const isHovered = hoveredEvent?.jobId === eventPos.jobId && hoveredEvent?.type === eventPos.type;
 
                     return (
-                      <g
+                      <g 
                         key={`${eventPos.jobId}-${eventPos.type}-${eventPos.index}`}
                         onMouseEnter={(e: React.MouseEvent) => {
                           setHoveredEvent(eventPos);
@@ -642,7 +640,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                           className={isHovered ? "opacity-80" : "opacity-50"}
                           strokeDasharray={eventPos.type === 'nextAttempt' ? "6,3" : "none"}
                         />
-
+                        
                         {/* Event circle */}
                         <circle
                           cx={eventX}
@@ -654,23 +652,24 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                           filter="url(#shadow)"
                           className="transition-all duration-200"
                         />
-
+                        
                         {/* Job name label with level-based styling - positioned next to event circle */}
                         <text
                           x={labelX + (isHovered ? 18 : 15)} // Offset to the right of the larger circle
                           y={labelY}
                           textAnchor="start"
                           dominantBaseline="central"
-                          className={`fill-current text-sm font-mono transition-all duration-200 ${isHovered ? 'text-foreground opacity-100' : 'text-muted-foreground opacity-80'
-                            }`}
-                          style={{
+                          className={`fill-current text-sm font-mono transition-all duration-200 ${
+                            isHovered ? 'text-foreground opacity-100' : 'text-muted-foreground opacity-80'
+                          }`}
+                          style={{ 
                             fontSize: clockDims.size > 500 ? (14 - eventPos.radiusLevel * 0.5) + 'px' : (12 - eventPos.radiusLevel * 0.5) + 'px',
                             fontWeight: isHovered ? 'bold' : 'normal'
                           }}
                         >
                           {shortenJobName(eventPos.jobId)}
                         </text>
-
+                        
 
                       </g>
                     );
@@ -826,12 +825,13 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                   timeEvents
                     .sort((a, b) => a.time.getTime() - b.time.getTime())
                     .map((event, index) => (
-                      <div
+                      <div 
                         key={`${event.jobId}-${event.type}-${event.time.getTime()}`}
-                        className={`flex items-center gap-2 p-2 rounded-lg transition-all duration-200 cursor-pointer ${hoveredEvent?.jobId === event.jobId && hoveredEvent?.type === event.type
-                            ? 'bg-primary/10 shadow-sm'
+                        className={`flex items-center gap-2 p-2 rounded-lg transition-all duration-200 cursor-pointer ${
+                          hoveredEvent?.jobId === event.jobId && hoveredEvent?.type === event.type
+                            ? 'bg-primary/10 shadow-sm' 
                             : 'hover:bg-muted/50'
-                          }`}
+                        }`}
                         onMouseEnter={(e: React.MouseEvent) => {
                           setHoveredEvent(event);
                           setTooltipPosition({
@@ -857,9 +857,9 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                           }
                         }}
                       >
-                        <div
+                        <div 
                           className="w-3 h-3 rounded-full flex-shrink-0 shadow-sm transition-all duration-200"
-                          style={{
+                          style={{ 
                             backgroundColor: getEventColor(event.type, event.jobStatus),
                             transform: hoveredEvent?.jobId === event.jobId && hoveredEvent?.type === event.type ? 'scale(1.3)' : 'scale(1)'
                           }}
@@ -894,7 +894,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
           <div className="bg-popover text-popover-foreground p-3 rounded-lg shadow-lg border border-border max-w-xs animate-in fade-in-0 zoom-in-95 duration-200">
             <div className="space-y-2">
               <div className="flex items-center gap-2">
-                <div
+                <div 
                   className="w-3 h-3 rounded-full"
                   style={{ backgroundColor: getEventColor(hoveredEvent.type, hoveredEvent.jobStatus) }}
                 />
