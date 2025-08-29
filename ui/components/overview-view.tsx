@@ -84,11 +84,30 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     setIsDragging(false);
   }, []);
 
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault();
-    const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    setScale(prev => Math.max(0.3, Math.min(3, prev * delta)));
-  }, []);
+
+  const ready = !loading && !error;
+
+  useEffect(() => {
+    if (!ready) return;
+    const el = canvasRef.current;
+    if (!el) return;
+  
+    const onWheel = (e: WheelEvent) => {
+      // console.log('[wheel-zoom] fired', e.deltaY, e.deltaMode, e.ctrlKey, e.cancelable);
+      if (e.cancelable) e.preventDefault();
+      e.stopPropagation();
+  
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 800 : 1;
+      const dy = e.deltaY * unit;
+  
+      const factor = dy > 0 ? 0.9 : 1.1;
+      setScale(prev => Math.max(0.3, Math.min(3, prev * factor)));
+    };
+  
+    el.addEventListener('wheel', onWheel as EventListener, { passive: false, capture: true });
+    return () => el.removeEventListener('wheel', onWheel as EventListener);
+  }, [ready]);
+
 
   const fetchJobs = async () => {
     try {
@@ -387,20 +406,20 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
             </div>
           </div>
           
-          <CardContent className="flex justify-center p-4 sm:p-8">
+          <CardContent className="flex justify-center p-4 sm:p-8" style={{ overscrollBehavior: 'contain' }}>
             <div 
               ref={canvasRef}
-              className="relative overflow-hidden border rounded-lg bg-muted/20"
+              className="relative overflow-hidden border rounded-lg bg-muted/20 overscroll-none touch-none select-none"
               style={{ 
                 width: clockDims.size + 200, 
                 height: clockDims.size + 200,
-                cursor: isDragging ? 'grabbing' : 'grab'
+                cursor: isDragging ? 'grabbing' : 'grab',
+                overscrollBehavior: 'contain'
               }}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
               onMouseLeave={handleMouseUp}
-              onWheel={handleWheel}
             >
               <div
                 className="transition-transform duration-200 ease-out"
