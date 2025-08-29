@@ -21,7 +21,7 @@ import (
 var jobQueue *Queue
 
 const (
-	defaultMaxParallel = 5
+	defaultMaxParallel = 10
 )
 
 var dockerClient *client.Client

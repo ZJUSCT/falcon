@@ -1,12 +1,12 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { StatusBadge } from '@/components/status-badge';
 import { RelativeTime } from '@/components/relative-time';
 import { apiClient } from '@/lib/api';
 import { Job } from '@/types';
-import { Clock, Eye } from 'lucide-react';
+import { Clock, Eye, ZoomIn, ZoomOut, RotateCcw, Move } from 'lucide-react';
 
 interface TimeEvent {
   time: Date;
@@ -34,6 +34,14 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [hoveredEvent, setHoveredEvent] = useState<TimeEvent | null>(null);
   const [tooltipPosition, setTooltipPosition] = useState<{ x: number; y: number } | null>(null);
+  
+  // Canvas state for zoom and pan
+  const [scale, setScale] = useState(1);
+  const [translateX, setTranslateX] = useState(0);
+  const [translateY, setTranslateY] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const canvasRef = useRef<HTMLDivElement>(null);
 
   // Update current time every second
   useEffect(() => {
@@ -41,6 +49,45 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
       setCurrentTime(new Date());
     }, 1000);
     return () => clearInterval(interval);
+  }, []);
+
+  // Canvas interaction handlers
+  const handleZoomIn = useCallback(() => {
+    setScale(prev => Math.min(prev * 1.2, 3));
+  }, []);
+
+  const handleZoomOut = useCallback(() => {
+    setScale(prev => Math.max(prev / 1.2, 0.3));
+  }, []);
+
+  const handleReset = useCallback(() => {
+    setScale(1);
+    setTranslateX(0);
+    setTranslateY(0);
+  }, []);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    if (e.button === 0) { // Left click only
+      setIsDragging(true);
+      setDragStart({ x: e.clientX - translateX, y: e.clientY - translateY });
+    }
+  }, [translateX, translateY]);
+
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    if (isDragging) {
+      setTranslateX(e.clientX - dragStart.x);
+      setTranslateY(e.clientY - dragStart.y);
+    }
+  }, [isDragging, dragStart]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsDragging(false);
+  }, []);
+
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? 0.9 : 1.1;
+    setScale(prev => Math.max(0.3, Math.min(3, prev * delta)));
   }, []);
 
   const fetchJobs = async () => {
@@ -296,7 +343,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
       </div>
 
       <div className="space-y-8">
-        {/* Clock View - Now Full Width and Enlarged */}
+        {/* Clock View - Now Full Width and Enlarged with Canvas Controls */}
         <Card>
           <CardHeader className="text-center">
             <div className="flex items-center justify-center gap-2">
@@ -304,11 +351,69 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
               <CardTitle className="text-2xl">24-Hour Activity Clock</CardTitle>
             </div>
             <CardDescription className="text-base">
-              Complete daily job activity timeline • Hover over events for details
+              Complete daily job activity timeline • Hover over events for details • Drag to pan, scroll to zoom
             </CardDescription>
           </CardHeader>
+          
+          {/* Canvas Controls */}
+          <div className="flex justify-center gap-2 pb-4">
+            <button
+              onClick={handleZoomIn}
+              className="flex items-center gap-1 px-3 py-1 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+              title="Zoom In"
+            >
+              <ZoomIn className="h-4 w-4" />
+              Zoom In
+            </button>
+            <button
+              onClick={handleZoomOut}
+              className="flex items-center gap-1 px-3 py-1 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+              title="Zoom Out"
+            >
+              <ZoomOut className="h-4 w-4" />
+              Zoom Out
+            </button>
+            <button
+              onClick={handleReset}
+              className="flex items-center gap-1 px-3 py-1 text-sm bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/90 transition-colors"
+              title="Reset View"
+            >
+              <RotateCcw className="h-4 w-4" />
+              Reset
+            </button>
+            <div className="flex items-center gap-1 px-3 py-1 text-sm bg-muted text-muted-foreground rounded-md">
+              <Move className="h-4 w-4" />
+              {Math.round(scale * 100)}%
+            </div>
+          </div>
+          
           <CardContent className="flex justify-center p-4 sm:p-8">
-            <div className="relative" style={{ width: clockDims.size + 200, height: clockDims.size + 200 }}>
+            <div 
+              ref={canvasRef}
+              className="relative overflow-hidden border rounded-lg bg-muted/20"
+              style={{ 
+                width: clockDims.size + 200, 
+                height: clockDims.size + 200,
+                cursor: isDragging ? 'grabbing' : 'grab'
+              }}
+              onMouseDown={handleMouseDown}
+              onMouseMove={handleMouseMove}
+              onMouseUp={handleMouseUp}
+              onMouseLeave={handleMouseUp}
+              onWheel={handleWheel}
+            >
+              <div
+                className="transition-transform duration-200 ease-out"
+                style={{
+                  transform: `translate(${translateX}px, ${translateY}px) scale(${scale})`,
+                  transformOrigin: 'center center',
+                  width: '100%',
+                  height: '100%',
+                  display: 'flex',
+                  justifyContent: 'center',
+                  alignItems: 'center'
+                }}
+              >
               <svg 
                 width={clockDims.size + 300} 
                 height={clockDims.size + 300} 
@@ -584,6 +689,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                   );
                 })}
               </svg>
+              </div>
             </div>
           </CardContent>
         </Card>
