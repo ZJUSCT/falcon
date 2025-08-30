@@ -196,13 +196,14 @@ func handleActionsRecent(w http.ResponseWriter, r *http.Request) {
 
 func handleQueue(w http.ResponseWriter, r *http.Request) {
 	if jobQueue == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"paused": true, "queue": []string{}})
+		writeJSON(w, http.StatusOK, map[string]any{"paused": true, "queue": []string{}, "max_concurrency": 1})
 		return
 	}
 	out := jobQueue.Snapshot()
 	resp := map[string]any{
-		"paused": jobQueue.IsPaused(),
-		"queue":  out,
+		"paused":          jobQueue.IsPaused(),
+		"max_concurrency": jobQueue.GetMaxConcurrency(),
+		"queue":           out,
 	}
 	if out == nil {
 		resp["queue"] = []string{}
@@ -253,7 +254,7 @@ func handleQueuePause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobQueue.SetPaused(true)
-	_ = dbSetQueuePaused(true)
+	_ = dbSetQueueState(true, jobQueue.GetMaxConcurrency())
 	writeJSON(w, http.StatusOK, map[string]any{"paused": true})
 }
 
@@ -263,8 +264,33 @@ func handleQueueContinue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobQueue.SetPaused(false)
-	_ = dbSetQueuePaused(false)
+	_ = dbSetQueueState(false, jobQueue.GetMaxConcurrency())
 	writeJSON(w, http.StatusOK, map[string]any{"paused": false})
+}
+
+// POST /api/queue/set_max_concurrency?max=<number>
+func handleQueueSetMaxConcurrency(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	maxStr := strings.TrimSpace(r.URL.Query().Get("max"))
+	if maxStr == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing max parameter"})
+		return
+	}
+	max, err := strconv.Atoi(maxStr)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid max value, must be a number"})
+		return
+	}
+	if max < 1 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "max concurrency must be at least 1"})
+		return
+	}
+	jobQueue.SetMaxConcurrency(max)
+	_ = dbSetQueueState(jobQueue.IsPaused(), max)
+	writeJSON(w, http.StatusOK, map[string]any{"max_concurrency": max})
 }
 
 // POST /api/queue/move_to_head?repo_id=<id>
@@ -282,7 +308,7 @@ func handleQueueMoveToHead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ok := jobQueue.MoveToHead(id)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "queue": jobQueue.Snapshot()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "queue": jobQueue.Snapshot(), "max_concurrency": jobQueue.GetMaxConcurrency()})
 }
 
 func handleQueueMoveToTail(w http.ResponseWriter, r *http.Request) {
@@ -296,7 +322,7 @@ func handleQueueMoveToTail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ok := jobQueue.MoveToTail(id)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "queue": jobQueue.Snapshot()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "queue": jobQueue.Snapshot(), "max_concurrency": jobQueue.GetMaxConcurrency()})
 }
 
 func handleQueueMoveBefore(w http.ResponseWriter, r *http.Request) {
@@ -311,7 +337,7 @@ func handleQueueMoveBefore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ok := jobQueue.MoveBefore(target, ref)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "queue": jobQueue.Snapshot()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "queue": jobQueue.Snapshot(), "max_concurrency": jobQueue.GetMaxConcurrency()})
 }
 
 func handleQueueMoveAfter(w http.ResponseWriter, r *http.Request) {
@@ -326,7 +352,7 @@ func handleQueueMoveAfter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ok := jobQueue.MoveAfter(target, ref)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "queue": jobQueue.Snapshot()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "queue": jobQueue.Snapshot(), "max_concurrency": jobQueue.GetMaxConcurrency()})
 }
 
 // POST /api/queue/delete?repo_id=<id>  removes all occurrences of the repo from the queue
@@ -361,7 +387,7 @@ func handleQueueDelete(w http.ResponseWriter, r *http.Request) {
 	if job, ok := Jobs[id]; ok {
 		_ = upsertJob(job)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"removed": removed, "queue": jobQueue.Snapshot(), "paused": jobQueue.IsPaused()})
+	writeJSON(w, http.StatusOK, map[string]any{"removed": removed, "queue": jobQueue.Snapshot(), "paused": jobQueue.IsPaused(), "max_concurrency": jobQueue.GetMaxConcurrency()})
 }
 
 // resolve a path inside an action's log directory safely
@@ -644,6 +670,7 @@ func startWebServer(addr string) {
 	http.HandleFunc("/api/queue", handleQueue)
 	http.HandleFunc("/api/queue/pause", handleQueuePause)
 	http.HandleFunc("/api/queue/continue", handleQueueContinue)
+	http.HandleFunc("/api/queue/set_max_concurrency", handleQueueSetMaxConcurrency)
 	http.HandleFunc("/api/queue/move_to_head", handleQueueMoveToHead)
 	http.HandleFunc("/api/queue/move_to_tail", handleQueueMoveToTail)
 	http.HandleFunc("/api/queue/move_before", handleQueueMoveBefore)

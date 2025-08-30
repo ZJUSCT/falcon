@@ -27,6 +27,8 @@ interface OverviewViewProps {
   onNavigateToJob?: (jobId: string) => void;
 }
 
+const stepping_radius = 12;
+
 export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
@@ -34,7 +36,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [hoveredEvent, setHoveredEvent] = useState<TimeEvent | null>(null);
   const [tooltipPosition, setTooltipPosition] = useState<{ x: number; y: number } | null>(null);
-  
+
   // Canvas state for zoom and pan
   const [scale, setScale] = useState(1);
   const [translateX, setTranslateX] = useState(0);
@@ -140,7 +142,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     const size = Math.min(700, Math.max(400, window?.innerWidth > 1200 ? 650 : window?.innerWidth > 768 ? 550 : 400));
     const radius = size * 0.32; // Larger radius for better visibility
     const eventRadius = radius + size * 0.08;
-    
+
     return {
       size,
       radius,
@@ -251,165 +253,162 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   };
 
 
-  const stepping_radius = 120;
 
-  // Calculate label positions with bucket-based collision detection
   const calculateLabelPositions = useMemo(() => {
     if (timeEvents.length === 0) return [];
 
-    // Sort events by time (oldest first)
     const sortedEvents = [...timeEvents].sort((a, b) => a.time.getTime() - b.time.getTime());
 
-    // Create 360 buckets (one for each degree)
-    const buckets: Array<Array<{ event: TimeEvent; radiusLevel: number }>> = Array(360).fill(null).map(() => []);
+    const buckets: Array<Array<{
+      event: TimeEvent;
+      radiusLevel: number;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      angle: number;
+    }>> = Array(360).fill(null).map(() => []);
 
-    const BASE_RADIUS = clockDims.eventRadius + 45; // Base radius for labels
-    const CHAR_WIDTH = 32; // Approximate width per character in pixels
-    const MIN_LABEL_WIDTH = 60; // Minimum label width in pixels
+    const BASE_RADIUS = clockDims.eventRadius + 45;
+    const CHAR_WIDTH = 8;
 
     const getLabelWidth = (jobId: string): number => {
-      const textWidth = jobId.length * CHAR_WIDTH;
-      return Math.max(textWidth, MIN_LABEL_WIDTH);
+      return CHAR_WIDTH + jobId.length * CHAR_WIDTH;
     };
 
-    // Function to check if two labels overlap (horizontal labels with circle detection)
-    const doLabelsOverlap = (angle1: number, radius1: number, labelWidth1: number, angle2: number, radius2: number, labelWidth2: number): boolean => {
-      // Convert angles to radians
-      const rad1 = (angle1 - 90) * Math.PI / 180; // -90 to start from top
-      const rad2 = (angle2 - 90) * Math.PI / 180;
-      
-      // Calculate positions of the circles (event dots)
-      const circleX1 = Math.cos(rad1) * radius1;
-      const circleY1 = Math.sin(rad1) * radius1;
-      const circleX2 = Math.cos(rad2) * radius2;
-      const circleY2 = Math.sin(rad2) * radius2;
-      
-      // Circle radius for overlap detection
-      const circleRadius = 12; // Event circle radius
-            
-      // Calculate positions of the text labels (horizontal, offset from circles)
-      const textOffset = 15; // Distance from circle to text start
-      const labelHeight = circleRadius * 2 + 20 + 10; // Circle height + padding
-      
-      // Calculate label rectangles (horizontal, no rotation)
-      const rect1 = {
-        x: circleX1 - textOffset, // Start at text offset from circle
-        y: circleY1 - labelHeight / 2, // Center vertically on circle
-        width: labelWidth1 + circleRadius,
-        height: labelHeight
+    const circleRadius = 12;
+
+    const getBodyRectangle = (angle: number, radius: number, labelWidth: number): { x: number, y: number, width: number, height: number } => {
+      const rad = (angle - 90) * Math.PI / 180;
+      return {
+        x: Math.cos(rad) * radius - circleRadius,
+        y: Math.sin(rad) * radius - circleRadius,
+        width: labelWidth + circleRadius * 2,
+        height: circleRadius * 2
       };
-      
-      const rect2 = {
-        x: circleX2 - textOffset, // Start at text offset from circle
-        y: circleY2 - labelHeight / 2, // Center vertically on circle
-        width: labelWidth2 + circleRadius,
-        height: labelHeight
-      };
-      
-      // Check rectangle-to-rectangle overlap (AABB for horizontal rectangles)
+    };
+
+    const getBodyRectangleDegrees = (
+      rect: BodyRectangle,
+      angle: number,
+    ): [number, number] => {
+      const rad = (angle - 90) * Math.PI / 180;
+
+      const x = rect.x;
+      const y = rect.y;
+      const width = rect.width;
+      const height = rect.height;
+
+      const corners: Array<[number, number]> = [
+        [x, y],
+        [x + width, y],
+        [x, y + height],
+        [x + width, y + height],
+      ];
+
+      const norm = (d: number) => ((d % 360) + 360) % 360;
+      const toUiDeg = (px: number, py: number) =>
+        norm(Math.atan2(py, px) * 180 / Math.PI + 90);
+
+      const angs = corners.map(([px, py]) => toUiDeg(px, py)).sort((a, b) => a - b);
+
+      let maxGap = -1;
+      let idx = -1;
+      for (let i = 0; i < angs.length; i++) {
+        const a = angs[i];
+        const b = i === angs.length - 1 ? angs[0] + 360 : angs[i + 1];
+        const gap = b - a;
+        if (gap > maxGap) {
+          maxGap = gap;
+          idx = i;
+        }
+      }
+
+      const start = angs[(idx + 1) % angs.length];
+      const end = angs[idx];
+
+      return [Math.floor(start), Math.ceil(end)];
+    };
+
+    type BodyRectangle = ReturnType<typeof getBodyRectangle>;
+
+    const doLabelsOverlap = (rect1: BodyRectangle, rect2: BodyRectangle): boolean => {
+
       if (rect1.x < rect2.x + rect2.width &&
-          rect1.x + rect1.width > rect2.x &&
-          rect1.y < rect2.y + rect2.height &&
-          rect1.y + rect1.height > rect2.y) {
+        rect1.x + rect1.width > rect2.x &&
+        rect1.y < rect2.y + rect2.height &&
+        rect1.y + rect1.height > rect2.y) {
         return true;
       }
-      
+
       return false;
     };
 
-    // Function to get all buckets that a label spans (considering complete label rectangle)
-    const getLabelBuckets = (angle: number, labelWidth: number): number[] => {
-      const buckets: number[] = [];
-      const textOffset = 15; // Distance from circle to text start
-      const circleRadius = 15; // Event circle radius
-      
-      // Calculate the total width of the label area (10px left of circle to 10px right of text)
-      const totalWidth = 10 + circleRadius + textOffset + labelWidth + 10;
-      
-      // Convert total width to degrees
-      const labelSpanDegrees = (totalWidth / BASE_RADIUS) * (180 / Math.PI);
-      const halfSpan = labelSpanDegrees / 2;
-      
-      // Add 10 degrees of extra span for better spacing
-      const extraSpan = 10;
-      const totalHalfSpan = halfSpan + extraSpan;
-      
-      const startAngle = (angle - totalHalfSpan + 360) % 360;
-      const endAngle = (angle + totalHalfSpan) % 360;
-      
-      if (startAngle <= endAngle) {
-        // Normal case: label spans within 0-360 range
-        for (let i = Math.floor(startAngle); i <= Math.ceil(endAngle); i++) {
-          buckets.push(i % 360);
-        }
-      } else {
-        // Wrapping case: label spans across 0/360 boundary
-        for (let i = Math.floor(startAngle); i < 360; i++) {
-          buckets.push(i);
-        }
-        for (let i = 0; i <= Math.ceil(endAngle); i++) {
-          buckets.push(i);
-        }
-      }
-      
-      return buckets;
-    };
 
-    // Process each event in chronological order
     sortedEvents.forEach((event) => {
       const angle = timeToAngle(event.time);
       const labelWidth = getLabelWidth(event.jobId);
-      const labelBuckets = getLabelBuckets(angle, labelWidth);
-      
-      // Find the minimum radius level that doesn't cause overlaps
+
       let radiusLevel = 0;
       let hasOverlap = true;
-      
+
+      let currentRadius = BASE_RADIUS;
+
+      let bodyRectangle = { x: 0, y: 0, width: 0, height: 0 };
+      let bodyRectangleDegrees: [number, number] = [0, 0];
+
       while (hasOverlap) {
         hasOverlap = false;
-        const currentRadius = BASE_RADIUS + radiusLevel * stepping_radius; // 30px between levels
+
+        currentRadius = BASE_RADIUS + radiusLevel * stepping_radius;
+
+        bodyRectangle = getBodyRectangle(angle, currentRadius, labelWidth);
+        bodyRectangleDegrees = getBodyRectangleDegrees(bodyRectangle, angle);
         
-        // Check surrounding buckets for potential overlaps
         const exactBucketIndex = Math.floor(angle) % 360;
         const surroundingBuckets = [];
-        
-        // Check buckets within the label span plus some buffer
-        for (let offset = -10; offset <= 10; offset++) {
+
+        for (let offset = -bodyRectangleDegrees[1]; offset <= bodyRectangleDegrees[1]; offset++) {
           const checkBucketIndex = (exactBucketIndex + offset + 360) % 360;
           surroundingBuckets.push(checkBucketIndex);
         }
-        
-        // Remove duplicates
+
         const uniqueBuckets = Array.from(new Set(surroundingBuckets));
-        
+
         for (const checkBucketIndex of uniqueBuckets) {
           const bucket = buckets[checkBucketIndex];
-          
-          // Check against all existing labels in this bucket
+
           for (const existingLabel of bucket) {
-            const existingAngle = timeToAngle(existingLabel.event.time);
-            const existingRadius = BASE_RADIUS + existingLabel.radiusLevel * stepping_radius;
-            const existingLabelWidth = getLabelWidth(existingLabel.event.jobId);
-            
-            console.log(event.jobId, existingLabel.event.jobId ,angle, currentRadius, labelWidth, existingAngle, existingRadius, existingLabelWidth);
-            
-            if (doLabelsOverlap(angle, currentRadius, labelWidth, existingAngle, existingRadius, existingLabelWidth)) {
+            const existingBodyRectangle = { x: existingLabel.x, y: existingLabel.y, width: existingLabel.width, height: existingLabel.height };
+
+            if (doLabelsOverlap(bodyRectangle, existingBodyRectangle)) {
               hasOverlap = true;
+              // console.log(event.jobId, existingLabel.event.jobId, bodyRectangle, existingBodyRectangle, "overlap");
               break;
             }
+            // console.log(event.jobId, existingLabel.event.jobId, bodyRectangle, existingBodyRectangle, "no overlap");
           }
-          
+
           if (hasOverlap) break;
         }
-        
+
         if (hasOverlap) {
           radiusLevel++;
         }
       }
-      
-      // Add this label only to the bucket corresponding to its exact angle
-      const exactBucketIndex = Math.floor(angle) % 360;
-      buckets[exactBucketIndex].push({ event, radiusLevel });
+
+      if (bodyRectangleDegrees[0] <= bodyRectangleDegrees[1]) {
+      for (let i = bodyRectangleDegrees[0]; i <= bodyRectangleDegrees[1]; i++) {
+          buckets[i % 360].push({ event, radiusLevel, x: bodyRectangle.x, y: bodyRectangle.y, width: bodyRectangle.width, height: bodyRectangle.height, angle: angle });
+        }
+      } else {
+        for (let i = bodyRectangleDegrees[0]; i < 360; i++) {
+          buckets[i % 360].push({ event, radiusLevel, x: bodyRectangle.x, y: bodyRectangle.y, width: bodyRectangle.width, height: bodyRectangle.height, angle: angle });
+        }
+        for (let i = 0; i <= bodyRectangleDegrees[1]; i++) {
+          buckets[i % 360].push({ event, radiusLevel, x: bodyRectangle.x, y: bodyRectangle.y, width: bodyRectangle.width, height: bodyRectangle.height, angle: angle });
+        }
+      }
     });
 
     // Convert back to the original format
@@ -417,13 +416,13 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
       const angle = timeToAngle(event.time);
       const exactBucketIndex = Math.floor(angle) % 360;
       const bucket = buckets[exactBucketIndex];
-      
+
       // Find the radius level for this event
-      const existingLabel = bucket.find(label => 
+      const existingLabel = bucket.find(label =>
         label.event.jobId === event.jobId && label.event.type === event.type
       );
       const radiusLevel = existingLabel ? existingLabel.radiusLevel : 0;
-      
+
       return {
         ...event,
         index,
@@ -491,21 +490,18 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
         {/* Clock View - Now Full Width and Enlarged with Canvas Controls */}
         <Card>
           <CardHeader className="text-center">
-            <div className="flex items-center justify-center gap-2">
+            <div className="flex items-center justify-center">
               <Eye className="h-6 w-6" />
               <CardTitle className="text-2xl">Activity Clock</CardTitle>
             </div>
-            <CardDescription className="text-base">
-              Complete daily job activity timeline
-            </CardDescription>
           </CardHeader>
-          
+
           <CardContent className="flex justify-center p-4 sm:p-8" style={{ overscrollBehavior: 'contain' }}>
-            <div 
+            <div
               ref={canvasRef}
               className="relative overflow-hidden border rounded-lg bg-muted/20 overscroll-none touch-none select-none"
-              style={{ 
-                width: clockDims.size + 300, 
+              style={{
+                width: '100%',
                 height: clockDims.size + 300,
                 cursor: isDragging ? 'grabbing' : 'grab',
                 overscrollBehavior: 'contain'
@@ -531,9 +527,9 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                   alignItems: 'center'
                 }}
               >
-                <svg 
-                  width={clockDims.size + 400} 
-                  height={clockDims.size + 400} 
+                <svg
+                  width={clockDims.size + 400}
+                  height={clockDims.size + 400}
                   className="drop-shadow-lg"
                   viewBox={`0 0 ${clockDims.size + 400} ${clockDims.size + 400}`}
                   style={{ overflow: 'visible' }}
@@ -545,10 +541,10 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                       <stop offset="100%" stopColor="hsl(var(--muted))" />
                     </radialGradient>
                     <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
-                      <feDropShadow dx="0" dy="1" stdDeviation="2" floodOpacity="0.1"/>
+                      <feDropShadow dx="0" dy="1" stdDeviation="2" floodOpacity="0.1" />
                     </filter>
                   </defs>
-                  
+
                   {/* Clock background */}
                   <circle
                     cx={clockDims.centerX + 200}
@@ -557,7 +553,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                     fill="url(#clockGradient)"
                     filter="url(#shadow)"
                   />
-                  
+
                   {/* Clock face */}
                   <circle
                     cx={clockDims.centerX + 200}
@@ -568,7 +564,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                     strokeWidth="4"
                     className="text-border opacity-60"
                   />
-                  
+
                   {/* Major hour markers and labels (24h) */}
                   {[0, 6, 12, 18].map((hour) => {
                     const angle = hour * 15 - 90; // -90 to start from top, 15 degrees per hour
@@ -661,7 +657,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                       strokeLinecap="round"
                       filter="url(#shadow)"
                     />
-                    
+
                     {/* Center time display background */}
                     <circle
                       cx={clockDims.centerX + 200}
@@ -672,7 +668,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                       stroke="hsl(var(--border))"
                       strokeWidth="2"
                     />
-                    
+
                     {/* Current time text */}
                     <text
                       x={clockDims.centerX + 200}
@@ -682,13 +678,13 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                       className="fill-current text-foreground font-bold"
                       style={{ fontSize: clockDims.size > 500 ? '16px' : '12px' }}
                     >
-                      {currentTime.toLocaleTimeString('en-US', { 
-                        hour: '2-digit', 
+                      {currentTime.toLocaleTimeString('en-US', {
+                        hour: '2-digit',
                         minute: '2-digit',
-                        hour12: false 
+                        hour12: false
                       })}
                     </text>
-                    
+
                     {/* Date text */}
                     <text
                       x={clockDims.centerX + 200}
@@ -698,12 +694,12 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                       className="fill-current text-muted-foreground"
                       style={{ fontSize: clockDims.size > 500 ? '10px' : '8px' }}
                     >
-                      {currentTime.toLocaleDateString('en-US', { 
-                        month: 'short', 
-                        day: 'numeric' 
+                      {currentTime.toLocaleDateString('en-US', {
+                        month: 'short',
+                        day: 'numeric'
                       })}
                     </text>
-                    
+
                     {/* Center dot */}
                     <circle
                       cx={clockDims.centerX + 200}
@@ -718,22 +714,22 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                   {calculateLabelPositions.map((eventPos) => {
                     const angle = eventPos.angle - 90; // -90 to start from top
                     const radian = (angle * Math.PI) / 180;
-                    
+
                     // Calculate label position with radius level offset (primary position)
                     const baseLabelRadius = clockDims.eventRadius + 45;
-                    const levelOffset = eventPos.radiusLevel * 30; // 30px between levels for larger clock
+                    const levelOffset = eventPos.radiusLevel * stepping_radius; // 30px between levels for larger clock
                     const labelRadius = baseLabelRadius + levelOffset;
                     const labelX = clockDims.centerX + 200 + Math.cos(radian) * labelRadius;
                     const labelY = clockDims.centerY + 200 + Math.sin(radian) * labelRadius;
-                    
+
                     // Calculate event position (aligned with label)
                     const eventX = labelX;
                     const eventY = labelY;
-                    
+
                     const isHovered = hoveredEvent?.jobId === eventPos.jobId && hoveredEvent?.type === eventPos.type;
 
                     return (
-                      <g 
+                      <g
                         key={`${eventPos.jobId}-${eventPos.type}-${eventPos.index}`}
                         onMouseEnter={(e: React.MouseEvent) => {
                           setHoveredEvent(eventPos);
@@ -772,7 +768,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                           className={isHovered ? "opacity-80" : "opacity-50"}
                           strokeDasharray={eventPos.type === 'nextAttempt' ? "6,3" : "none"}
                         />
-                        
+
                         {/* Event circle */}
                         <circle
                           cx={eventX}
@@ -784,24 +780,36 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                           filter="url(#shadow)"
                           className="transition-all duration-200"
                         />
-                        
+
                         {/* Job name label with level-based styling - positioned next to event circle */}
                         <text
                           x={labelX + (isHovered ? 18 : 15)} // Offset to the right of the larger circle
                           y={labelY}
                           textAnchor="start"
                           dominantBaseline="central"
-                          className={`fill-current text-sm font-mono transition-all duration-200 ${
-                            isHovered ? 'text-foreground opacity-100' : 'text-muted-foreground opacity-80'
-                          }`}
-                          style={{ 
-                            fontSize: clockDims.size > 500 ? (14 - eventPos.radiusLevel * 0.5) + 'px' : (12 - eventPos.radiusLevel * 0.5) + 'px',
+                          className={`fill-current text-sm font-mono transition-all duration-200 ${isHovered ? 'text-foreground opacity-100' : 'text-muted-foreground opacity-80'
+                            }`}
+                          style={{
+                            fontSize: isHovered ? '16px' : '12px',
                             fontWeight: isHovered ? 'bold' : 'normal'
                           }}
                         >
                           {shortenJobName(eventPos.jobId)}
                         </text>
-                        
+
+                        {/* Debug: Show collision detection rectangle
+                        <rect
+                          x={eventX - 12} // circleRadius
+                          y={eventY - 12} // circleRadius
+                          width={eventPos.jobId.length * 8 + 32} // labelWidth + circleRadius * 2
+                          height={24} // circleRadius * 2
+                          fill="none"
+                          stroke="red"
+                          strokeWidth="1"
+                          strokeDasharray="3,3"
+                          opacity="0.5"
+                        /> */}
+
 
                       </g>
                     );
@@ -957,13 +965,12 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                   timeEvents
                     .sort((a, b) => a.time.getTime() - b.time.getTime())
                     .map((event, index) => (
-                      <div 
+                      <div
                         key={`${event.jobId}-${event.type}-${event.time.getTime()}`}
-                        className={`flex items-center gap-2 p-2 rounded-lg transition-all duration-200 cursor-pointer ${
-                          hoveredEvent?.jobId === event.jobId && hoveredEvent?.type === event.type
-                            ? 'bg-primary/10 shadow-sm' 
+                        className={`flex items-center gap-2 p-2 rounded-lg transition-all duration-200 cursor-pointer ${hoveredEvent?.jobId === event.jobId && hoveredEvent?.type === event.type
+                            ? 'bg-primary/10 shadow-sm'
                             : 'hover:bg-muted/50'
-                        }`}
+                          }`}
                         onMouseEnter={(e: React.MouseEvent) => {
                           setHoveredEvent(event);
                           setTooltipPosition({
@@ -989,9 +996,9 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                           }
                         }}
                       >
-                        <div 
+                        <div
                           className="w-3 h-3 rounded-full flex-shrink-0 shadow-sm transition-all duration-200"
-                          style={{ 
+                          style={{
                             backgroundColor: getEventColor(event.type, event.jobStatus),
                             transform: hoveredEvent?.jobId === event.jobId && hoveredEvent?.type === event.type ? 'scale(1.3)' : 'scale(1)'
                           }}
@@ -1026,7 +1033,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
           <div className="bg-popover text-popover-foreground p-3 rounded-lg shadow-lg border border-border max-w-xs animate-in fade-in-0 zoom-in-95 duration-200">
             <div className="space-y-2">
               <div className="flex items-center gap-2">
-                <div 
+                <div
                   className="w-3 h-3 rounded-full"
                   style={{ backgroundColor: getEventColor(hoveredEvent.type, hoveredEvent.jobStatus) }}
                 />

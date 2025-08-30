@@ -9,7 +9,7 @@ import { QueueItem, QueueResponse } from '@/types';
 import { Clock, List, Pause } from 'lucide-react';
 
 export function QueueView() {
-  const [queueData, setQueueData] = useState<QueueResponse>({ paused: false, queue: [] });
+  const [queueData, setQueueData] = useState<QueueResponse>({ paused: false, max_concurrency: 1, queue: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -79,6 +79,10 @@ export function QueueView() {
               Paused
             </div>
           )}
+          <div className="flex items-center gap-1 px-2 py-1 text-sm bg-blue-100 text-blue-800 border border-blue-200 rounded-md">
+            <span className="font-mono">{queueData.max_concurrency}</span>
+            <span>concurrent</span>
+          </div>
         </div>
         <div className="text-sm text-muted-foreground font-mono">
           {queueData.queue.length} jobs in queue
@@ -87,6 +91,7 @@ export function QueueView() {
 
       <QueueControls 
         isPaused={queueData.paused}
+        maxConcurrency={queueData.max_concurrency}
         onSuccess={forceRefresh} 
       />
 

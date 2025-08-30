@@ -20,10 +20,6 @@ import (
 
 var jobQueue *Queue
 
-const (
-	defaultMaxParallel = 10
-)
-
 var dockerClient *client.Client
 
 func main() {
@@ -69,12 +65,13 @@ func main() {
 		log.Info().Int("queue_len", len(items)).Msg("Loaded queue from DB")
 	}
 
-	// Load queue paused state
-	if paused, err := dbGetQueuePaused(); err != nil {
-		log.Error().Err(err).Msg("Failed to load queue paused state")
-	} else if paused {
-		jobQueue.SetPaused(true)
-		log.Info().Msg("Queue loaded as paused")
+	// Load queue state from database
+	if paused, maxConcurrency, err := dbGetQueueState(); err != nil {
+		log.Error().Err(err).Msg("Failed to load queue state")
+	} else {
+		jobQueue.SetPaused(paused)
+		jobQueue.SetMaxConcurrency(maxConcurrency)
+		log.Info().Bool("paused", paused).Int("max_concurrency", maxConcurrency).Msg("Queue state loaded from DB")
 	}
 
 	// 3-4. Init state in-memory and run migrations
@@ -107,7 +104,7 @@ func main() {
 	defer cancel()
 
 	go scheduleLoop(ctx)
-	go dispatchLoop(ctx, defaultMaxParallel)
+	go dispatchLoop(ctx)
 	go startWebServer(":8080")
 
 	// Wait for termination signal and flush state
@@ -257,7 +254,7 @@ func scheduleLoop(ctx context.Context) {
 	}
 }
 
-func dispatchLoop(ctx context.Context, maxParallel int) {
+func dispatchLoop(ctx context.Context) {
 	t := time.NewTicker(1 * time.Second)
 	defer t.Stop()
 	for {
@@ -269,7 +266,7 @@ func dispatchLoop(ctx context.Context, maxParallel int) {
 			actionsMu.RLock()
 			activeCount := len(ActiveActions)
 			actionsMu.RUnlock()
-			if activeCount >= maxParallel {
+			if activeCount >= jobQueue.GetMaxConcurrency() {
 				// log.Debug().Int("active", activeCount).Int("max", maxParallel).Msg("Concurrency limit reached")
 				continue
 			}

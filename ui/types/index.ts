@@ -73,6 +73,7 @@ export type QueueItem = string;
 
 export interface QueueResponse {
   paused: boolean;
+  max_concurrency: number;
   queue: QueueItem[];
 }
 

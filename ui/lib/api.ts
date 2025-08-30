@@ -81,7 +81,20 @@ class ApiClient {
     return response.json();
   }
 
-  async moveJobToHead(repoId: string): Promise<{ ok: boolean; queue: QueueItem[]; paused: boolean }> {
+  async setMaxConcurrency(max: number): Promise<{ max_concurrency: number }> {
+    const response = await fetch(`${API_BASE}/queue/set_max_concurrency?max=${max}`, {
+      method: 'POST',
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: response.statusText }));
+      throw new Error(errorData.error || `API request failed: ${response.statusText}`);
+    }
+    
+    return response.json();
+  }
+
+  async moveJobToHead(repoId: string): Promise<{ ok: boolean; queue: QueueItem[]; paused: boolean; max_concurrency: number }> {
     const response = await fetch(`${API_BASE}/queue/move_to_head?repo_id=${encodeURIComponent(repoId)}`, {
       method: 'POST',
     });
@@ -94,7 +107,7 @@ class ApiClient {
     return response.json();
   }
 
-  async moveJobToTail(repoId: string): Promise<{ ok: boolean; queue: QueueItem[]; paused: boolean }> {
+  async moveJobToTail(repoId: string): Promise<{ ok: boolean; queue: QueueItem[]; paused: boolean; max_concurrency: number }> {
     const response = await fetch(`${API_BASE}/queue/move_to_tail?repo_id=${encodeURIComponent(repoId)}`, {
       method: 'POST',
     });
@@ -107,7 +120,7 @@ class ApiClient {
     return response.json();
   }
 
-  async moveJobBefore(targetId: string, refId: string): Promise<{ ok: boolean; queue: QueueItem[]; paused: boolean }> {
+  async moveJobBefore(targetId: string, refId: string): Promise<{ ok: boolean; queue: QueueItem[]; paused: boolean; max_concurrency: number }> {
     const response = await fetch(`${API_BASE}/queue/move_before?target_id=${encodeURIComponent(targetId)}&ref_id=${encodeURIComponent(refId)}`, {
       method: 'POST',
     });
@@ -120,7 +133,7 @@ class ApiClient {
     return response.json();
   }
 
-  async moveJobAfter(targetId: string, refId: string): Promise<{ ok: boolean; queue: QueueItem[]; paused: boolean }> {
+  async moveJobAfter(targetId: string, refId: string): Promise<{ ok: boolean; queue: QueueItem[]; paused: boolean; max_concurrency: number }> {
     const response = await fetch(`${API_BASE}/queue/move_after?target_id=${encodeURIComponent(targetId)}&ref_id=${encodeURIComponent(refId)}`, {
       method: 'POST',
     });
@@ -133,7 +146,7 @@ class ApiClient {
     return response.json();
   }
 
-  async deleteJobFromQueue(repoId: string): Promise<{ removed: number; queue: QueueItem[]; paused: boolean }> {
+  async deleteJobFromQueue(repoId: string): Promise<{ removed: number; queue: QueueItem[]; paused: boolean; max_concurrency: number }> {
     const response = await fetch(`${API_BASE}/queue/delete?repo_id=${encodeURIComponent(repoId)}`, {
       method: 'POST',
     });

@@ -6,13 +6,16 @@ type Queue struct {
 	items []string
 	idx   int
 
-	mu       sync.Mutex
-	notEmpty *sync.Cond
-	paused   bool
+	mu             sync.Mutex
+	notEmpty       *sync.Cond
+	paused         bool
+	MaxConcurrency int
 }
 
 func NewQueue() *Queue {
-	q := &Queue{}
+	q := &Queue{
+		MaxConcurrency: 1, // 默认最大并发数为1
+	}
 	q.notEmpty = sync.NewCond(&q.mu)
 	return q
 }
@@ -97,6 +100,18 @@ func (q *Queue) IsPaused() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.paused
+}
+
+func (q *Queue) SetMaxConcurrency(max int) {
+	q.mu.Lock()
+	q.MaxConcurrency = max
+	q.mu.Unlock()
+}
+
+func (q *Queue) GetMaxConcurrency() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.MaxConcurrency
 }
 
 // MoveToHead moves the job to the front (next to be dequeued)

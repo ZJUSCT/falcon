@@ -53,8 +53,9 @@ func (ActionModel) TableName() string { return "actions" }
 
 // Queue state persistence
 type QueueStateModel struct {
-	ID     uint `gorm:"primaryKey;column:id"`
-	Paused bool `gorm:"column:paused"`
+	ID             uint `gorm:"primaryKey;column:id"`
+	Paused         bool `gorm:"column:paused"`
+	MaxConcurrency int  `gorm:"column:max_concurrency;default:1"`
 }
 
 func (QueueStateModel) TableName() string { return "queue_state" }
@@ -277,5 +278,39 @@ func dbGetQueuePaused() (bool, error) {
 
 func dbSetQueuePaused(paused bool) error {
 	row := QueueStateModel{ID: 1, Paused: paused}
+	return gormDB.Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error
+}
+
+func dbGetQueueMaxConcurrency() (int, error) {
+	var row QueueStateModel
+	// single row with id=1
+	if err := gormDB.First(&row, 1).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return 1, nil // 默认值为1
+		}
+		return 1, err
+	}
+	return row.MaxConcurrency, nil
+}
+
+func dbSetQueueMaxConcurrency(maxConcurrency int) error {
+	row := QueueStateModel{ID: 1, MaxConcurrency: maxConcurrency}
+	return gormDB.Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error
+}
+
+func dbGetQueueState() (bool, int, error) {
+	var row QueueStateModel
+	// single row with id=1
+	if err := gormDB.First(&row, 1).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return false, 1, nil // 默认值：未暂停，最大并发数为1
+		}
+		return false, 1, err
+	}
+	return row.Paused, row.MaxConcurrency, nil
+}
+
+func dbSetQueueState(paused bool, maxConcurrency int) error {
+	row := QueueStateModel{ID: 1, Paused: paused, MaxConcurrency: maxConcurrency}
 	return gormDB.Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error
 }
