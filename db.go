@@ -156,7 +156,19 @@ func upsertJob(j *Job) error {
 	}
 
 	log.Debug().Interface("job", m).Msg("upsertJob")
-	return gormDB.Clauses(clause.OnConflict{UpdateAll: true}).Create(&m).Error
+	err := gormDB.Clauses(clause.OnConflict{UpdateAll: true}).Create(&m).Error
+
+	// Update mirrorgo.json on job status changes
+	if err == nil {
+		// Use goroutine to avoid blocking the main operation
+		go func() {
+			if updateErr := UpdateMirrorgoJSON(); updateErr != nil {
+				log.Error().Err(updateErr).Str("job", j.RepoID).Msg("Failed to update mirrorgo.json")
+			}
+		}()
+	}
+
+	return err
 }
 
 func upsertAction(a *Action) error {

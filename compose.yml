@@ -12,6 +12,7 @@ services:
     volumes:
       - ./Configs:/Configs:ro
       - /home/zjusct/mirrorgo/logs:/home/zjusct/mirrorgo/logs
+      - /home/zjusct/mirrorgo/mirrorgo.json:/home/zjusct/mirrorgo/mirrorgo.json
       - ./state.db:/state.db
       - ./state.db-shm:/state.db-shm
       - ./state.db-wal:/state.db-wal

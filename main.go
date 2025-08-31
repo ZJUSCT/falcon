@@ -99,6 +99,8 @@ func main() {
 		}
 	}
 
+	UpdateMirrorgoJSON()
+
 	// 5. Start scheduling and dispatch loops
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -112,6 +114,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 	log.Info().Msg("Shutting down: flushing state to DB")
+	UpdateMirrorgoJSON()
 	cancel()
 	flushAllState()
 }

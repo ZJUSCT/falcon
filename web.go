@@ -19,6 +19,21 @@ import (
 //go:embed ui/dist/*
 var uiFS embed.FS
 
+// MirrorStatus represents the status of a mirror for the /api/mirrors endpoint
+type MirrorStatus struct {
+	ID            string            `json:"id"`
+	URL           string            `json:"url"`
+	Name          map[string]string `json:"name"`
+	Desc          map[string]string `json:"desc"`
+	Upstream      string            `json:"upstream"`
+	Size          int64             `json:"size"`
+	Status        string            `json:"status"`
+	LastAttempt   int64             `json:"lastAttempt"`
+	NextScheduled int64             `json:"nextScheduled"`
+	LastSuccess   int64             `json:"lastSuccess"`
+	LastFailure   int64             `json:"lastFailure"`
+}
+
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -656,6 +671,125 @@ func handleLogsStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// GET /api/mirrors - Export current mirror status
+func handleMirrors(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	// trigger a update of the mirror status
+	go UpdateMirrorgoJSON()
+
+	// Get the updated data for API response
+	mirrors, err := getMirrorStatus()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to get mirror status"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, mirrors)
+}
+
+// getMirrorStatus returns the current mirror status without writing to file
+func getMirrorStatus() ([]MirrorStatus, error) {
+	reposMu.RLock()
+	jobsMu.RLock()
+	defer reposMu.RUnlock()
+	defer jobsMu.RUnlock()
+
+	var mirrors []MirrorStatus
+
+	// Get all repos and their corresponding jobs
+	for repoID, repo := range Repos {
+		job, exists := Jobs[repoID]
+
+		mirror := MirrorStatus{
+			ID:       repoID,
+			URL:      "/" + repoID,
+			Name:     repo.Info.Name,
+			Desc:     repo.Info.Description,
+			Upstream: repo.Info.Upstream,
+			Size:     0, // TODO: implement size calculation
+		}
+
+		if !exists {
+			// Job doesn't exist, set default values
+			mirror.Status = "cached"
+			mirror.LastAttempt = 0
+			mirror.NextScheduled = 0
+			mirror.LastSuccess = 0
+			mirror.LastFailure = 0
+		} else {
+			// Map job status to mirror status
+
+			// get last action
+			if len(job.Actions) > 0 {
+				lastAction := GetActionByID(job.Actions[len(job.Actions)-1])
+				if lastAction != nil {
+					switch lastAction.Status {
+					case ActionStatusRunning:
+						mirror.Status = "syncing"
+					case ActionStatusSucceeded:
+						mirror.Status = "succeeded"
+					case ActionStatusFailed:
+						mirror.Status = "failed"
+					}
+				} else {
+					mirror.Status = "failed"
+				}
+
+				mirror.LastAttempt = job.LastAttemptAt.Unix()
+				mirror.NextScheduled = job.NextAttemptAt.Unix()
+				mirror.LastSuccess = job.LastSuccessAt.Unix()
+				mirror.LastFailure = job.LastFailureAt.Unix()
+			} else {
+				mirror.Status = "cached"
+				mirror.LastAttempt = 0
+				mirror.NextScheduled = 0
+				mirror.LastSuccess = 0
+				mirror.LastFailure = 0
+			}
+		}
+
+		mirrors = append(mirrors, mirror)
+	}
+
+	// Sort mirrors by ID for consistent output
+	sort.Slice(mirrors, func(i, j int) bool {
+		return mirrors[i].ID < mirrors[j].ID
+	})
+
+	return mirrors, nil
+}
+
+func writeMirrorgoJSON(mirrors []MirrorStatus) error {
+	// Use the same BASEDIR as defined in docker.go
+	filePath := filepath.Join(BASEDIR, "mirrorgo.json")
+
+	// Create the file with proper permissions
+	file, err := os.Create(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	// Write the JSON array
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "")
+	return encoder.Encode(mirrors)
+}
+
+// UpdateMirrorgoJSON updates the mirrorgo.json file with current status
+// This function can be called from other parts of the application
+func UpdateMirrorgoJSON() error {
+	mirrors, err := getMirrorStatus()
+	if err != nil {
+		return err
+	}
+	return writeMirrorgoJSON(mirrors)
+}
+
 func startWebServer(addr string) {
 	http.HandleFunc("/api/repos", handleRepos)
 	http.HandleFunc("/api/jobs", handleJobs)
@@ -676,6 +810,7 @@ func startWebServer(addr string) {
 	http.HandleFunc("/api/queue/move_before", handleQueueMoveBefore)
 	http.HandleFunc("/api/queue/move_after", handleQueueMoveAfter)
 	http.HandleFunc("/api/queue/delete", handleQueueDelete)
+	http.HandleFunc("/api/mirrors", handleMirrors)
 
 	// remove prefix /ui/dist/
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
