@@ -1,0 +1,3 @@
+[submodule "sync-scripts/conda-sync"]
+	path = sync-scripts/conda-sync
+	url = git@git.zju.edu.cn:zju-mirror/conda-sync.git

@@ -2,6 +2,9 @@ services:
   debian-ftpsync:
     build: dockerfiles/debian-ftpsync
     image: debian-ftpsync:latest
+  condasync:
+    build: conda-sync
+    image: condasync:latest
 
 
 # build only
