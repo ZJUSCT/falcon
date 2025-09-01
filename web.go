@@ -706,7 +706,7 @@ func getMirrorStatus() ([]MirrorStatus, error) {
 
 		mirror := MirrorStatus{
 			ID:       repoID,
-			URL:      "/" + repoID,
+			URL:      repo.Info.Url,
 			Name:     repo.Info.Name,
 			Desc:     repo.Info.Description,
 			Upstream: repo.Info.Upstream,

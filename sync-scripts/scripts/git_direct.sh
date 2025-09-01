@@ -13,6 +13,8 @@
 
 set -ex
 
+export https_proxy=http://TZJAFoFyZt:mLyrAnmTFPoOTKIkXUBArgLQWBWpUlHt@127.0.0.1:17890
+
 UPSTREAM=${GIT_UPSTREAM_URL}
 GIT_BRANCH="${GIT_BRANCH:-"origin/master"}"
 if [ -z "$UPSTREAM" ];then

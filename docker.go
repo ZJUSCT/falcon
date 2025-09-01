@@ -64,6 +64,7 @@ func StartContainer(act *Action) error {
 				"max-file": "1",
 			},
 		},
+		NetworkMode: "host",
 	}, nil, nil, act.ContainerName)
 
 	act.ContainerID = resp.ID

@@ -19,6 +19,8 @@ LOG_PATH=$MIRRORGO_LOGS_PATH
 # CLEAN_LOGS="${CLEAN_LOGS:-"/scripts/cleanlogs.py"}"
 export LOG_PATH
 
+echo "127.0.0.1 `hostname`" >> /etc/hosts
+
 # ${CLEAN_LOGS} || exit 1
 
 # if [ -n "$MAX_DELETE" ]; then
