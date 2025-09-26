@@ -812,6 +812,19 @@ func startWebServer(addr string) {
 	http.HandleFunc("/api/queue/delete", handleQueueDelete)
 	http.HandleFunc("/api/mirrors", handleMirrors)
 
+	// GET /mirrorz.json - MirrorZ JSON export (also persists to file)
+	http.HandleFunc("/mirrorz.json", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		// generate current document
+		doc := GenerateMirrorZ()
+		// persist in background
+		go func() { _ = WriteMirrorZJSON(doc) }()
+		writeJSON(w, http.StatusOK, doc)
+	})
+
 	// remove prefix /ui/dist/
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {

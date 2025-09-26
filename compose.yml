@@ -9,10 +9,23 @@ services:
       - "127.0.0.1:8080:8080"
     environment:
       - ZERLOG_LEVEL=info
+      - MIRRORZ_SITE_URL=https://mirrors.zju.edu.cn
+      - MIRRORZ_SITE_LOGO=https://mirrors.zju.edu.cn/zju-falcon.svg
+      - MIRRORZ_SITE_ABBR=ZJU
+      - MIRRORZ_SITE_NAME=浙江大学开源软件镜像站
+      - MIRRORZ_SITE_HOMEPAGE=https://www.zjusct.io
+      - MIRRORZ_SITE_REQUEST=https://github.com/ZJUSCT/mirror-issues/issues
+      - MIRRORZ_SITE_EMAIL=mirrors@zju.edu.cn
+      # - MIRRORZ_SITE_GROUP=ZJU
+      # - MIRRORZ_SITE_DISK=https://mirrors.zju.edu.cn/disk
+      # - MIRRORZ_SITE_NOTE=https://mirrors.zju.edu.cn/note
+      # - MIRRORZ_SITE_BIG=https://mirrors.zju.edu.cn/big
+      - MIRRORZ_SITE_DISABLE=false
     volumes:
       - ./Configs:/Configs:ro
       - /home/zjusct/mirrorgo/logs:/home/zjusct/mirrorgo/logs
       - /home/zjusct/mirrorgo/mirrorgo.json:/home/zjusct/mirrorgo/mirrorgo.json
+      - /test1/mirrors/mirrorz.json:/home/zjusct/mirrorgo/mirrorz.json
       - ./state.db:/state.db
       - ./state.db-shm:/state.db-shm
       - ./state.db-wal:/state.db-wal

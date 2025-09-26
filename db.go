@@ -165,6 +165,9 @@ func upsertJob(j *Job) error {
 			if updateErr := UpdateMirrorgoJSON(); updateErr != nil {
 				log.Error().Err(updateErr).Str("job", j.RepoID).Msg("Failed to update mirrorgo.json")
 			}
+			if updateErr := UpdateMirrorZJSON(); updateErr != nil {
+				log.Error().Err(updateErr).Str("job", j.RepoID).Msg("Failed to update mirrorz.json")
+			}
 		}()
 	}
 
