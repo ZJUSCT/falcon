@@ -1,12 +1,12 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import type { KeyboardEvent } from 'react';
+import { Card, CardContent } from '@/components/ui/card';
 import { StatusBadge } from '@/components/status-badge';
 import { RelativeTime } from '@/components/relative-time';
 import { apiClient } from '@/lib/api';
 import { Action } from '@/types';
-import { Container, Clock, Terminal } from 'lucide-react';
 import { formatDuration2 } from '@/lib/utils';
 
 interface ActionsViewProps {
@@ -103,100 +103,134 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
     );
   }
 
-  const renderActionCard = (action: Action) => (
-    <Card
-      key={action.id}
-      className="hover:shadow-md transition-shadow cursor-pointer"
-      onClick={() => onActionClick(action.id)}
-    >
-      <CardHeader className="pb-2">
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-lg hover:text-primary transition-colors">
-            Action for <span className="font-mono">{action.job_id}</span>
-          </CardTitle>
-          <StatusBadge status={action.status} />
-        </div>
-        <CardDescription>
-          Updated <RelativeTime date={action.updated_at} />
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <Container className="h-4 w-4 text-muted-foreground" />
-              <span className="font-medium">Container</span>
-            </div>
-            <div className="pl-6">
-              <div className="font-mono text-xs">{action.container_name}</div>
-              <div className="text-muted-foreground font-mono text-xs">{action.container_image}</div>
-            </div>
-          </div>
+  const handleRowKeyDown = (event: KeyboardEvent<HTMLTableRowElement>, actionId: string) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      onActionClick(actionId);
+    }
+  };
 
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <Terminal className="h-4 w-4 text-muted-foreground" />
-              <span className="font-medium">Status</span>
-            </div>
-            <div className="pl-6">
-              <div className="font-mono text-xs">{action.container_status}</div>
-              {action.container_exit_code !== 0 && (
-                <div className="text-destructive font-mono text-xs">
-                  Exit code: {action.container_exit_code}
-                </div>
-              )}
-              {action.container_exit_code !== 0 && action.container_exit_reason && (
-                <div className="text-destructive font-mono text-xs">
-                  Exit reason: {action.container_exit_reason}
-                </div>
-              )}
-            </div>
+  const getDurationLabel = (action: Action) => {
+    if (!action.started_at) {
+      return '—';
+    }
+
+    const start = new Date(action.started_at).getTime();
+    if (Number.isNaN(start)) {
+      return '—';
+    }
+
+    const end = action.finished_at ? new Date(action.finished_at).getTime() : Date.now();
+    if (Number.isNaN(end) || end <= start) {
+      return '—';
+    }
+
+    return formatDuration2(end - start);
+  };
+
+  const renderActionsTable = (actions: Action[], emptyLabel: string) => {
+    if (actions.length === 0) {
+      return (
+        <Card>
+          <CardContent className="p-6 text-sm text-muted-foreground">
+            {emptyLabel}
+          </CardContent>
+        </Card>
+      );
+    }
+
+    return (
+      <Card className="overflow-hidden">
+        <CardContent className="p-0">
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs sm:text-sm">
+              <thead className="bg-muted/40 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 text-left">Action</th>
+                  <th className="px-3 py-2 text-left">Status</th>
+                  <th className="hidden md:table-cell px-3 py-2 text-left">Updated</th>
+                  <th className="hidden lg:table-cell px-3 py-2 text-left">Timing</th>
+                  <th className="hidden xl:table-cell px-3 py-2 text-left">Container</th>
+                  <th className="hidden 2xl:table-cell px-3 py-2 text-left">Message</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {actions.map((action) => (
+                  <tr
+                    key={action.id}
+                    onClick={() => onActionClick(action.id)}
+                    onKeyDown={(event) => handleRowKeyDown(event, action.id)}
+                    tabIndex={0}
+                    className="group cursor-pointer bg-background transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+                  >
+                    <td className="px-3 py-2 align-top">
+                      <div className="font-mono text-sm sm:text-base">{action.job_id}</div>
+                      <div className="text-[11px] text-muted-foreground font-mono truncate">{action.id}</div>
+                      <div className="mt-1 text-[11px] text-muted-foreground md:hidden">
+                        <span className="uppercase tracking-wide">Updated </span>
+                        <RelativeTime date={action.updated_at} variant="compact" />
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <StatusBadge status={action.status} />
+                        <span className="font-mono text-[11px] text-muted-foreground">{action.container_status}</span>
+                      </div>
+                      {action.container_exit_code !== 0 && (
+                        <div className="mt-1 text-[11px] font-mono text-destructive">
+                          exit {action.container_exit_code}{action.container_exit_reason ? ` • ${action.container_exit_reason}` : ''}
+                        </div>
+                      )}
+                    </td>
+                    <td className="hidden md:table-cell px-3 py-2 align-top">
+                      <RelativeTime date={action.updated_at} variant="compact" />
+                    </td>
+                    <td className="hidden lg:table-cell px-3 py-2 align-top text-[11px] leading-relaxed text-muted-foreground">
+                      {action.started_at ? (
+                        <div>
+                          <span className="uppercase tracking-wide">Started </span>
+                          <RelativeTime date={action.started_at} variant="compact" />
+                        </div>
+                      ) : (
+                        <div className="uppercase tracking-wide">No start</div>
+                      )}
+                      {action.finished_at ? (
+                        <div>
+                          <span className="uppercase tracking-wide">Finished </span>
+                          <RelativeTime date={action.finished_at} variant="compact" />
+                        </div>
+                      ) : action.started_at ? (
+                        <div className="uppercase tracking-wide">Running…</div>
+                      ) : null}
+                      <div>
+                        <span className="uppercase tracking-wide">Duration </span>
+                        <span className="font-mono text-muted-foreground">{getDurationLabel(action)}</span>
+                      </div>
+                    </td>
+                    <td className="hidden xl:table-cell px-3 py-2 align-top text-[11px] text-muted-foreground">
+                      <div className="font-mono text-xs text-foreground truncate">{action.container_name || '—'}</div>
+                      <div className="font-mono truncate">{action.container_image}</div>
+                    </td>
+                    <td className="hidden 2xl:table-cell px-3 py-2 align-top">
+                      <div className="font-mono text-xs text-muted-foreground truncate">
+                        {action.message || '—'}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <Clock className="h-4 w-4 text-muted-foreground" />
-              <span className="font-medium">Timing</span>
-            </div>
-            <div className="pl-6 text-xs">
-              {action.started_at && (
-                <div>Started:  <RelativeTime date={action.started_at} /></div>
-              )}
-              {action.finished_at && (
-                <div>Finished: <RelativeTime date={action.finished_at} /></div>
-              )}
-              {/* duration */}
-              {action.started_at && action.finished_at && new Date(action.finished_at).getTime() - new Date(action.started_at).getTime() > 0 && (
-                <div>Duration: {formatDuration2(new Date(action.finished_at).getTime() - new Date(action.started_at).getTime())}</div>
-              )}
-            </div>
-          </div>
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <Clock className="h-4 w-4 text-muted-foreground" />
-              <span className="font-medium">Details</span>
-            </div>
-            <div className="pl-6">
-              <div className="font-mono text-xs">id: {action.id}</div>
-              {action.message && (
-                <div className="text-muted-foreground mt-1 font-mono text-xs">{action.message}</div>
-              )}
-              {action.container_name && (
-                <div className="text-muted-foreground mt-1 font-mono text-xs">
-                  container_name: {action.container_name}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  );
+        </CardContent>
+      </Card>
+    );
+  };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-3xl font-bold tracking-tight">Actions</h2>
-        <div className="text-sm text-muted-foreground font-mono">
+        <h2 className="text-2xl sm:text-3xl font-bold tracking-tight">Actions</h2>
+        <div className="text-xs sm:text-sm text-muted-foreground font-mono">
           {activeActions.length} active • {recentActions.length} recent
         </div>
       </div>
@@ -210,17 +244,7 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
           </div>
         </div>
 
-        {activeActions.length === 0 ? (
-          <Card>
-            <CardContent className="flex items-center justify-center h-24">
-              <div className="text-muted-foreground">No currently running actions</div>
-            </CardContent>
-          </Card>
-        ) : (
-          <div className="grid gap-4">
-            {activeActions.map(renderActionCard)}
-          </div>
-        )}
+        {renderActionsTable(activeActions, 'No currently running actions')}
       </div>
 
       {/* Recent Actions Section */}
@@ -232,17 +256,7 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
           </div>
         </div>
 
-        {recentActions.length === 0 ? (
-          <Card>
-            <CardContent className="flex items-center justify-center h-24">
-              <div className="text-muted-foreground">No recent actions found</div>
-            </CardContent>
-          </Card>
-        ) : (
-          <div className="grid gap-4">
-            {recentActions.map(renderActionCard)}
-          </div>
-        )}
+        {renderActionsTable(recentActions, 'No recent actions found')}
       </div>
     </div>
   );

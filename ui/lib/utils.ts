@@ -159,9 +159,9 @@ export function getStatusColor(status: string): string {
     case 'Scheduled':
       return 'bg-purple-600 border-purple-200 hover:bg-purple-700';
     case 'Orphan':
-      return 'text-gray-600 bg-gray-50 border-gray-200 hover:bg-gray-100';
+      return 'text-gray-600 bg-gray-400 border-gray-200 hover:bg-gray-600';
     default:
-      return 'text-gray-600 bg-gray-50 border-gray-200 hover:bg-gray-600';
+      return 'text-gray-600 bg-gray-400 border-gray-200 hover:bg-gray-600';
   }
 }
 

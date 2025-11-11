@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import type { KeyboardEvent } from 'react';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { StatusBadge } from '@/components/status-badge';
 import { RelativeTime } from '@/components/relative-time';
 import { TriggerButton } from '@/components/trigger-button';
@@ -117,16 +118,23 @@ export function JobsView({ onJobClick }: JobsViewProps) {
     return acc;
   }, {} as Record<string, number>);
 
+  const handleRowKeyDown = (event: KeyboardEvent<HTMLTableRowElement>, jobId: string) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      onJobClick(jobId);
+    }
+  };
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-3 sm:space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-3xl font-bold tracking-tight">Jobs</h2>
-        <div className="text-sm text-muted-foreground font-mono">
+        <h2 className="text-2xl sm:text-3xl font-bold tracking-tight">Jobs</h2>
+        <div className="text-xs sm:text-sm text-muted-foreground font-mono">
           {jobs.length} total jobs
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-3 sm:gap-4 md:grid-cols-2 xl:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Running</CardTitle>
@@ -165,54 +173,99 @@ export function JobsView({ onJobClick }: JobsViewProps) {
         </Card>
       </div>
       
-      <div className="grid gap-4">
-        {jobs.map((job) => (
-          <Card 
-            key={job.id} 
-            className="hover:shadow-md transition-shadow cursor-pointer"
-            onClick={() => onJobClick(job.id)}
-          >
-            <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-lg font-mono hover:text-primary transition-colors">{job.id}</CardTitle>
-                <div className="flex items-center gap-2">
-                  <TriggerButton 
-                    jobId={job.id} 
-                    jobStatus={job.status} 
-                    variant="icon" 
-                    size="sm"
-                    onSuccess={forceRefresh}
-                  />
-                  <StatusBadge status={job.status} />
-                </div>
-              </div>
-              <CardDescription>
-                Updated <RelativeTime date={job.updated_at} />
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                <div>
-                  <div className="font-medium text-muted-foreground">Last Success</div>
-                  <div><RelativeTime date={job.last_success_at} /></div>
-                </div>
-                <div>
-                  <div className="font-medium text-muted-foreground">Last Failure</div>
-                  <div><RelativeTime date={job.last_failure_at} /></div>
-                </div>
-                <div>
-                  <div className="font-medium text-muted-foreground">Last Attempt</div>
-                  <div><RelativeTime date={job.last_attempt_at} /></div>
-                </div>
-                <div>
-                  <div className="font-medium text-muted-foreground">Next Attempt</div>
-                  <div><RelativeTime date={job.next_attempt_at} /></div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+      {jobs.length === 0 ? (
+        <Card>
+          <CardContent className="p-6 text-sm text-muted-foreground">
+            No jobs available.
+          </CardContent>
+        </Card>
+      ) : (
+        <Card className="overflow-hidden">
+          <CardContent className="p-0">
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs sm:text-sm">
+                <thead className="bg-muted/40 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2 text-center">Job</th>
+                    <th className="px-3 py-2 text-center">Status</th>
+                    <th className="hidden md:table-cell px-3 py-2 text-center">Last Action</th>
+                    <th className="hidden md:table-cell px-3 py-2 text-left">Next Attempt</th>
+                    <th className="hidden md:table-cell px-3 py-2 text-left">Last Attempt</th>
+                    <th className="hidden lg:table-cell px-3 py-2 text-left">Last Success</th>
+                    <th className="hidden xl:table-cell px-3 py-2 text-left">Last Failure</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {jobs.map((job) => {
+                    const latestStatus = (job.last_action_status || '').trim();
+                    const hasLatestStatus = latestStatus.length > 0;
+                    return (
+                    <tr
+                      key={job.id}
+                      onClick={() => onJobClick(job.id)}
+                      onKeyDown={(event) => handleRowKeyDown(event, job.id)}
+                      tabIndex={0}
+                      className="group cursor-pointer bg-background transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+                    >
+                      <td className="px-3 py-2 align-top">
+                        <div className="font-mono text-sm sm:text-base">{job.id}</div>
+                        <div className="mt-1 text-[11px] text-muted-foreground md:hidden">
+                          <span className="uppercase tracking-wide">Updated </span>
+                          <RelativeTime date={job.updated_at} variant="compact" />
+                        </div>
+                        <div className="mt-1 text-[11px] text-muted-foreground md:hidden">
+                          <span className="uppercase tracking-wide">Next </span>
+                          <RelativeTime date={job.next_attempt_at} variant="compact" />
+                        </div>
+                        <div className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground md:hidden">
+                          <span className="uppercase tracking-wide">Last Action</span>
+                          {hasLatestStatus ? (
+                            <StatusBadge status={latestStatus} />
+                          ) : (
+                            <span className="font-mono text-muted-foreground">—</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-3 text-center py-2 align-top">
+                        <div className="flex items-center gap-2">
+                          <StatusBadge status={job.status} />
+                          <TriggerButton
+                            jobId={job.id}
+                            jobStatus={job.status}
+                            variant="icon"
+                            size="sm"
+                            onSuccess={forceRefresh}
+                          />
+                        </div>
+                      </td>
+                      <td className="hidden text-center md:table-cell px-3 py-2 align-top">
+                        {hasLatestStatus ? (
+                          <StatusBadge status={latestStatus} />
+                        ) : (
+                          <StatusBadge status="Unknown" />
+                        )}
+                      </td>
+                      <td className="hidden md:table-cell px-3 py-2 align-top">
+                        <RelativeTime date={job.next_attempt_at} variant="compact" />
+                      </td>
+                      <td className="hidden md:table-cell px-3 py-2 align-top">
+                        <RelativeTime date={job.last_attempt_at} variant="compact" />
+                      </td>
+                      <td className="hidden lg:table-cell px-3 py-2 align-top">
+                        <RelativeTime date={job.last_success_at} variant="compact" />
+                      </td>
+                      <td className="hidden xl:table-cell px-3 py-2 align-top">
+                        <RelativeTime date={job.last_failure_at} variant="compact" />
+                      </td>
+                    </tr>
+                  );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

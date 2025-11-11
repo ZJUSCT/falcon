@@ -126,7 +126,8 @@ type Job struct {
 	LastFailureAt time.Time `json:"last_failure_at"`
 	LastAttemptAt time.Time `json:"last_attempt_at"`
 
-	NextAttemptAt time.Time `json:"next_attempt_at"`
+	NextAttemptAt    time.Time `json:"next_attempt_at"`
+	LastActionStatus string    `json:"last_action_status"`
 
 	Actions []string `json:"actions"` // last 100 actions
 }

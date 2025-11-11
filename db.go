@@ -22,7 +22,8 @@ type JobModel struct {
 	LastAttemptAt time.Time `gorm:"column:last_attempt_at"`
 	NextAttemptAt time.Time `gorm:"column:next_attempt_at"`
 
-	Actions StringList `gorm:"column:actions"`
+	Actions          StringList `gorm:"column:actions"`
+	LastActionStatus string     `gorm:"column:last_action_status"`
 }
 
 func (JobModel) TableName() string { return "jobs" }
@@ -87,14 +88,15 @@ func loadJobsFromDB() error {
 	count := 0
 	for _, m := range rows {
 		j := Job{
-			RepoID:        m.RepoID,
-			Status:        m.Status,
-			UpdatedAt:     m.UpdatedAt,
-			LastSuccessAt: m.LastSuccessAt,
-			LastFailureAt: m.LastFailureAt,
-			LastAttemptAt: m.LastAttemptAt,
-			NextAttemptAt: m.NextAttemptAt,
-			Actions:       m.Actions,
+			RepoID:           m.RepoID,
+			Status:           m.Status,
+			UpdatedAt:        m.UpdatedAt,
+			LastSuccessAt:    m.LastSuccessAt,
+			LastFailureAt:    m.LastFailureAt,
+			LastAttemptAt:    m.LastAttemptAt,
+			NextAttemptAt:    m.NextAttemptAt,
+			Actions:          m.Actions,
+			LastActionStatus: m.LastActionStatus,
 		}
 
 		jobsMu.Lock()
@@ -145,17 +147,18 @@ func loadActiveActionsFromDB() error {
 
 func upsertJob(j *Job) error {
 	m := JobModel{
-		RepoID:        j.RepoID,
-		Status:        j.Status,
-		UpdatedAt:     j.UpdatedAt,
-		LastSuccessAt: j.LastSuccessAt,
-		LastFailureAt: j.LastFailureAt,
-		LastAttemptAt: j.LastAttemptAt,
-		NextAttemptAt: j.NextAttemptAt,
-		Actions:       j.Actions,
+		RepoID:           j.RepoID,
+		Status:           j.Status,
+		UpdatedAt:        j.UpdatedAt,
+		LastSuccessAt:    j.LastSuccessAt,
+		LastFailureAt:    j.LastFailureAt,
+		LastAttemptAt:    j.LastAttemptAt,
+		NextAttemptAt:    j.NextAttemptAt,
+		Actions:          j.Actions,
+		LastActionStatus: j.LastActionStatus,
 	}
 
-	log.Debug().Interface("job", m).Msg("upsertJob")
+	// log.Debug().Interface("job", m).Msg("upsertJob")
 	err := gormDB.Clauses(clause.OnConflict{UpdateAll: true}).Create(&m).Error
 
 	// Update mirrorgo.json on job status changes

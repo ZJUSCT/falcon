@@ -44,7 +44,8 @@ export interface Job {
   last_failure_at: string;
   last_attempt_at: string;
   next_attempt_at: string;
-  actions: Action[];
+  last_action_status: 'Running' | 'Succeeded' | 'Failed' | '';
+  actions: string[];
 }
 
 export interface Action {

@@ -323,6 +323,7 @@ job_polling:
 		job.Status = JobStatusRunning
 		job.LastAttemptAt = time.Now()
 		job.UpdatedAt = time.Now()
+		job.LastActionStatus = ActionStatusRunning
 		// Persist job update
 		if err := upsertJob(job); err != nil {
 			log.Error().Err(err).Str("job", jobID).Msg("Failed to persist job start")
@@ -406,8 +407,10 @@ func finishJob(job *Job, succeeded bool) {
 
 	if succeeded {
 		job.LastSuccessAt = now
+		job.LastActionStatus = ActionStatusSucceeded
 	} else {
 		job.LastFailureAt = now
+		job.LastActionStatus = ActionStatusFailed
 	}
 	// Compute next attempt from repo interval
 	reposMu.RLock()

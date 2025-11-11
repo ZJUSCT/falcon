@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { RelativeTime } from '@/components/relative-time';
 import { apiClient } from '@/lib/api';
 import { LogEntry, LogListResponse } from '@/types';
-import { FileText, Folder, Download, ExternalLink, RefreshCw, ArrowDown } from 'lucide-react';
+import { FileText, Folder, Download, ExternalLink, RefreshCw, ArrowDown, Lock, Unlock } from 'lucide-react';
 import { formatBytes } from '@/lib/utils';
 
 interface LogViewerProps {
@@ -58,22 +58,6 @@ export function LogViewer({ actionId }: LogViewerProps) {
   const logContentRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Check if user is at the bottom of the scroll area
-  const isAtBottom = () => {
-    if (!logContentRef.current) return false;
-    const { scrollTop, scrollHeight, clientHeight } = logContentRef.current;
-    return scrollHeight - scrollTop - clientHeight < 50;
-  };
-
-  // Handle scroll events to update auto-scroll state
-  const handleScroll = () => {
-    const atBottom = isAtBottom();
-    if (atBottom !== autoScroll) {
-      console.debug(`User scroll detected: atBottom=${atBottom}, setting autoScroll=${atBottom}`);
-      setAutoScroll(atBottom);
-    }
-  };
-
   // Force scroll to bottom (used by manual scroll button)
   const forceScrollToBottom = () => {
     const el = logContentRef.current;
@@ -88,6 +72,19 @@ export function LogViewer({ actionId }: LogViewerProps) {
   const scrollToBottom = () => {
     forceScrollToBottom();
     setAutoScroll(true);
+  };
+
+  // Toggle auto-scroll locking
+  const toggleAutoScroll = () => {
+    setAutoScroll((prev) => {
+      const next = !prev;
+      if (next) {
+        requestAnimationFrame(() => {
+          forceScrollToBottom();
+        });
+      }
+      return next;
+    });
   };
 
   // Fetch log file list
@@ -167,9 +164,6 @@ export function LogViewer({ actionId }: LogViewerProps) {
           if (message.trim()) {
             const logData = parseSSEMessage(message);
             if (logData) {
-              // Decide stickiness before appending new content
-              const shouldStickToBottom = isAtBottom();
-
               // Update content
               setLogContent(prevContent => {
                 const newContent = prevContent + logData;
@@ -181,8 +175,8 @@ export function LogViewer({ actionId }: LogViewerProps) {
                 return newContent;
               });
 
-              // Scroll if user was at bottom OR auto-scroll mode is enabled
-              if (shouldStickToBottom || autoScrollRef.current) {
+              // Scroll when auto-scroll mode is enabled
+              if (autoScrollRef.current) {
                 // 等待下一帧，确保内容已经渲染到 DOM 再滚动
                 requestAnimationFrame(() => {
                   forceScrollToBottom();
@@ -403,13 +397,15 @@ export function LogViewer({ actionId }: LogViewerProps) {
                       SSE Streaming
                     </div>
                   )}
-                  {streaming && (
-                    <div className={`flex items-center gap-1 text-xs ${autoScroll ? 'text-green-600' : 'text-yellow-600'}`}>
-                      <div className={`w-2 h-2 rounded-full ${autoScroll ? 'bg-green-600' : 'bg-yellow-600'}`}></div>
-                      {autoScroll ? 'Auto-scroll ON' : 'Auto-scroll OFF'}
-                    </div>
-                  )}
-                  {streaming && !autoScroll && (
+                  <button
+                    onClick={toggleAutoScroll}
+                    className={`flex items-center gap-1 px-2 py-1 text-xs rounded border transition-colors ${autoScroll ? 'border-primary text-primary bg-primary/10 hover:bg-primary/20' : 'hover:bg-muted'}`}
+                    title={autoScroll ? 'Disable auto-scroll' : 'Enable auto-scroll'}
+                  >
+                    {autoScroll ? <Lock className="h-3 w-3" /> : <Unlock className="h-3 w-3" />}
+                    Scroll Lock
+                  </button>
+                  {!autoScroll && (
                     <button
                       onClick={scrollToBottom}
                       className="flex items-center gap-1 px-2 py-1 text-xs rounded border hover:bg-muted transition-colors text-blue-600 hover:text-blue-700"
@@ -435,7 +431,6 @@ export function LogViewer({ actionId }: LogViewerProps) {
             <div
               ref={logContentRef}
               className="h-[620px] p-3 bg-black text-green-400 font-mono text-xs overflow-auto rounded-md border"
-              onScroll={handleScroll}
             >
               {selectedFile ? (
                 logContent ? (
