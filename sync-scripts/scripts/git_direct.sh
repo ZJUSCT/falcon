@@ -13,7 +13,7 @@
 
 set -ex
 
-export https_proxy=http://127.0.0.1:17890
+export https_proxy=http://172.25.32.1:17890
 
 UPSTREAM=${GIT_UPSTREAM_URL}
 GIT_BRANCH="${GIT_BRANCH:-"origin/master"}"
