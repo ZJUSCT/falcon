@@ -6,7 +6,7 @@ import { StatusBadge } from '@/components/status-badge';
 import { RelativeTime } from '@/components/relative-time';
 import { TriggerButton } from '@/components/trigger-button';
 import { apiClient } from '@/lib/api';
-import { Job, Repo } from '@/types';
+import { Job, Repo, Action } from '@/types';
 import { Search } from 'lucide-react';
 
 interface MirrorsViewProps {

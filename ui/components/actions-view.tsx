@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from 'react';
 import type { KeyboardEvent } from 'react';
-import { Card, CardContent } from '@/components/ui/card';
 import { StatusBadge } from '@/components/status-badge';
 import { RelativeTime } from '@/components/relative-time';
 import { apiClient } from '@/lib/api';
@@ -131,28 +130,25 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
   const renderActionsTable = (actions: Action[], emptyLabel: string) => {
     if (actions.length === 0) {
       return (
-        <Card>
-          <CardContent className="p-6 text-sm text-muted-foreground">
-            {emptyLabel}
-          </CardContent>
-        </Card>
+        <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">
+          {emptyLabel}
+        </div>
       );
     }
 
     return (
-      <Card className="overflow-hidden">
-        <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs sm:text-sm">
+      <div className="rounded-lg border border-border bg-card overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs sm:text-sm">
               <thead className="bg-muted/40 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 <tr>
-                  <th className="px-3 py-3 text-left">Action</th>
-                  <th className="px-3 py-3 text-left">Status</th>
-                  <th className="hidden md:table-cell px-3 py-3 text-left">Worker</th>
-                  <th className="hidden md:table-cell px-3 py-3 text-left">Updated</th>
-                  <th className="hidden lg:table-cell px-3 py-3 text-left">Timing</th>
-                  <th className="hidden xl:table-cell px-3 py-3 text-left">Container</th>
-                  <th className="hidden 2xl:table-cell px-3 py-3 text-left">Message</th>
+                  <th className="px-3 py-2 text-left">Action</th>
+                  <th className="px-3 py-2 text-left">Status</th>
+                  <th className="hidden md:table-cell px-3 py-2 text-left">Worker</th>
+                  <th className="hidden md:table-cell px-3 py-2 text-left">Updated</th>
+                  <th className="hidden lg:table-cell px-3 py-2 text-left">Timing</th>
+                  <th className="hidden xl:table-cell px-3 py-2 text-left">Container</th>
+                  <th className="hidden 2xl:table-cell px-3 py-2 text-left">Message</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
@@ -164,7 +160,7 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
                     tabIndex={0}
                     className="group cursor-pointer bg-background transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
                   >
-                    <td className="px-3 py-3 align-top">
+                    <td className="px-3 py-2 align-top">
                       <div className="font-mono text-sm sm:text-base">{action.job_id}</div>
                       <div className="text-[11px] text-muted-foreground font-mono truncate">{action.id}</div>
                       <div className="mt-1 text-[11px] text-muted-foreground md:hidden">
@@ -172,7 +168,7 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
                         <RelativeTime date={action.updated_at} variant="compact" />
                       </div>
                     </td>
-                    <td className="px-3 py-3 align-top">
+                    <td className="px-3 py-2 align-top">
                       <div className="flex flex-wrap items-center gap-2">
                         <StatusBadge status={action.status} />
                         <span className="font-mono text-[11px] text-muted-foreground">{action.container_status}</span>
@@ -183,13 +179,13 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
                         </div>
                       )}
                     </td>
-                    <td className="hidden md:table-cell px-3 py-3 align-top">
+                    <td className="hidden md:table-cell px-3 py-2 align-top">
                       <span className="font-mono text-xs text-muted-foreground">{action.worker_name || '\u2014'}</span>
                     </td>
-                    <td className="hidden md:table-cell px-3 py-3 align-top">
+                    <td className="hidden md:table-cell px-3 py-2 align-top">
                       <RelativeTime date={action.updated_at} variant="compact" />
                     </td>
-                    <td className="hidden lg:table-cell px-3 py-3 align-top text-[11px] leading-relaxed text-muted-foreground">
+                    <td className="hidden lg:table-cell px-3 py-2 align-top text-[11px] leading-relaxed text-muted-foreground">
                       {action.started_at ? (
                         <div>
                           <span className="uppercase tracking-wide">Started </span>
@@ -211,11 +207,11 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
                         <span className="font-mono text-muted-foreground">{getDurationLabel(action)}</span>
                       </div>
                     </td>
-                    <td className="hidden xl:table-cell px-3 py-3 align-top text-[11px] text-muted-foreground">
+                    <td className="hidden xl:table-cell px-3 py-2 align-top text-[11px] text-muted-foreground">
                       <div className="font-mono text-xs text-foreground truncate">{action.container_name || '—'}</div>
                       <div className="font-mono truncate">{action.container_image}</div>
                     </td>
-                    <td className="hidden 2xl:table-cell px-3 py-3 align-top">
+                    <td className="hidden 2xl:table-cell px-3 py-2 align-top">
                       <div className="font-mono text-xs text-muted-foreground truncate">
                         {action.message || '—'}
                       </div>
@@ -224,9 +220,8 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
                 ))}
               </tbody>
             </table>
-          </div>
-        </CardContent>
-      </Card>
+        </div>
+      </div>
     );
   };
 
