@@ -1,0 +1,218 @@
+<h2>Dashboard Layout v2 — Clock First + ServerAgent Style</h2>
+<p class="subtitle">Dark theme, clock hero at top, stat cards, worker grid, running/failed lists</p>
+
+<div class="mockup" style="max-width:1200px;margin:0 auto;">
+  <div class="mockup-header">MirrorGo Dashboard — Overview</div>
+  <div class="mockup-body" style="padding:0;display:flex;min-height:750px;font-size:13px;background:#0a0a0a;color:#e4e4e7;font-family:system-ui,-apple-system,sans-serif;">
+
+    <!-- Sidebar -->
+    <div style="width:190px;background:#0f0f0f;border-right:1px solid #1e1e1e;display:flex;flex-direction:column;flex-shrink:0;">
+      <div style="padding:16px;font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;">
+        <span style="background:#3b82f6;color:white;border-radius:6px;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;">MG</span>
+        MirrorGo
+      </div>
+      <nav style="padding:4px 8px;flex:1;">
+        <div style="padding:7px 12px;border-radius:6px;background:#3b82f618;color:#60a5fa;display:flex;align-items:center;gap:9px;margin-bottom:1px;font-weight:500;font-size:13px;">
+          📊 Overview
+        </div>
+        <div style="padding:7px 12px;border-radius:6px;display:flex;align-items:center;gap:9px;margin-bottom:1px;color:#71717a;font-size:13px;">
+          🪞 Mirrors
+        </div>
+        <div style="padding:7px 12px;border-radius:6px;display:flex;align-items:center;gap:9px;margin-bottom:1px;color:#71717a;font-size:13px;">
+          🖥️ Workers
+        </div>
+        <div style="padding:7px 12px;border-radius:6px;display:flex;align-items:center;gap:9px;margin-bottom:1px;color:#71717a;font-size:13px;">
+          📋 Queue
+        </div>
+        <div style="padding:7px 12px;border-radius:6px;display:flex;align-items:center;gap:9px;margin-bottom:1px;color:#71717a;font-size:13px;">
+          ⚡ Actions
+        </div>
+        <div style="padding:7px 12px;border-radius:6px;display:flex;align-items:center;gap:9px;margin-bottom:1px;color:#71717a;font-size:13px;">
+          ⚙️ Configs
+        </div>
+      </nav>
+      <div style="padding:10px 12px;border-top:1px solid #1e1e1e;color:#52525b;font-size:11px;cursor:pointer;display:flex;align-items:center;gap:6px;">
+        ◀ Collapse
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <div style="flex:1;overflow:auto;background:#0a0a0a;">
+
+      <!-- LIVE indicator -->
+      <div style="padding:16px 24px 0;display:flex;align-items:center;gap:6px;">
+        <span style="width:8px;height:8px;background:#22c55e;border-radius:50%;display:inline-block;box-shadow:0 0 6px #22c55e80;"></span>
+        <span style="color:#22c55e;font-size:11px;font-weight:600;letter-spacing:1px;">LIVE</span>
+      </div>
+
+      <!-- Stat cards row -->
+      <div style="padding:12px 24px;display:grid;grid-template-columns:repeat(5,1fr);gap:10px;">
+        <div style="background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px 16px;">
+          <div style="color:#52525b;font-size:10px;text-transform:uppercase;letter-spacing:0.8px;font-weight:600;">Workers</div>
+          <div style="margin-top:6px;"><span style="font-size:26px;font-weight:700;color:#22c55e;">3</span> <span style="color:#52525b;font-size:14px;">/ 3</span></div>
+        </div>
+        <div style="background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px 16px;">
+          <div style="color:#52525b;font-size:10px;text-transform:uppercase;letter-spacing:0.8px;font-weight:600;">Running</div>
+          <div style="margin-top:6px;"><span style="font-size:26px;font-weight:700;color:#3b82f6;">5</span> <span style="color:#22c55e;font-size:12px;">▲2</span></div>
+        </div>
+        <div style="background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px 16px;">
+          <div style="color:#52525b;font-size:10px;text-transform:uppercase;letter-spacing:0.8px;font-weight:600;">Queue</div>
+          <div style="margin-top:6px;"><span style="font-size:26px;font-weight:700;color:#f59e0b;">23</span> <span style="color:#ef4444;font-size:12px;">▼5</span></div>
+        </div>
+        <div style="background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px 16px;">
+          <div style="color:#52525b;font-size:10px;text-transform:uppercase;letter-spacing:0.8px;font-weight:600;">Succeeded (24h)</div>
+          <div style="margin-top:6px;"><span style="font-size:26px;font-weight:700;color:#22c55e;">142</span></div>
+        </div>
+        <div style="background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px 16px;">
+          <div style="color:#52525b;font-size:10px;text-transform:uppercase;letter-spacing:0.8px;font-weight:600;">Failed (24h)</div>
+          <div style="margin-top:6px;"><span style="font-size:26px;font-weight:700;color:#ef4444;">2</span></div>
+        </div>
+      </div>
+
+      <!-- Schedule Timeline (Clock) — HERO -->
+      <div style="padding:4px 24px 12px;">
+        <div style="background:#141414;border:1px solid #1e1e1e;border-radius:8px;overflow:hidden;">
+          <div style="padding:12px 16px;border-bottom:1px solid #1e1e1e;display:flex;justify-content:space-between;align-items:center;">
+            <span style="font-weight:600;font-size:13px;color:#e4e4e7;">Schedule Timeline</span>
+            <div style="display:flex;gap:8px;">
+              <span style="color:#52525b;font-size:11px;display:flex;align-items:center;gap:4px;"><span style="width:6px;height:6px;border-radius:50%;background:#3b82f6;display:inline-block;"></span> Running</span>
+              <span style="color:#52525b;font-size:11px;display:flex;align-items:center;gap:4px;"><span style="width:6px;height:6px;border-radius:50%;background:#22c55e;display:inline-block;"></span> Success</span>
+              <span style="color:#52525b;font-size:11px;display:flex;align-items:center;gap:4px;"><span style="width:6px;height:6px;border-radius:50%;background:#ef4444;display:inline-block;"></span> Failed</span>
+              <span style="color:#52525b;font-size:11px;display:flex;align-items:center;gap:4px;"><span style="width:6px;height:6px;border-radius:50%;background:#f59e0b;display:inline-block;"></span> Next Sync</span>
+            </div>
+          </div>
+          <!-- Clock SVG placeholder -->
+          <div style="padding:20px;display:flex;justify-content:center;">
+            <svg width="280" height="280" viewBox="0 0 280 280">
+              <!-- Clock face -->
+              <circle cx="140" cy="140" r="130" fill="none" stroke="#1e1e1e" stroke-width="1"/>
+              <circle cx="140" cy="140" r="100" fill="none" stroke="#1e1e1e" stroke-width="1"/>
+              <circle cx="140" cy="140" r="70" fill="none" stroke="#1e1e1e" stroke-width="0.5"/>
+              <!-- Hour markers -->
+              <text x="140" y="22" fill="#3f3f46" font-size="10" text-anchor="middle">0h</text>
+              <text x="258" y="144" fill="#3f3f46" font-size="10" text-anchor="middle">6h</text>
+              <text x="140" y="268" fill="#3f3f46" font-size="10" text-anchor="middle">12h</text>
+              <text x="22" y="144" fill="#3f3f46" font-size="10" text-anchor="middle">18h</text>
+              <!-- Now hand -->
+              <line x1="140" y1="140" x2="140" y2="30" stroke="#e4e4e7" stroke-width="1.5" opacity="0.6"/>
+              <circle cx="140" cy="140" r="3" fill="#e4e4e7"/>
+              <!-- Sample events - running (blue) -->
+              <circle cx="175" cy="50" r="5" fill="#3b82f6" opacity="0.9"/>
+              <circle cx="210" cy="75" r="4" fill="#3b82f6" opacity="0.9"/>
+              <!-- Sample events - succeeded (green) -->
+              <circle cx="240" cy="120" r="4" fill="#22c55e" opacity="0.7"/>
+              <circle cx="250" cy="150" r="4" fill="#22c55e" opacity="0.7"/>
+              <circle cx="235" cy="190" r="4" fill="#22c55e" opacity="0.7"/>
+              <circle cx="200" cy="230" r="3" fill="#22c55e" opacity="0.5"/>
+              <!-- Sample events - failed (red) -->
+              <circle cx="100" cy="240" r="5" fill="#ef4444" opacity="0.8"/>
+              <!-- Sample events - next sync (amber) -->
+              <circle cx="60" cy="190" r="3" fill="#f59e0b" opacity="0.6"/>
+              <circle cx="45" cy="150" r="3" fill="#f59e0b" opacity="0.6"/>
+              <circle cx="55" cy="110" r="3" fill="#f59e0b" opacity="0.6"/>
+              <circle cx="80" cy="70" r="3" fill="#f59e0b" opacity="0.6"/>
+              <circle cx="110" cy="45" r="3" fill="#f59e0b" opacity="0.6"/>
+              <!-- Center label -->
+              <text x="140" y="136" fill="#e4e4e7" font-size="11" text-anchor="middle" font-weight="600">NOW</text>
+              <text x="140" y="150" fill="#71717a" font-size="9" text-anchor="middle">20:55</text>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <!-- Workers grid -->
+      <div style="padding:4px 24px;">
+        <div style="color:#52525b;font-size:10px;text-transform:uppercase;letter-spacing:0.8px;font-weight:600;margin-bottom:8px;">Workers</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;">
+          <div style="background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px 16px;">
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+              <span style="width:8px;height:8px;background:#22c55e;border-radius:50%;display:inline-block;"></span>
+              <span style="font-weight:600;color:#e4e4e7;">worker-1</span>
+              <span style="color:#52525b;font-size:11px;margin-left:auto;">10ms</span>
+            </div>
+            <div style="color:#71717a;font-size:11px;">
+              <span style="background:#22c55e20;color:#22c55e;padding:1px 6px;border-radius:3px;font-size:10px;">storage=ssd</span>
+              <span style="background:#3b82f620;color:#60a5fa;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:4px;">zone=a</span>
+            </div>
+            <div style="color:#71717a;font-size:11px;margin-top:6px;">Running: <span style="color:#3b82f6;">2</span> &nbsp;|&nbsp; Completed: <span style="color:#22c55e;">48</span></div>
+          </div>
+          <div style="background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px 16px;">
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+              <span style="width:8px;height:8px;background:#22c55e;border-radius:50%;display:inline-block;"></span>
+              <span style="font-weight:600;color:#e4e4e7;">worker-2</span>
+              <span style="color:#52525b;font-size:11px;margin-left:auto;">12ms</span>
+            </div>
+            <div style="color:#71717a;font-size:11px;">
+              <span style="background:#f59e0b20;color:#f59e0b;padding:1px 6px;border-radius:3px;font-size:10px;">storage=hdd</span>
+              <span style="background:#3b82f620;color:#60a5fa;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:4px;">zone=a</span>
+            </div>
+            <div style="color:#71717a;font-size:11px;margin-top:6px;">Running: <span style="color:#3b82f6;">2</span> &nbsp;|&nbsp; Completed: <span style="color:#22c55e;">51</span></div>
+          </div>
+          <div style="background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px 16px;">
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+              <span style="width:8px;height:8px;background:#22c55e;border-radius:50%;display:inline-block;"></span>
+              <span style="font-weight:600;color:#e4e4e7;">worker-3</span>
+              <span style="color:#52525b;font-size:11px;margin-left:auto;">8ms</span>
+            </div>
+            <div style="color:#71717a;font-size:11px;">
+              <span style="background:#22c55e20;color:#22c55e;padding:1px 6px;border-radius:3px;font-size:10px;">storage=ssd</span>
+              <span style="background:#a855f720;color:#a855f7;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:4px;">zone=b</span>
+            </div>
+            <div style="color:#71717a;font-size:11px;margin-top:6px;">Running: <span style="color:#3b82f6;">1</span> &nbsp;|&nbsp; Completed: <span style="color:#22c55e;">43</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Running + Failures side by side -->
+      <div style="padding:16px 24px 20px;display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <div style="background:#141414;border:1px solid #1e1e1e;border-radius:8px;overflow:hidden;">
+          <div style="padding:10px 16px;border-bottom:1px solid #1e1e1e;font-weight:600;font-size:12px;display:flex;align-items:center;gap:6px;color:#52525b;text-transform:uppercase;letter-spacing:0.5px;">
+            <span style="width:7px;height:7px;background:#3b82f6;border-radius:50%;display:inline-block;"></span>
+            Currently Running
+          </div>
+          <div style="font-size:12px;">
+            <div style="padding:8px 16px;border-bottom:1px solid #1e1e1e10;display:flex;justify-content:space-between;align-items:center;">
+              <div><span style="color:#e4e4e7;">debian</span> <span style="color:#3f3f46;">→</span> <span style="color:#52525b;">worker-1</span></div>
+              <span style="color:#3f3f46;">3m</span>
+            </div>
+            <div style="padding:8px 16px;border-bottom:1px solid #1e1e1e10;display:flex;justify-content:space-between;align-items:center;">
+              <div><span style="color:#e4e4e7;">ubuntu</span> <span style="color:#3f3f46;">→</span> <span style="color:#52525b;">worker-2</span></div>
+              <span style="color:#3f3f46;">1m</span>
+            </div>
+            <div style="padding:8px 16px;border-bottom:1px solid #1e1e1e10;display:flex;justify-content:space-between;align-items:center;">
+              <div><span style="color:#e4e4e7;">archlinux</span> <span style="color:#3f3f46;">→</span> <span style="color:#52525b;">worker-1</span></div>
+              <span style="color:#3f3f46;">5m</span>
+            </div>
+            <div style="padding:8px 16px;border-bottom:1px solid #1e1e1e10;display:flex;justify-content:space-between;align-items:center;">
+              <div><span style="color:#e4e4e7;">fedora</span> <span style="color:#3f3f46;">→</span> <span style="color:#52525b;">worker-3</span></div>
+              <span style="color:#3f3f46;">8m</span>
+            </div>
+            <div style="padding:8px 16px;display:flex;justify-content:space-between;align-items:center;">
+              <div><span style="color:#e4e4e7;">pypi</span> <span style="color:#3f3f46;">→</span> <span style="color:#52525b;">worker-2</span></div>
+              <span style="color:#3f3f46;">12m</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="background:#141414;border:1px solid #1e1e1e;border-radius:8px;overflow:hidden;">
+          <div style="padding:10px 16px;border-bottom:1px solid #1e1e1e;font-weight:600;font-size:12px;display:flex;align-items:center;gap:6px;color:#52525b;text-transform:uppercase;letter-spacing:0.5px;">
+            <span style="width:7px;height:7px;background:#ef4444;border-radius:50%;display:inline-block;"></span>
+            Recent Failures
+          </div>
+          <div style="font-size:12px;">
+            <div style="padding:8px 16px;border-bottom:1px solid #1e1e1e10;display:flex;justify-content:space-between;align-items:center;">
+              <div><span style="color:#e4e4e7;">crates.io-index</span> <span style="color:#ef4444;font-size:11px;">exit 1</span></div>
+              <span style="color:#3f3f46;">25m</span>
+            </div>
+            <div style="padding:8px 16px;display:flex;justify-content:space-between;align-items:center;">
+              <div><span style="color:#e4e4e7;">homebrew</span> <span style="color:#ef4444;font-size:11px;">exit 2</span></div>
+              <span style="color:#3f3f46;">1h</span>
+            </div>
+          </div>
+          <div style="padding:12px 16px;color:#3f3f46;font-size:11px;text-align:center;border-top:1px solid #1e1e1e10;">No more failures in 24h ✓</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>

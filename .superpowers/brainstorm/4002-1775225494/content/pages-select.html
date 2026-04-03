@@ -1,0 +1,47 @@
+<h2>Dashboard needs which pages?</h2>
+<p class="subtitle">Select all that apply — click each page you want</p>
+
+<div class="options" data-multiselect>
+  <div class="option" data-choice="overview" onclick="toggleSelect(this)">
+    <div class="letter">1</div>
+    <div class="content">
+      <h3>Overview / Dashboard</h3>
+      <p>At-a-glance cluster health: running jobs, worker status, queue depth, recent failures</p>
+    </div>
+  </div>
+  <div class="option" data-choice="mirrors" onclick="toggleSelect(this)">
+    <div class="letter">2</div>
+    <div class="content">
+      <h3>Mirrors (Jobs)</h3>
+      <p>All mirror repos in one table/list: status, last sync, next sync, trigger button. Click into detail view with action history + logs.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="workers" onclick="toggleSelect(this)">
+    <div class="letter">3</div>
+    <div class="content">
+      <h3>Workers</h3>
+      <p>All registered workers: online/offline, labels, running actions, heartbeat. Remove offline workers.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="queue" onclick="toggleSelect(this)">
+    <div class="letter">4</div>
+    <div class="content">
+      <h3>Queue</h3>
+      <p>Dispatch queue: pause/resume, reorder, set concurrency, remove entries.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="actions" onclick="toggleSelect(this)">
+    <div class="letter">5</div>
+    <div class="content">
+      <h3>Recent Actions</h3>
+      <p>Cross-repo action history with filtering. Click to see logs.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="repos" onclick="toggleSelect(this)">
+    <div class="letter">6</div>
+    <div class="content">
+      <h3>Repo Configs</h3>
+      <p>Raw config viewer: image, volumes, command, interval, node affinity. Read-only.</p>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,145 @@
+<h2>Dashboard Layout: Collapsible Sidebar + Overview</h2>
+<p class="subtitle">This is the main layout structure. The Overview page is shown as example content.</p>
+
+<div class="mockup" style="max-width:1100px;margin:0 auto;">
+  <div class="mockup-header">MirrorGo Dashboard — Overview Page</div>
+  <div class="mockup-body" style="padding:0;display:flex;min-height:600px;font-size:13px;background:#0a0a0a;color:#e4e4e7;">
+
+    <!-- Sidebar -->
+    <div style="width:200px;background:#111;border-right:1px solid #27272a;display:flex;flex-direction:column;flex-shrink:0;">
+      <!-- Logo -->
+      <div style="padding:16px;border-bottom:1px solid #27272a;font-weight:700;font-size:15px;display:flex;align-items:center;gap:8px;">
+        <span style="background:#3b82f6;color:white;border-radius:6px;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;">M</span>
+        MirrorGo
+      </div>
+
+      <!-- Nav items -->
+      <nav style="padding:8px;flex:1;">
+        <div style="padding:8px 12px;border-radius:6px;background:#3b82f620;color:#60a5fa;display:flex;align-items:center;gap:10px;margin-bottom:2px;font-weight:500;">
+          <span style="font-size:16px;">📊</span> Overview
+        </div>
+        <div style="padding:8px 12px;border-radius:6px;display:flex;align-items:center;gap:10px;margin-bottom:2px;color:#a1a1aa;">
+          <span style="font-size:16px;">🪞</span> Mirrors
+        </div>
+        <div style="padding:8px 12px;border-radius:6px;display:flex;align-items:center;gap:10px;margin-bottom:2px;color:#a1a1aa;">
+          <span style="font-size:16px;">🖥️</span> Workers
+        </div>
+        <div style="padding:8px 12px;border-radius:6px;display:flex;align-items:center;gap:10px;margin-bottom:2px;color:#a1a1aa;">
+          <span style="font-size:16px;">📋</span> Queue
+        </div>
+        <div style="padding:8px 12px;border-radius:6px;display:flex;align-items:center;gap:10px;margin-bottom:2px;color:#a1a1aa;">
+          <span style="font-size:16px;">⚡</span> Actions
+        </div>
+        <div style="padding:8px 12px;border-radius:6px;display:flex;align-items:center;gap:10px;margin-bottom:2px;color:#a1a1aa;">
+          <span style="font-size:16px;">⚙️</span> Configs
+        </div>
+      </nav>
+
+      <!-- Collapse button -->
+      <div style="padding:12px;border-top:1px solid #27272a;color:#71717a;font-size:12px;cursor:pointer;text-align:center;">
+        ◀ Collapse
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <div style="flex:1;overflow:auto;">
+      <!-- Top bar -->
+      <div style="padding:16px 24px;border-bottom:1px solid #27272a;display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div style="font-size:18px;font-weight:700;">Overview</div>
+          <div style="color:#71717a;font-size:12px;">Cluster health at a glance</div>
+        </div>
+        <div style="color:#71717a;font-size:12px;">Last updated: just now</div>
+      </div>
+
+      <!-- Stats cards -->
+      <div style="padding:20px 24px 12px;display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">
+        <div style="background:#18181b;border:1px solid #27272a;border-radius:8px;padding:16px;">
+          <div style="color:#71717a;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">Workers Online</div>
+          <div style="font-size:28px;font-weight:700;color:#22c55e;margin-top:4px;">3 <span style="font-size:14px;color:#71717a;">/ 3</span></div>
+        </div>
+        <div style="background:#18181b;border:1px solid #27272a;border-radius:8px;padding:16px;">
+          <div style="color:#71717a;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">Running</div>
+          <div style="font-size:28px;font-weight:700;color:#3b82f6;margin-top:4px;">5</div>
+        </div>
+        <div style="background:#18181b;border:1px solid #27272a;border-radius:8px;padding:16px;">
+          <div style="color:#71717a;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">Queue Depth</div>
+          <div style="font-size:28px;font-weight:700;color:#f59e0b;margin-top:4px;">23</div>
+        </div>
+        <div style="background:#18181b;border:1px solid #27272a;border-radius:8px;padding:16px;">
+          <div style="color:#71717a;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">Failed (24h)</div>
+          <div style="font-size:28px;font-weight:700;color:#ef4444;margin-top:4px;">2</div>
+        </div>
+      </div>
+
+      <!-- Two columns: Running jobs + Recent failures -->
+      <div style="padding:12px 24px 20px;display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <!-- Currently Running -->
+        <div style="background:#18181b;border:1px solid #27272a;border-radius:8px;overflow:hidden;">
+          <div style="padding:12px 16px;border-bottom:1px solid #27272a;font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;">
+            <span style="width:8px;height:8px;background:#3b82f6;border-radius:50%;display:inline-block;animation:pulse 2s infinite;"></span>
+            Currently Running
+          </div>
+          <div style="font-size:12px;">
+            <div style="padding:10px 16px;border-bottom:1px solid #27272a20;display:flex;justify-content:space-between;">
+              <div><span style="color:#e4e4e7;">debian</span> <span style="color:#71717a;">on worker-1</span></div>
+              <span style="color:#71717a;">3m ago</span>
+            </div>
+            <div style="padding:10px 16px;border-bottom:1px solid #27272a20;display:flex;justify-content:space-between;">
+              <div><span style="color:#e4e4e7;">ubuntu</span> <span style="color:#71717a;">on worker-2</span></div>
+              <span style="color:#71717a;">1m ago</span>
+            </div>
+            <div style="padding:10px 16px;border-bottom:1px solid #27272a20;display:flex;justify-content:space-between;">
+              <div><span style="color:#e4e4e7;">archlinux</span> <span style="color:#71717a;">on worker-1</span></div>
+              <span style="color:#71717a;">5m ago</span>
+            </div>
+            <div style="padding:10px 16px;border-bottom:1px solid #27272a20;display:flex;justify-content:space-between;">
+              <div><span style="color:#e4e4e7;">fedora</span> <span style="color:#71717a;">on worker-3</span></div>
+              <span style="color:#71717a;">8m ago</span>
+            </div>
+            <div style="padding:10px 16px;display:flex;justify-content:space-between;">
+              <div><span style="color:#e4e4e7;">pypi</span> <span style="color:#71717a;">on worker-2</span></div>
+              <span style="color:#71717a;">12m ago</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recent Failures -->
+        <div style="background:#18181b;border:1px solid #27272a;border-radius:8px;overflow:hidden;">
+          <div style="padding:12px 16px;border-bottom:1px solid #27272a;font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;">
+            <span style="width:8px;height:8px;background:#ef4444;border-radius:50%;display:inline-block;"></span>
+            Recent Failures
+          </div>
+          <div style="font-size:12px;">
+            <div style="padding:10px 16px;border-bottom:1px solid #27272a20;display:flex;justify-content:space-between;">
+              <div><span style="color:#e4e4e7;">crates.io-index</span> <span style="color:#ef4444;">exit 1</span></div>
+              <span style="color:#71717a;">25m ago</span>
+            </div>
+            <div style="padding:10px 16px;display:flex;justify-content:space-between;">
+              <div><span style="color:#e4e4e7;">homebrew</span> <span style="color:#ef4444;">exit 2</span></div>
+              <span style="color:#71717a;">1h ago</span>
+            </div>
+          </div>
+          <div style="padding:16px;color:#71717a;font-size:12px;text-align:center;">No more failures in last 24h</div>
+        </div>
+      </div>
+
+      <!-- Clock visualization placeholder -->
+      <div style="padding:0 24px 20px;">
+        <div style="background:#18181b;border:1px solid #27272a;border-radius:8px;overflow:hidden;">
+          <div style="padding:12px 16px;border-bottom:1px solid #27272a;font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;">
+            🕐 Schedule Timeline
+          </div>
+          <div style="padding:32px;text-align:center;color:#71717a;font-size:12px;">
+            [ Clock visualization — existing SVG radial timeline preserved here ]
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<style>
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+</style>
