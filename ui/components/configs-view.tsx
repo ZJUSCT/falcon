@@ -85,14 +85,15 @@ function RepoForm({ repo, isNew, onSave, onCancel, saving }: RepoFormProps) {
     updateSync('environments', envs);
   };
 
-  const nodeSelectorStr = form.sync.nodeSelector
-    ? Object.entries(form.sync.nodeSelector).map(([k, v]) => `${k}=${v}`).join('\n')
-    : '';
+  const [nodeSelectorText, setNodeSelectorText] = useState(
+    form.sync.nodeSelector
+      ? Object.entries(form.sync.nodeSelector).map(([k, v]) => `${k}=${v}`).join('\n')
+      : ''
+  );
 
-  const setNodeSelector = (value: string) => {
+  const commitNodeSelector = (value: string) => {
     if (value.trim() === '') {
-      const { nodeSelector, ...rest } = form.sync;
-      setForm(f => ({ ...f, sync: { ...rest, volumes: f.sync.volumes, command: f.sync.command, environments: f.sync.environments } as any }));
+      updateSync('nodeSelector', undefined);
       return;
     }
     const pairs: Record<string, string> = {};
@@ -199,8 +200,9 @@ function RepoForm({ repo, isNew, onSave, onCancel, saving }: RepoFormProps) {
             <label className={labelClass}>Node Selector (key=value, one per line)</label>
             <textarea
               className={inputClass + " min-h-[40px]"}
-              value={nodeSelectorStr}
-              onChange={e => setNodeSelector(e.target.value)}
+              value={nodeSelectorText}
+              onChange={e => setNodeSelectorText(e.target.value)}
+              onBlur={e => commitNodeSelector(e.target.value)}
               rows={2}
               placeholder="e.g. kubernetes.io/hostname=node1"
             />
