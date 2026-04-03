@@ -16,6 +16,24 @@ import (
 )
 
 // ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
+
+// isValidRepoID validates that a repo ID is safe for filesystem use.
+func isValidRepoID(id string) bool {
+	if id == "" || id == "." || id == ".." {
+		return false
+	}
+	for _, c := range id {
+		if c == '/' || c == '\\' || c == 0 {
+			return false
+		}
+	}
+	// Extra safety: ensure resolved path stays under ConfigDir
+	return !strings.Contains(id, "..")
+}
+
+// ---------------------------------------------------------------------------
 // Public API handlers (methods on *State)
 // ---------------------------------------------------------------------------
 
@@ -62,6 +80,10 @@ func (s *State) handleRepoSave(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo id is required"})
 		return
 	}
+	if !isValidRepoID(repo.RepoID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id: must not contain /, \\, .., or null bytes"})
+		return
+	}
 
 	// Write to config file
 	filePath := filepath.Join(s.ConfigDir, repo.RepoID+".json")
@@ -70,7 +92,13 @@ func (s *State) handleRepoSave(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	tmpPath := filePath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		os.Remove(tmpPath)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -96,8 +124,9 @@ func (s *State) handleRepoSave(w http.ResponseWriter, r *http.Request) {
 		job.NextAttemptAt = time.Now()
 		job.UpdatedAt = time.Now()
 	}
+	jobCopy := *job
 	s.JobsMu.Unlock()
-	_ = UpsertJob(job)
+	_ = UpsertJob(&jobCopy)
 
 	writeJSON(w, http.StatusOK, repo)
 }
@@ -107,6 +136,10 @@ func (s *State) handleRepoDelete(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	if id == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing id parameter"})
+		return
+	}
+	if !isValidRepoID(id) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id: must not contain /, \\, .., or null bytes"})
 		return
 	}
 
@@ -281,13 +314,14 @@ func (s *State) handleJobNextAttemptNow(w http.ResponseWriter, r *http.Request) 
 	}
 	job.NextAttemptAt = time.Now()
 	job.UpdatedAt = time.Now()
+	jobCopy := *job
 	s.JobsMu.Unlock()
 
-	if err := UpsertJob(job); err != nil {
+	if err := UpsertJob(&jobCopy); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, job)
+	writeJSON(w, http.StatusOK, &jobCopy)
 }
 
 // handleQueuePause — POST /api/queue/pause
@@ -419,6 +453,7 @@ func (s *State) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// If job was Scheduled, revert to Waiting
+	var jobCopy *shared.Job
 	s.JobsMu.Lock()
 	if job, ok := s.Jobs[id]; ok {
 		if job.Status == shared.JobStatusScheduled {
@@ -426,14 +461,12 @@ func (s *State) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
 			job.UpdatedAt = time.Now()
 			job.NextAttemptAt = time.Now().Add(time.Hour * 999999)
 		}
+		cp := *job
+		jobCopy = &cp
 	}
 	s.JobsMu.Unlock()
-	s.JobsMu.RLock()
-	if job, ok := s.Jobs[id]; ok {
-		s.JobsMu.RUnlock()
-		_ = UpsertJob(job)
-	} else {
-		s.JobsMu.RUnlock()
+	if jobCopy != nil {
+		_ = UpsertJob(jobCopy)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"removed": removed, "queue": s.JobQueue.Snapshot(), "paused": s.JobQueue.IsPaused(), "max_concurrency": s.JobQueue.GetMaxConcurrency()})
 }

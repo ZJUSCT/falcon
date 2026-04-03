@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/moby/moby/api/types/container"
 	"github.com/rs/zerolog/log"
 	"github.com/star/mirrorgo/shared"
 )
@@ -74,6 +76,19 @@ func HandleDispatch(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:        time.Now(),
 		StartedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
+	}
+
+	// Check for duplicate container from a previous dispatch attempt.
+	cExists, cRunning, _ := ContainerExistsByName(act.ContainerName)
+	if cExists && cRunning {
+		// Already running from a previous dispatch attempt - return OK.
+		// The existing monitor will handle it.
+		writeJSON(w, http.StatusOK, shared.DispatchResponse{OK: true, Message: "container already running"})
+		return
+	}
+	if cExists && !cRunning {
+		// Exited container from previous attempt - remove it before starting new one.
+		DockerClient.ContainerRemove(context.Background(), act.ContainerName, container.RemoveOptions{Force: true})
 	}
 
 	if err := StartContainer(act); err != nil {

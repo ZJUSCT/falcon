@@ -159,9 +159,6 @@ func (s *State) dispatchTick() {
 			continue
 		}
 
-		// Dispatch succeeded — remove from persistent queue.
-		_ = DBDequeueOne(jobID)
-
 		now := time.Now()
 		action := &shared.Action{
 			ID:               actionID,
@@ -182,6 +179,8 @@ func (s *State) dispatchTick() {
 		s.ActiveActions[actionID] = action
 		s.ActionsMu.Unlock()
 
+		// Persist action FIRST, then job, then dequeue — so on crash recovery
+		// the action exists in DB and RevertScheduledJobsToWaiting handles the job.
 		if err := UpsertAction(action); err != nil {
 			log.Error().Err(err).Str("action", actionID).Msg("failed to persist action")
 		}
@@ -201,6 +200,9 @@ func (s *State) dispatchTick() {
 		if err := UpsertJob(job); err != nil {
 			log.Error().Err(err).Str("job", jobID).Msg("failed to persist running job")
 		}
+
+		// Remove from persistent queue LAST — after action and job are persisted.
+		_ = DBDequeueOne(jobID)
 
 		// Re-check that the worker is still online; if not, mark action as Reconciling.
 		w, wOK := s.WorkerMgr.GetWorker(worker.Name)
@@ -287,6 +289,12 @@ func (s *State) finishJob(jobID string, succeeded bool) {
 	if !exists {
 		s.JobsMu.Unlock()
 		log.Error().Str("job", jobID).Msg("finishJob: job not found")
+		return
+	}
+
+	// Don't resurrect orphaned jobs
+	if job.Status == shared.JobStatusOrphan {
+		s.JobsMu.Unlock()
 		return
 	}
 

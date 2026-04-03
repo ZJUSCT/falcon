@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/client"
@@ -39,6 +40,23 @@ type ContainerInfo struct {
 	ActionID      string // extracted if possible, or empty
 	IsRunning     bool
 	ExitCode      int
+}
+
+// ContainerExistsByName checks if a Docker container with the given name exists
+// and whether it is currently running.
+func ContainerExistsByName(name string) (exists bool, running bool, err error) {
+	if DryRun {
+		return false, false, nil
+	}
+	inspect, err := DockerClient.ContainerInspect(context.Background(), name)
+	if err != nil {
+		// If the error indicates the container doesn't exist, return false.
+		if errdefs.IsNotFound(err) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	return true, inspect.State.Running, nil
 }
 
 // StartContainer creates and starts a Docker container for the given action.
