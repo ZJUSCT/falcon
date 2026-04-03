@@ -202,6 +202,7 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                   <th className="px-3 py-2 text-center">Job</th>
                   <th className="px-3 py-2 text-center">Status</th>
                   <th className="hidden md:table-cell px-3 py-2 text-center">Last Action</th>
+                  <th className="hidden lg:table-cell px-3 py-2 text-left">Worker</th>
                   <th className="hidden md:table-cell px-3 py-2 text-left">Next Attempt</th>
                   <th className="hidden md:table-cell px-3 py-2 text-left">Last Attempt</th>
                   <th className="hidden lg:table-cell px-3 py-2 text-left">Last Success</th>
@@ -212,6 +213,7 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                 {filtered.map(m => {
                   const job = m.job;
                   const lastActionStatus = (job?.last_action_status || '').trim();
+                  const workerLabel = m.repo?.sync.node || '';
 
                   return (
                     <tr
@@ -266,6 +268,9 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                         ) : (
                           <StatusBadge status="Unknown" />
                         )}
+                      </td>
+                      <td className="hidden lg:table-cell px-3 py-2 align-top">
+                        <span className="font-mono text-xs text-muted-foreground">{workerLabel || '--'}</span>
                       </td>
                       <td className="hidden md:table-cell px-3 py-2 align-top">
                         {job ? (
