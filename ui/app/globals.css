@@ -49,6 +49,28 @@
   --radius: 0.375rem;
 }
 
+.light {
+  --background: 0 0% 98%;
+  --foreground: 0 0% 10%;
+  --card: 0 0% 100%;
+  --card-foreground: 0 0% 10%;
+  --popover: 0 0% 96%;
+  --popover-foreground: 0 0% 10%;
+  --primary: 217 91% 50%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 0 0% 96%;
+  --secondary-foreground: 0 0% 10%;
+  --muted: 0 0% 96%;
+  --muted-foreground: 0 0% 40%;
+  --accent: 0 0% 96%;
+  --accent-foreground: 0 0% 10%;
+  --destructive: 0 84% 50%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 0 0% 90%;
+  --input: 0 0% 100%;
+  --ring: 217 91% 50%;
+}
+
 * {
   border-color: hsl(var(--border));
 }
@@ -68,8 +90,7 @@ body {
 ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground)); }
 
 ::selection {
-  background: rgba(59, 130, 246, 0.15);
-  color: white;
+  background: hsl(var(--primary) / 0.15);
 }
 
 @keyframes pulse-dot {
