@@ -90,7 +90,7 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
     <>
       {/* Desktop sidebar */}
       <aside
-        className="hidden sm:flex flex-col border-r bg-card flex-shrink-0 transition-all duration-200"
+        className="hidden sm:flex flex-col border-r bg-card flex-shrink-0 transition-all duration-200 h-full overflow-y-auto"
         style={{ width: collapsed ? 52 : 180 }}
       >
         <div className="flex items-center gap-2 px-3 py-4 border-b">

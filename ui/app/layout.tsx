@@ -10,7 +10,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body>
-        <div className="min-h-screen bg-background flex">
+        <div className="h-screen bg-background flex overflow-hidden">
           {children}
         </div>
       </body>
