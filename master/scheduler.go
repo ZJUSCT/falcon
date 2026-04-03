@@ -435,9 +435,3 @@ func (s *State) GetActionByIDFromActiveOrDB(id string) *shared.Action {
 	return a
 }
 
-// ---------------------------------------------------------------------------
-// Placeholder stubs — will be replaced in master/mirrorz.go (Task 9)
-// ---------------------------------------------------------------------------
-
-func (s *State) UpdateMirrorgoJSON() error { return nil }
-func (s *State) UpdateMirrorZJSON() error  { return nil }
