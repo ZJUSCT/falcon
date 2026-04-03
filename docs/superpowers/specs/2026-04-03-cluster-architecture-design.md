@@ -56,11 +56,14 @@ mirrorgo worker \
 
 ## Authentication
 
-Pre-shared key (PSK). Master and Worker share the same token, carried in all HTTP requests as `Authorization: Bearer <token>` header. WebSocket connections pass token as query parameter.
+Two API surface areas with different auth models:
+
+- **Internal APIs** (`/api/internal/*`): Master-Worker communication. Pre-shared key (PSK) carried as `Authorization: Bearer <token>` header. WebSocket connections pass token as query parameter. Both Master and Worker validate the token on all internal endpoints.
+- **Public APIs** (`/api/*`, `/mirrorz.json`, UI): No built-in authentication. Access control is handled externally via reverse proxy, firewall, or network policy (matching current single-node behavior).
 
 ## Communication Protocol
 
-HTTP REST for regular interactions. WebSocket for real-time status push and log streaming.
+HTTP REST for regular interactions. WebSocket for real-time Action status push. Log streaming uses HTTP SSE (Server-Sent Events), same as the current implementation.
 
 ### Worker Registration (Worker -> Master, HTTP POST)
 
@@ -148,7 +151,7 @@ GET http://worker-addr:9090/api/internal/action_status?id=xxx
 Authorization: Bearer <token>
 ```
 
-Worker returns final status from memory cache (keeps last N completed actions).
+Worker returns final status from memory cache. Worker keeps the last 1000 completed action results in an LRU cache (action ID -> final status, exit code, exit reason, timestamps). This cache is lost on Worker restart, which is acceptable because Master-side reconciliation handles that case separately.
 
 ### Log Proxy (Master -> Worker, HTTP proxy)
 
@@ -211,7 +214,8 @@ Online -> Offline
 Offline -> Online
   Trigger: Worker re-registers (POST /register, name exists and Offline)
   Action: Update Addr/Labels, mark Online, update LastHeartbeat.
-          Worker reports running_actions, reconciliation begins:
+          Reconciliation begins on the FIRST heartbeat after re-registration
+          (heartbeat contains running_actions):
             - Reported action -> restore to Running
             - Unreported Reconciling action -> mark Failed, finishJob
 
@@ -254,8 +258,11 @@ Running -> Succeeded
   Action: Update Action, finishJob(succeeded=true)
 
 Running -> Failed
-  Trigger: Worker reports exit_code != 0 via WebSocket, or dispatch POST failed
+  Trigger: Worker reports exit_code != 0 via WebSocket
   Action: Update Action, finishJob(succeeded=false)
+
+Note: dispatch POST failure does NOT create an Action at all (see Scheduler section).
+Only Actions that exist can transition.
 
 Running -> Reconciling
   Trigger: Master restarts (all Running actions become Reconciling)
@@ -348,23 +355,26 @@ type Action struct {
 
 1. Load Job/Action/Queue/Worker records from SQLite
 2. All `status==Running` Actions -> mark `Reconciling`
-3. All `status==Scheduled` Jobs -> revert to `Waiting` with `NextAttemptAt = Now` (fix: prevents loss of jobs dequeued but not yet dispatched)
-4. Wait for Workers to reconnect via WebSocket and re-register
-5. On Worker reconnection: reconcile actions based on heartbeat `running_actions`
+3. All `status==Scheduled` Jobs -> revert to `Waiting` with `NextAttemptAt = Now` (prevents loss of jobs dequeued but not yet dispatched)
+4. All Workers -> mark `Offline` (until they re-register)
+5. **Immediately** resume scheduleLoop and dispatchLoop (non-blocking). Dispatch will naturally skip jobs whose Workers are Offline.
+6. Workers reconnect at their own pace, re-register, and send first heartbeat
+7. On first heartbeat from a reconnected Worker: reconcile actions based on `running_actions`
    - Reported as running -> restore Action to Running
    - Reported as completed -> update Action to Succeeded/Failed, finishJob
-   - Not reported -> wait until heartbeat stabilizes, then mark Failed
-6. Resume scheduleLoop and dispatchLoop
+   - Not reported -> mark Failed, finishJob
 
 ### Worker Restart
 
-1. Worker is stateless (no persistent storage)
+1. Worker is stateless (no persistent DB). However, Worker maintains an in-memory LRU cache of completed action results (see Action Status Query).
 2. On startup: POST /register to Master, establish WebSocket
 3. Scan local Docker containers with `syncing-` name prefix:
    - Still running -> resume monitoring, report via WebSocket
-   - Already exited -> collect exit code and logs, report Succeeded/Failed
+   - Already exited -> collect exit code from Docker inspect (container is NOT deleted until status is confirmed reported to Master), populate completed action cache, report Succeeded/Failed via WebSocket
    - Not found -> no action (Master-side reconciliation handles it)
 4. Normal heartbeat resumes, Master completes reconciliation
+
+**Container deletion policy change**: In the current single-node code, `CheckContainer` immediately deletes exited containers. In cluster mode, Worker defers container deletion until Master has acknowledged the final status (via WebSocket ack or heartbeat diff confirmation). This ensures exited containers can be re-inspected after Worker restart. Worker periodically cleans up acknowledged containers older than 1 hour as a safety net.
 
 ### WebSocket Reconnection
 
@@ -377,13 +387,21 @@ Worker side:
 
 Worker containers continue running during disconnection. Status changes cached in memory, batch-pushed on reconnect.
 
-### Dispatch Atomicity (fix: crash between POST and record creation)
+### Dispatch Atomicity
 
 Dispatch ordering:
-1. POST /dispatch to Worker first
-2. Only on success: create Action record in DB
+1. Master generates action ID
+2. POST /dispatch to Worker (includes the action ID)
+3. Worker returns success -> Master creates Action record in DB
+4. Worker returns failure (HTTP error / timeout) -> no Action created, job back to queue tail
 
-Worst case on Master crash between steps 1 and 2: Worker runs a container Master doesn't know about. On Worker reconnection, heartbeat reports unknown action ID. Worker handles locally (container has `syncing-` prefix, can self-identify). Master can instruct Worker to report status for unknown actions via the action_status endpoint.
+The `/dispatch` endpoint is **idempotent by action ID**: if the Worker receives a duplicate action ID it already knows about, it returns success without creating a second container. This handles the case where Master's POST succeeded but the response was lost (timeout), so Master retries safely.
+
+**Dispatch timeout**: Master uses a 30s HTTP timeout for `/dispatch`. On timeout, Master does NOT create an Action record. The next heartbeat from the Worker will reveal whether the container actually started:
+- If the action ID appears in `running_actions` -> Master creates the Action record retroactively as Running
+- If it does not appear -> the dispatch was lost, no action needed
+
+**Master crash between steps 2 and 3**: Worker runs a container that Master has no record of. On Worker reconnection, heartbeat reports the unknown action ID. Master queries `GET /api/internal/action_status?id=xxx` on the Worker to get full details, then creates the Action record with the correct status.
 
 ## Log Management
 
@@ -402,6 +420,22 @@ mirrorgo worker ... --basedir /home/zjusct/mirrorgo --repodir /test1/mirrors/
 ```
 
 Different Workers can have different paths.
+
+## Worker Data Model (Master DB)
+
+```go
+type WorkerModel struct {
+    Name           string    `gorm:"primaryKey;column:name"`
+    Addr           string    `gorm:"column:addr"`
+    Labels         string    `gorm:"column:labels;type:TEXT"`   // JSON serialized map[string]string
+    Status         string    `gorm:"column:status"`             // Online / Offline
+    LastHeartbeat  time.Time `gorm:"column:last_heartbeat"`
+    RunningActions string    `gorm:"column:running_actions;type:TEXT"` // JSON serialized []string
+    RegisteredAt   time.Time `gorm:"column:registered_at"`
+}
+```
+
+Table name: `workers`. Persisted in Master's SQLite so Worker list survives Master restart.
 
 ## Worker Management API
 
