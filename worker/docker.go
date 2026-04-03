@@ -2,9 +2,13 @@ package worker
 
 import (
 	"context"
+	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
@@ -17,7 +21,16 @@ var (
 	DockerClient *client.Client
 	BaseDir      string
 	RepoDir      string
+	DryRun       bool
+
+	dryRunMu    sync.Mutex
+	dryRunTimes = make(map[string]dryRunInfo) // action ID -> info
 )
+
+type dryRunInfo struct {
+	startTime time.Time
+	duration  time.Duration
+}
 
 // ContainerInfo holds information about a Docker container discovered during scanning.
 type ContainerInfo struct {
@@ -30,6 +43,28 @@ type ContainerInfo struct {
 
 // StartContainer creates and starts a Docker container for the given action.
 func StartContainer(act *shared.Action) error {
+	if DryRun {
+		log.Info().Str("job", act.JobID).Str("action", act.ID).Str("image", act.ContainerImage).Msg("[dryrun] Simulating container start")
+
+		logDir, err := CreatLogDir(act)
+		if err != nil {
+			return err
+		}
+		// Write a dummy log file so log endpoints work
+		_ = os.WriteFile(filepath.Join(logDir, "container.log"), []byte(fmt.Sprintf("dryrun: simulating container for %s\n", act.JobID)), 0644)
+
+		act.ContainerID = "dryrun-" + act.ID
+		act.ContainerStatus = shared.ContainerStatusRunning
+
+		duration := time.Duration(5+rand.Intn(11)) * time.Second
+		dryRunMu.Lock()
+		dryRunTimes[act.ID] = dryRunInfo{startTime: time.Now(), duration: duration}
+		dryRunMu.Unlock()
+
+		log.Info().Str("action", act.ID).Dur("simulated_duration", duration).Msg("[dryrun] Container started (simulated)")
+		return nil
+	}
+
 	log.Debug().Str("job", act.JobID).Str("action", act.ID).Str("image", act.ContainerImage).Msg("Starting container")
 
 	logDir, err := CreatLogDir(act)
@@ -115,6 +150,29 @@ func StartContainer(act *shared.Action) error {
 // CheckContainer inspects the container and records exit status if finished.
 // It does NOT delete the container — deletion is deferred to CleanupContainer.
 func CheckContainer(act *shared.Action) (bool, error) {
+	if DryRun {
+		dryRunMu.Lock()
+		info, ok := dryRunTimes[act.ID]
+		dryRunMu.Unlock()
+		if !ok {
+			// No tracking info; treat as finished
+			act.ContainerStatus = shared.ContainerStatusExited
+			act.ContainerExitCode = 0
+			return true, nil
+		}
+		if time.Since(info.startTime) >= info.duration {
+			act.ContainerStatus = shared.ContainerStatusExited
+			act.ContainerExitCode = 0
+			act.ContainerExitReason = ""
+			dryRunMu.Lock()
+			delete(dryRunTimes, act.ID)
+			dryRunMu.Unlock()
+			log.Info().Str("action", act.ID).Msg("[dryrun] Container finished (simulated)")
+			return true, nil
+		}
+		return false, nil
+	}
+
 	inspect, err := DockerClient.ContainerInspect(context.Background(), act.ContainerID)
 	if err != nil {
 		act.ContainerStatus = shared.ContainerStatusExited
@@ -137,6 +195,11 @@ func CheckContainer(act *shared.Action) (bool, error) {
 // DeleteContainer removes the container's log symlink, copies the Docker log
 // to the action log directory, and removes the container.
 func DeleteContainer(act *shared.Action) error {
+	if DryRun {
+		log.Info().Str("action", act.ID).Msg("[dryrun] Skipping container deletion (simulated)")
+		return nil
+	}
+
 	logDir := GetLogDir(act)
 
 	// Remove symlink
@@ -177,6 +240,11 @@ func CleanupContainer(act *shared.Action) error {
 // prefix and returns them split into running and exited slices. Matching
 // containers to specific actions is left to the caller.
 func ScanExistingContainers() (running []*ContainerInfo, exited []*ContainerInfo, err error) {
+	if DryRun {
+		log.Info().Msg("[dryrun] Skipping container scan (no containers in dryrun mode)")
+		return nil, nil, nil
+	}
+
 	containers, err := DockerClient.ContainerList(context.Background(), container.ListOptions{
 		All: true,
 	})

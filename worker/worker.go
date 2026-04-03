@@ -30,6 +30,7 @@ type WorkerConfig struct {
 	BaseDir   string
 	RepoDir   string
 	LogDir    string // defaults to BaseDir + "/logs/"
+	DryRun    bool
 }
 
 // WorkerState tracks running and acknowledged actions in memory.
@@ -59,14 +60,19 @@ func Run(cfg WorkerConfig) {
 		cfg.LogDir = filepath.Join(cfg.BaseDir, "logs")
 	}
 
-	// 2. Init Docker client
-	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to create Docker client")
+	// 2. Init Docker client (or skip in dryrun mode)
+	if cfg.DryRun {
+		DryRun = true
+		log.Info().Msg("Dry-run mode active: Docker calls will be simulated")
+	} else {
+		dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+		if err != nil {
+			log.Fatal().Err(err).Msg("Failed to create Docker client")
+		}
+		DockerClient = dockerClient
 	}
 
 	// 3. Set package-level vars
-	DockerClient = dockerClient
 	BaseDir = cfg.BaseDir
 	RepoDir = cfg.RepoDir
 	LogDir = cfg.LogDir

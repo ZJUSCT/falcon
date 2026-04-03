@@ -101,6 +101,8 @@ func parseWorkerFlags(args []string) worker.WorkerConfig {
 		case "--repodir":
 			i++
 			cfg.RepoDir = args[i]
+		case "--dryrun":
+			cfg.DryRun = true
 		}
 	}
 	if cfg.AuthToken == "" {
