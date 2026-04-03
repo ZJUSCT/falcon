@@ -28,6 +28,8 @@ export interface SyncConfig {
   volumes: Volume[];
   command: string[];
   environments: string[];
+  node?: string;
+  nodeSelector?: Record<string, string>;
 }
 
 export interface Repo {
@@ -52,8 +54,9 @@ export interface Action {
   id: string;
   updated_at: string;
   job_id: string;
-  status: 'Running' | 'Succeeded' | 'Failed';
+  status: 'Running' | 'Succeeded' | 'Failed' | 'Reconciling';
   message: string;
+  worker_name?: string;
   container_id: string;
   container_name: string;
   container_image: string;
@@ -68,6 +71,16 @@ export interface Action {
   created_at?: string;
   started_at?: string;
   finished_at?: string;
+}
+
+export interface Worker {
+  name: string;
+  addr: string;
+  labels: Record<string, string> | null;
+  status: 'Online' | 'Offline';
+  last_heartbeat: string;
+  running_actions: string[] | null;
+  registered_at: string;
 }
 
 export type QueueItem = string;

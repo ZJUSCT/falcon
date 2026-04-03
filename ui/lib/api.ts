@@ -1,4 +1,4 @@
-import { Repo, Job, Action, QueueItem, QueueResponse, LogListResponse } from '@/types';
+import { Repo, Job, Action, QueueItem, QueueResponse, LogListResponse, Worker } from '@/types';
 
 const API_BASE = '/api';
 
@@ -166,6 +166,20 @@ class ApiClient {
 
   getLogRawUrl(actionId: string, fileName: string): string {
     return `${API_BASE}/logs/raw?action_id=${encodeURIComponent(actionId)}&file=${encodeURIComponent(fileName)}`;
+  }
+
+  async getWorkers(): Promise<Worker[]> {
+    return this.fetch<Worker[]>('/workers');
+  }
+
+  async removeWorker(name: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/workers/remove?name=${encodeURIComponent(name)}`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: response.statusText }));
+      throw new Error(errorData.error || `API request failed: ${response.statusText}`);
+    }
   }
 
   getLogStreamUrl(actionId: string, fileName: string, from: 'start' | 'end' = 'end'): string {

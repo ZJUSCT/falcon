@@ -160,6 +160,12 @@ export function getStatusColor(status: string): string {
       return 'bg-purple-600 border-purple-200 hover:bg-purple-700';
     case 'Orphan':
       return 'text-gray-600 bg-gray-400 border-gray-200 hover:bg-gray-600';
+    case 'Reconciling':
+      return 'bg-yellow-600 border-yellow-200 hover:bg-yellow-700';
+    case 'Online':
+      return 'bg-green-600 border-green-200 hover:bg-green-700';
+    case 'Offline':
+      return 'bg-red-600 border-red-200 hover:bg-red-700';
     default:
       return 'text-gray-600 bg-gray-400 border-gray-200 hover:bg-gray-600';
   }
