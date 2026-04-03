@@ -6,31 +6,15 @@ const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
   title: 'MirrorGo Dashboard',
-  description: 'Modern web dashboard for MirrorGo mirror management system',
+  description: 'Cluster-aware mirror management dashboard',
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <body className={inter.className}>
-        <div className="min-h-screen bg-background">
-          <header className="border-b">
-            <div className="container mx-auto px-4 py-4">
-              <div className="flex items-center justify-between">
-                <h1 className="text-xl sm:text-2xl font-bold">MirrorGo</h1>
-                <div className="hidden sm:block text-sm text-muted-foreground">
-                  Mirror Management Dashboard
-                </div>
-              </div>
-            </div>
-          </header>
-          <main className="container mx-auto px-2 sm:px-4 py-4 sm:py-8">
-            {children}
-          </main>
+        <div className="min-h-screen bg-background flex">
+          {children}
         </div>
       </body>
     </html>
