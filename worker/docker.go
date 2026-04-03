@@ -220,24 +220,28 @@ func DeleteContainer(act *shared.Action) error {
 
 	logDir := GetLogDir(act)
 
-	// Remove symlink
-	err := os.Remove(filepath.Join(logDir, "container.log"))
-	if err != nil {
-		log.Error().Err(err).Str("job", act.JobID).Str("action", act.ID).Str("image", act.ContainerImage).Msg("Failed to remove container log symlink")
-	}
-
-	// Inspect to get container log path
+	// 1. Inspect to get container log path (before removing anything)
 	inspect, err := DockerClient.ContainerInspect(context.Background(), act.ContainerID)
 	if err != nil {
 		log.Error().Err(err).Str("job", act.JobID).Str("action", act.ID).Str("image", act.ContainerImage).Msg("Failed to inspect container")
-	} else {
-		// Copy Docker log to logDir
-		err = copyFile(inspect.LogPath, filepath.Join(logDir, "container.log"))
-		if err != nil {
-			log.Error().Err(err).Str("job", act.JobID).Str("action", act.ID).Str("image", act.ContainerImage).Msg("Failed to copy container log")
-		}
+		return fmt.Errorf("inspect container for log path: %w", err)
 	}
 
+	// 2. Copy Docker log to logDir (before removing the container)
+	logDest := filepath.Join(logDir, "container.log.tmp")
+	if err := copyFile(inspect.LogPath, logDest); err != nil {
+		log.Error().Err(err).Str("job", act.JobID).Str("action", act.ID).Str("image", act.ContainerImage).Msg("Failed to copy container log; skipping container removal to preserve log")
+		return fmt.Errorf("copy container log: %w", err)
+	}
+
+	// 3. Remove symlink and put the real copy in place
+	symlink := filepath.Join(logDir, "container.log")
+	_ = os.Remove(symlink) // remove symlink (best-effort)
+	if err := os.Rename(logDest, symlink); err != nil {
+		log.Error().Err(err).Str("job", act.JobID).Str("action", act.ID).Msg("Failed to rename copied log")
+	}
+
+	// 4. Force remove container (safe now — we have the log copy)
 	if err := DockerClient.ContainerRemove(context.Background(), act.ContainerID, container.RemoveOptions{
 		Force: true,
 	}); err != nil {

@@ -227,8 +227,14 @@ func monitorAction(ws *WorkerState, act *shared.Action, wsClient *WSClient, cach
 				UpdatedAt:       time.Now(),
 			})
 
-			// Keep the action in runningActions so the heartbeat reports it
-			// until the master sends an ack. OnAck handles the actual removal.
+			// Mark the action with its terminal status so the heartbeat no
+			// longer reports it as running. The entry stays in runningActions
+			// until the master sends an ack (OnAck handles actual removal).
+			ws.mu.Lock()
+			if a, ok := ws.runningActions[act.ID]; ok {
+				a.Status = status
+			}
+			ws.mu.Unlock()
 
 			log.Info().Str("action", act.ID).Str("status", status).Int("exit_code", act.ContainerExitCode).Msg("Action finished")
 			return
@@ -249,8 +255,10 @@ func heartbeatLoop(ctx context.Context, masterURL, token, name string, ws *Worke
 		case <-ticker.C:
 			ws.mu.RLock()
 			ids := make([]string, 0, len(ws.runningActions))
-			for id := range ws.runningActions {
-				ids = append(ids, id)
+			for id, act := range ws.runningActions {
+				if act.Status == shared.ActionStatusRunning {
+					ids = append(ids, id)
+				}
 			}
 			ws.mu.RUnlock()
 
