@@ -43,10 +43,10 @@ export function ConfigsView() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="p-6 space-y-6">
       <div>
-        <h2 className="text-2xl sm:text-3xl font-bold tracking-tight">Configs</h2>
-        <p className="text-sm text-muted-foreground mt-1">Read-only repository configuration details</p>
+        <h2 className="text-lg font-bold">Configs</h2>
+        <p className="text-xs text-muted-foreground">Read-only repository configuration details</p>
       </div>
 
       {repos.length === 0 ? (

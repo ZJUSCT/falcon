@@ -146,13 +146,13 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
             <table className="w-full text-xs sm:text-sm">
               <thead className="bg-muted/40 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 <tr>
-                  <th className="px-3 py-2 text-left">Action</th>
-                  <th className="px-3 py-2 text-left">Status</th>
-                  <th className="hidden md:table-cell px-3 py-2 text-left">Worker</th>
-                  <th className="hidden md:table-cell px-3 py-2 text-left">Updated</th>
-                  <th className="hidden lg:table-cell px-3 py-2 text-left">Timing</th>
-                  <th className="hidden xl:table-cell px-3 py-2 text-left">Container</th>
-                  <th className="hidden 2xl:table-cell px-3 py-2 text-left">Message</th>
+                  <th className="px-3 py-3 text-left">Action</th>
+                  <th className="px-3 py-3 text-left">Status</th>
+                  <th className="hidden md:table-cell px-3 py-3 text-left">Worker</th>
+                  <th className="hidden md:table-cell px-3 py-3 text-left">Updated</th>
+                  <th className="hidden lg:table-cell px-3 py-3 text-left">Timing</th>
+                  <th className="hidden xl:table-cell px-3 py-3 text-left">Container</th>
+                  <th className="hidden 2xl:table-cell px-3 py-3 text-left">Message</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
@@ -164,7 +164,7 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
                     tabIndex={0}
                     className="group cursor-pointer bg-background transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
                   >
-                    <td className="px-3 py-2 align-top">
+                    <td className="px-3 py-3 align-top">
                       <div className="font-mono text-sm sm:text-base">{action.job_id}</div>
                       <div className="text-[11px] text-muted-foreground font-mono truncate">{action.id}</div>
                       <div className="mt-1 text-[11px] text-muted-foreground md:hidden">
@@ -172,7 +172,7 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
                         <RelativeTime date={action.updated_at} variant="compact" />
                       </div>
                     </td>
-                    <td className="px-3 py-2 align-top">
+                    <td className="px-3 py-3 align-top">
                       <div className="flex flex-wrap items-center gap-2">
                         <StatusBadge status={action.status} />
                         <span className="font-mono text-[11px] text-muted-foreground">{action.container_status}</span>
@@ -183,13 +183,13 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
                         </div>
                       )}
                     </td>
-                    <td className="hidden md:table-cell px-3 py-2 align-top">
+                    <td className="hidden md:table-cell px-3 py-3 align-top">
                       <span className="font-mono text-xs text-muted-foreground">{action.worker_name || '\u2014'}</span>
                     </td>
-                    <td className="hidden md:table-cell px-3 py-2 align-top">
+                    <td className="hidden md:table-cell px-3 py-3 align-top">
                       <RelativeTime date={action.updated_at} variant="compact" />
                     </td>
-                    <td className="hidden lg:table-cell px-3 py-2 align-top text-[11px] leading-relaxed text-muted-foreground">
+                    <td className="hidden lg:table-cell px-3 py-3 align-top text-[11px] leading-relaxed text-muted-foreground">
                       {action.started_at ? (
                         <div>
                           <span className="uppercase tracking-wide">Started </span>
@@ -211,11 +211,11 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
                         <span className="font-mono text-muted-foreground">{getDurationLabel(action)}</span>
                       </div>
                     </td>
-                    <td className="hidden xl:table-cell px-3 py-2 align-top text-[11px] text-muted-foreground">
+                    <td className="hidden xl:table-cell px-3 py-3 align-top text-[11px] text-muted-foreground">
                       <div className="font-mono text-xs text-foreground truncate">{action.container_name || '—'}</div>
                       <div className="font-mono truncate">{action.container_image}</div>
                     </td>
-                    <td className="hidden 2xl:table-cell px-3 py-2 align-top">
+                    <td className="hidden 2xl:table-cell px-3 py-3 align-top">
                       <div className="font-mono text-xs text-muted-foreground truncate">
                         {action.message || '—'}
                       </div>
@@ -231,34 +231,24 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
   };
 
   return (
-    <div className="space-y-4 sm:space-y-6">
+    <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-2xl sm:text-3xl font-bold tracking-tight">Actions</h2>
-        <div className="text-xs sm:text-sm text-muted-foreground font-mono">
-          {activeActions.length} active • {recentActions.length} recent
+        <div>
+          <h2 className="text-lg font-bold">Actions</h2>
+          <p className="text-xs text-muted-foreground">{activeActions.length} active / {recentActions.length} recent</p>
         </div>
       </div>
 
       {/* Active Actions Section */}
       <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <h3 className="text-xl font-semibold tracking-tight">Currently Running</h3>
-          <div className="text-sm text-muted-foreground font-mono">
-            {activeActions.length} active actions
-          </div>
-        </div>
+        <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground font-semibold">Currently Running</h3>
 
         {renderActionsTable(activeActions, 'No currently running actions')}
       </div>
 
       {/* Recent Actions Section */}
       <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <h3 className="text-xl font-semibold tracking-tight">Recent Activity</h3>
-          <div className="text-sm text-muted-foreground font-mono">
-            Last {recentActions.length} actions
-          </div>
-        </div>
+        <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground font-semibold">Recent Activity</h3>
 
         {renderActionsTable(recentActions, 'No recent actions found')}
       </div>

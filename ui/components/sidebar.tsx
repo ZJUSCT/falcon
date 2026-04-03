@@ -27,7 +27,7 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const nav = (
-    <nav className="flex-1 px-2 py-2 space-y-0.5">
+    <nav className="flex-1 px-2 py-3 space-y-1">
       {navItems.map((item) => {
         const Icon = item.icon;
         const active = activePage === item.id;
@@ -35,8 +35,9 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
           <button
             key={item.id}
             onClick={() => { onNavigate(item.id); setMobileOpen(false); }}
+            style={{ padding: '8px 10px', gap: '10px' }}
             className={cn(
-              'w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors',
+              'w-full flex items-center rounded-md text-xs font-medium transition-colors',
               active
                 ? 'bg-primary/15 text-primary'
                 : 'text-muted-foreground hover:text-foreground hover:bg-accent'
@@ -54,10 +55,8 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
     <>
       {/* Desktop sidebar */}
       <aside
-        className={cn(
-          'hidden sm:flex flex-col border-r bg-card flex-shrink-0 transition-all duration-200',
-          collapsed ? 'w-14' : 'w-48'
-        )}
+        className="hidden sm:flex flex-col border-r bg-card flex-shrink-0 transition-all duration-200"
+        style={{ width: collapsed ? 52 : 180 }}
       >
         <div className="flex items-center gap-2 px-3 py-4 border-b">
           <div className="w-7 h-7 rounded-md bg-primary flex items-center justify-center text-primary-foreground text-xs font-bold flex-shrink-0">
@@ -91,7 +90,7 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
       {/* Mobile overlay */}
       {mobileOpen && (
         <div className="sm:hidden fixed inset-0 z-40 bg-background/80 backdrop-blur-sm" onClick={() => setMobileOpen(false)}>
-          <div className="w-48 h-full bg-card border-r" onClick={(e) => e.stopPropagation()}>
+          <div className="h-full bg-card border-r" style={{ width: 180 }} onClick={(e) => e.stopPropagation()}>
             <div className="pt-16">{nav}</div>
           </div>
         </div>

@@ -69,10 +69,10 @@ export function QueueView() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <h2 className="text-3xl font-bold tracking-tight">Job Queue</h2>
+          <h2 className="text-lg font-bold">Job Queue</h2>
           {queueData.paused && (
             <div className="flex items-center gap-1 px-2 py-1 text-sm bg-yellow-100 text-yellow-800 border border-yellow-200 rounded-md">
               <Pause className="h-4 w-4" />

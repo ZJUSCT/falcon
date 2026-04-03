@@ -502,43 +502,43 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="p-6 space-y-6">
       {/* A. Page header + LIVE indicator */}
-      <div className="p-6 pb-0">
+      <div>
         <div className="flex items-center gap-2 mb-1">
-          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-          <span className="text-green-500 text-xs font-semibold tracking-wider">LIVE</span>
+          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse-dot" />
+          <span className="text-green-500 text-[10px] font-semibold tracking-widest uppercase">LIVE</span>
         </div>
-        <h1 className="text-2xl font-bold">Overview</h1>
-        <p className="text-sm text-muted-foreground">Cluster health at a glance</p>
+        <h1 className="text-lg font-bold">Overview</h1>
+        <p className="text-xs text-muted-foreground">Cluster health at a glance</p>
       </div>
 
       {/* B. Stats cards row */}
-      <div className="px-6 flex gap-4 overflow-x-auto pb-2">
-        <div className="min-w-[140px] rounded-lg border bg-card p-4">
-          <div className="text-[11px] uppercase tracking-wider text-muted-foreground mb-1">Workers Online</div>
-          <div className="text-2xl font-bold text-green-500">{workersOnline}<span className="text-sm text-muted-foreground font-normal">/{workers.length}</span></div>
+      <div className="flex gap-4 overflow-x-auto pb-2">
+        <div className="min-w-[140px] rounded-lg border bg-card p-3">
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">Workers Online</div>
+          <div className="text-xl font-bold tabular-nums text-green-500">{workersOnline}<span className="text-xs text-muted-foreground font-normal">/{workers.length}</span></div>
         </div>
-        <div className="min-w-[140px] rounded-lg border bg-card p-4">
-          <div className="text-[11px] uppercase tracking-wider text-muted-foreground mb-1">Running</div>
-          <div className="text-2xl font-bold text-blue-500">{runningJobs}</div>
+        <div className="min-w-[140px] rounded-lg border bg-card p-3">
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">Running</div>
+          <div className="text-xl font-bold tabular-nums text-blue-500">{runningJobs}</div>
         </div>
-        <div className="min-w-[140px] rounded-lg border bg-card p-4">
-          <div className="text-[11px] uppercase tracking-wider text-muted-foreground mb-1">Queue Depth</div>
-          <div className="text-2xl font-bold text-amber-500">{queueDepth}</div>
+        <div className="min-w-[140px] rounded-lg border bg-card p-3">
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">Queue Depth</div>
+          <div className="text-xl font-bold tabular-nums text-amber-500">{queueDepth}</div>
         </div>
-        <div className="min-w-[140px] rounded-lg border bg-card p-4">
-          <div className="text-[11px] uppercase tracking-wider text-muted-foreground mb-1">Succeeded (24h)</div>
-          <div className="text-2xl font-bold text-green-500">{succeeded24h}</div>
+        <div className="min-w-[140px] rounded-lg border bg-card p-3">
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">Succeeded (24h)</div>
+          <div className="text-xl font-bold tabular-nums text-green-500">{succeeded24h}</div>
         </div>
-        <div className="min-w-[140px] rounded-lg border bg-card p-4">
-          <div className="text-[11px] uppercase tracking-wider text-muted-foreground mb-1">Failed (24h)</div>
-          <div className="text-2xl font-bold text-red-500">{failed24h}</div>
+        <div className="min-w-[140px] rounded-lg border bg-card p-3">
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">Failed (24h)</div>
+          <div className="text-xl font-bold tabular-nums text-red-500">{failed24h}</div>
         </div>
       </div>
 
       {/* C. Schedule Timeline (Clock) */}
-      <div className="mx-6 rounded-lg border bg-card">
+      <div className="rounded-lg border bg-card">
         <div className="px-4 py-3 border-b flex justify-between items-center">
           <span className="text-sm font-semibold">Schedule Timeline</span>
           <div className="flex gap-3 text-xs text-muted-foreground">
@@ -906,8 +906,8 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
       </div>
 
       {/* D. Workers grid */}
-      <div className="px-6">
-        <h2 className="text-sm font-semibold mb-3">Workers</h2>
+      <div>
+        <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground font-semibold mb-3">Workers</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {workers.map((worker) => (
             <div key={worker.name} className="rounded-lg border bg-card p-4 space-y-2">
@@ -936,17 +936,17 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
       </div>
 
       {/* E. Currently Running + Recent Failures */}
-      <div className="px-6 grid grid-cols-1 md:grid-cols-2 gap-6 pb-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Currently Running */}
         <div className="rounded-lg border bg-card">
           <div className="px-4 py-3 border-b">
             <span className="text-sm font-semibold">Currently Running</span>
           </div>
-          <div className="p-4 space-y-2 max-h-64 overflow-y-auto">
+          <div className="p-4 space-y-1 max-h-64 overflow-y-auto">
             {runningActions.length > 0 ? runningActions.map((action) => (
               <div
                 key={action.id}
-                className="flex items-center justify-between text-sm cursor-pointer hover:bg-muted/50 rounded p-1.5 -mx-1.5"
+                className="flex items-center justify-between text-xs cursor-pointer hover:bg-muted/50 rounded px-3 py-2"
                 onClick={() => onNavigateToJob?.(action.job_id)}
               >
                 <span className="font-mono text-xs truncate">
@@ -967,11 +967,11 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
           <div className="px-4 py-3 border-b">
             <span className="text-sm font-semibold">Recent Failures</span>
           </div>
-          <div className="p-4 space-y-2 max-h-64 overflow-y-auto">
+          <div className="p-4 space-y-1 max-h-64 overflow-y-auto">
             {recentFailures.length > 0 ? recentFailures.map((action) => (
               <div
                 key={action.id}
-                className="flex items-center justify-between text-sm cursor-pointer hover:bg-muted/50 rounded p-1.5 -mx-1.5"
+                className="flex items-center justify-between text-xs cursor-pointer hover:bg-muted/50 rounded px-3 py-2"
                 onClick={() => onNavigateToJob?.(action.job_id)}
               >
                 <span className="font-mono text-xs truncate text-red-500">

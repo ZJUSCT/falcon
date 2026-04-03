@@ -116,10 +116,10 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="p-6 space-y-6">
       <div>
-        <h2 className="text-2xl sm:text-3xl font-bold tracking-tight">Mirrors</h2>
-        <p className="text-sm text-muted-foreground mt-1">Unified view of repositories and sync jobs</p>
+        <h2 className="text-lg font-bold">Mirrors</h2>
+        <p className="text-xs text-muted-foreground">Unified view of repositories and sync jobs</p>
       </div>
 
       <div className="flex flex-col sm:flex-row gap-3">
@@ -136,7 +136,7 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
         <select
           value={statusFilter}
           onChange={e => setStatusFilter(e.target.value)}
-          className="px-3 py-2 text-sm rounded-md border border-border bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary/60"
+          className="px-3 py-3 text-sm rounded-md border border-border bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary/60"
         >
           <option value="All">All Statuses</option>
           <option value="Running">Running</option>
@@ -156,13 +156,13 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
             <table className="w-full text-xs sm:text-sm">
               <thead className="bg-muted/40 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 <tr>
-                  <th className="px-3 py-2 text-left">Name</th>
-                  <th className="px-3 py-2 text-center">Status</th>
-                  <th className="hidden md:table-cell px-3 py-2 text-center">Last Action</th>
-                  <th className="hidden lg:table-cell px-3 py-2 text-left">Worker</th>
-                  <th className="hidden md:table-cell px-3 py-2 text-left">Last Sync</th>
-                  <th className="hidden md:table-cell px-3 py-2 text-left">Next Sync</th>
-                  <th className="px-3 py-2 text-center w-12"></th>
+                  <th className="px-3 py-3 text-left">Name</th>
+                  <th className="px-3 py-3 text-center">Status</th>
+                  <th className="hidden md:table-cell px-3 py-3 text-center">Last Action</th>
+                  <th className="hidden lg:table-cell px-3 py-3 text-left">Worker</th>
+                  <th className="hidden md:table-cell px-3 py-3 text-left">Last Sync</th>
+                  <th className="hidden md:table-cell px-3 py-3 text-left">Next Sync</th>
+                  <th className="px-3 py-3 text-center w-12"></th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
@@ -180,7 +180,7 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                       tabIndex={0}
                       className="group cursor-pointer bg-background transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
                     >
-                      <td className="px-3 py-2 align-top">
+                      <td className="px-3 py-3 align-top">
                         <div className="font-mono text-sm sm:text-base">{m.id}</div>
                         <div className="mt-1 text-[11px] text-muted-foreground md:hidden">
                           {job ? (
@@ -193,38 +193,38 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                           )}
                         </div>
                       </td>
-                      <td className="px-3 py-2 text-center align-top">
+                      <td className="px-3 py-3 text-center align-top">
                         {job ? (
                           <StatusBadge status={job.status} />
                         ) : (
                           <span className="font-mono text-muted-foreground text-xs">--</span>
                         )}
                       </td>
-                      <td className="hidden md:table-cell px-3 py-2 text-center align-top">
+                      <td className="hidden md:table-cell px-3 py-3 text-center align-top">
                         {lastActionStatus ? (
                           <StatusBadge status={lastActionStatus} />
                         ) : (
                           <span className="font-mono text-muted-foreground text-xs">--</span>
                         )}
                       </td>
-                      <td className="hidden lg:table-cell px-3 py-2 align-top">
+                      <td className="hidden lg:table-cell px-3 py-3 align-top">
                         <span className="font-mono text-xs text-muted-foreground">{workerLabel || '--'}</span>
                       </td>
-                      <td className="hidden md:table-cell px-3 py-2 align-top">
+                      <td className="hidden md:table-cell px-3 py-3 align-top">
                         {job ? (
                           <RelativeTime date={job.last_attempt_at} variant="compact" />
                         ) : (
                           <span className="font-mono text-muted-foreground text-xs">--</span>
                         )}
                       </td>
-                      <td className="hidden md:table-cell px-3 py-2 align-top">
+                      <td className="hidden md:table-cell px-3 py-3 align-top">
                         {job ? (
                           <RelativeTime date={job.next_attempt_at} variant="compact" />
                         ) : (
                           <span className="font-mono text-muted-foreground text-xs">--</span>
                         )}
                       </td>
-                      <td className="px-3 py-2 text-center align-top">
+                      <td className="px-3 py-3 text-center align-top">
                         {job && (
                           <TriggerButton
                             jobId={job.id}

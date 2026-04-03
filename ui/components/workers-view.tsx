@@ -92,10 +92,10 @@ export function WorkersView() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="p-6 space-y-6">
       <div>
-        <h2 className="text-2xl sm:text-3xl font-bold tracking-tight">Workers</h2>
-        <p className="text-sm text-muted-foreground mt-1">Connected sync workers and their status</p>
+        <h2 className="text-lg font-bold">Workers</h2>
+        <p className="text-xs text-muted-foreground">Connected sync workers and their status</p>
       </div>
 
       {workers.length === 0 ? (

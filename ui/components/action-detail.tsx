@@ -107,24 +107,20 @@ export function ActionDetail({ actionId, onBack, onJobClick }: ActionDetailProps
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <button
-          onClick={onBack}
-          className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          Back
-        </button>
-      </div>
+    <div className="p-6 space-y-6">
+      <button
+        onClick={onBack}
+        className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+      >
+        <ArrowLeft className="h-4 w-4" />
+        Back
+      </button>
 
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight font-mono">{action.id}</h1>
-          <p className="text-muted-foreground">
-            Action details for job <span className="font-mono font-bold">{action.job_id}</span>
-          </p>
-        </div>
+      <div>
+        <h1 className="text-lg font-bold font-mono">{action.id}</h1>
+        <p className="text-xs text-muted-foreground">
+          Action for job <span className="font-mono font-bold">{action.job_id}</span>
+        </p>
       </div>
 
       <div className="grid gap-6 md:grid-cols-2">

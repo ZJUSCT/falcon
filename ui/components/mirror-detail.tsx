@@ -110,14 +110,14 @@ export function MirrorDetail({ mirrorId, onBack, onActionClick }: MirrorDetailPr
   };
 
   return (
-    <div className="space-y-6">
-      <button onClick={onBack} className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors">
+    <div className="p-6 space-y-6">
+      <button onClick={onBack} className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors">
         <ArrowLeft className="h-4 w-4" />
         Back to Mirrors
       </button>
 
       <div className="flex items-center justify-between">
-        <h1 className="text-3xl sm:text-4xl font-bold tracking-tight font-mono">{mirrorId}</h1>
+        <h1 className="text-lg font-bold font-mono">{mirrorId}</h1>
         <div className="flex items-center gap-4">
           {job && (
             <>
@@ -217,12 +217,12 @@ export function MirrorDetail({ mirrorId, onBack, onActionClick }: MirrorDetailPr
               <table className="w-full text-xs sm:text-sm">
                 <thead className="bg-muted/40 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                   <tr>
-                    <th className="px-3 py-2 text-left">ID</th>
-                    <th className="px-3 py-2 text-center">Status</th>
-                    <th className="hidden md:table-cell px-3 py-2 text-left">Worker</th>
-                    <th className="hidden md:table-cell px-3 py-2 text-left">Started</th>
-                    <th className="hidden lg:table-cell px-3 py-2 text-left">Duration</th>
-                    <th className="hidden lg:table-cell px-3 py-2 text-left">Exit Code</th>
+                    <th className="px-3 py-3 text-left">ID</th>
+                    <th className="px-3 py-3 text-center">Status</th>
+                    <th className="hidden md:table-cell px-3 py-3 text-left">Worker</th>
+                    <th className="hidden md:table-cell px-3 py-3 text-left">Started</th>
+                    <th className="hidden lg:table-cell px-3 py-3 text-left">Duration</th>
+                    <th className="hidden lg:table-cell px-3 py-3 text-left">Exit Code</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
@@ -240,31 +240,31 @@ export function MirrorDetail({ mirrorId, onBack, onActionClick }: MirrorDetailPr
                         tabIndex={0}
                         className="group cursor-pointer bg-background transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
                       >
-                        <td className="px-3 py-2 align-top">
+                        <td className="px-3 py-3 align-top">
                           <div className="font-mono text-xs truncate max-w-[200px]">{action.id}</div>
                           <div className="mt-1 text-[11px] text-muted-foreground md:hidden">
                             <RelativeTime date={action.started_at || action.created_at || ''} variant="compact" />
                           </div>
                         </td>
-                        <td className="px-3 py-2 text-center align-top">
+                        <td className="px-3 py-3 text-center align-top">
                           <StatusBadge status={action.status} />
                         </td>
-                        <td className="hidden md:table-cell px-3 py-2 align-top">
+                        <td className="hidden md:table-cell px-3 py-3 align-top">
                           <span className="font-mono text-xs text-muted-foreground">{action.worker_name || '--'}</span>
                         </td>
-                        <td className="hidden md:table-cell px-3 py-2 align-top">
+                        <td className="hidden md:table-cell px-3 py-3 align-top">
                           {action.started_at ? (
                             <RelativeTime date={action.started_at} variant="compact" />
                           ) : (
                             <span className="font-mono text-muted-foreground text-xs">--</span>
                           )}
                         </td>
-                        <td className="hidden lg:table-cell px-3 py-2 align-top">
+                        <td className="hidden lg:table-cell px-3 py-3 align-top">
                           <span className="font-mono text-xs">
                             {duration && duration > 0 ? formatDuration2(duration) : '--'}
                           </span>
                         </td>
-                        <td className="hidden lg:table-cell px-3 py-2 align-top">
+                        <td className="hidden lg:table-cell px-3 py-3 align-top">
                           <span className={`font-mono text-xs ${action.container_exit_code !== 0 ? 'text-red-500' : ''}`}>
                             {action.container_exit_code}
                           </span>
