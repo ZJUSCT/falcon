@@ -18,6 +18,8 @@ type WSClient struct {
 	name      string
 	token     string
 
+	writeMu sync.Mutex // protects all writes to conn
+
 	bufMu  sync.Mutex
 	buffer []*shared.WSMessage
 
@@ -114,6 +116,15 @@ func (ws *WSClient) readLoop() {
 	}
 }
 
+// writeMessage sends raw data to the WebSocket connection while holding the
+// write mutex. gorilla/websocket does not support concurrent writes, so all
+// writes must go through this method.
+func (ws *WSClient) writeMessage(conn *websocket.Conn, data []byte) error {
+	ws.writeMu.Lock()
+	defer ws.writeMu.Unlock()
+	return conn.WriteMessage(websocket.TextMessage, data)
+}
+
 // Send tries to write msg to the connection. If the connection is nil or the
 // write fails, the message is buffered for later delivery.
 func (ws *WSClient) Send(msg *shared.WSMessage) {
@@ -127,7 +138,7 @@ func (ws *WSClient) Send(msg *shared.WSMessage) {
 			log.Error().Err(err).Msg("WebSocket: failed to marshal message")
 			return
 		}
-		if err := conn.WriteMessage(websocket.TextMessage, data); err == nil {
+		if err := ws.writeMessage(conn, data); err == nil {
 			return
 		}
 		log.Warn().Err(err).Str("action", msg.ActionID).Msg("WebSocket write failed, buffering")
@@ -161,7 +172,7 @@ func (ws *WSClient) flushBuffer() {
 			log.Error().Err(err).Msg("WebSocket: failed to marshal buffered message")
 			continue
 		}
-		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		if err := ws.writeMessage(conn, data); err != nil {
 			log.Warn().Err(err).Msg("WebSocket: flush write failed, re-buffering remaining")
 			ws.bufMu.Lock()
 			ws.buffer = append(pending, ws.buffer...)

@@ -53,6 +53,7 @@ func Run(cfg MasterConfig) {
 
 	// 4. Wire callbacks.
 	state.WorkerMgr.SetCallbacks(state.OnWorkerOnline, state.OnWorkerOffline)
+	state.WorkerMgr.OnHeartbeat = state.HandleHeartbeatDiff
 	state.WSHub.OnActionStatus = state.HandleActionStatus
 
 	// 5. Load repo configs from ConfigDir.

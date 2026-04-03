@@ -23,6 +23,7 @@ type WorkerManager struct {
 
 	onWorkerOnline  func(name string)
 	onWorkerOffline func(name string)
+	OnHeartbeat     func(workerName string, reportedActions []string)
 }
 
 // NewWorkerManager creates a new WorkerManager with the given internal auth token.
@@ -128,6 +129,10 @@ func (wm *WorkerManager) Heartbeat(w http.ResponseWriter, r *http.Request) {
 
 	if err := UpsertWorker(worker); err != nil {
 		log.Error().Err(err).Str("worker", req.Name).Msg("failed to persist heartbeat")
+	}
+
+	if wm.OnHeartbeat != nil {
+		wm.OnHeartbeat(req.Name, req.RunningActions)
 	}
 
 	writeJSON(w, http.StatusOK, shared.HeartbeatResponse{OK: true})

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -100,10 +101,19 @@ func Run(cfg WorkerConfig) {
 	SetWorkerAPIState(cache, cfg.AuthToken, onNewAction)
 
 	// 8. Register with Master
+	// Construct a reachable address for the worker. If cfg.Addr is just a port
+	// (e.g. ":9090"), build a URL using the worker name as hostname (works in
+	// Docker Compose where container names are DNS-resolvable).
+	regAddr := cfg.Addr
+	if strings.HasPrefix(regAddr, ":") {
+		regAddr = "http://" + cfg.Name + regAddr
+	} else if !strings.HasPrefix(regAddr, "http://") && !strings.HasPrefix(regAddr, "https://") {
+		regAddr = "http://" + regAddr
+	}
 	regReq := &shared.RegisterRequest{
 		Name:   cfg.Name,
 		Labels: cfg.Labels,
-		Addr:   cfg.Addr,
+		Addr:   regAddr,
 	}
 	if err := register(cfg.MasterURL, cfg.AuthToken, regReq); err != nil {
 		log.Fatal().Err(err).Msg("Failed to register with master")
@@ -211,9 +221,8 @@ func monitorAction(ws *WorkerState, act *shared.Action, wsClient *WSClient, cach
 				UpdatedAt:       time.Now(),
 			})
 
-			ws.mu.Lock()
-			delete(ws.runningActions, act.ID)
-			ws.mu.Unlock()
+			// Keep the action in runningActions so the heartbeat reports it
+			// until the master sends an ack. OnAck handles the actual removal.
 
 			log.Info().Str("action", act.ID).Str("status", status).Int("exit_code", act.ContainerExitCode).Msg("Action finished")
 			return

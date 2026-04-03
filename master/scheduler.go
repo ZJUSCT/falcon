@@ -2,8 +2,9 @@ package master
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
-	"strconv"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -136,7 +137,7 @@ func (s *State) dispatchTick() {
 		}
 
 		// Build dispatch request.
-		actionID := strconv.FormatInt(time.Now().UnixNano(), 10)
+		actionID := fmt.Sprintf("%d-%04x", time.Now().UnixNano(), rand.Intn(0xFFFF))
 		dispReq := &shared.DispatchRequest{
 			Action: shared.DispatchAction{
 				ID:               actionID,
@@ -413,6 +414,84 @@ func (s *State) ReconcileWorkerActions(workerName string, reportedRunning []stri
 	// Finish jobs for failed actions outside the lock.
 	for _, action := range toFail {
 		s.finishJob(action.JobID, false)
+	}
+}
+
+// HandleHeartbeatDiff is called on each heartbeat to reconcile the master's
+// view of a worker's actions with what the worker actually reports.
+func (s *State) HandleHeartbeatDiff(workerName string, reportedActions []string) {
+	reportedSet := make(map[string]struct{}, len(reportedActions))
+	for _, id := range reportedActions {
+		reportedSet[id] = struct{}{}
+	}
+
+	// Collect actions for this worker that need attention.
+	var reconcilingIDs []string
+	var runningNotReported []string
+
+	s.ActionsMu.RLock()
+	for _, action := range s.ActiveActions {
+		if action.WorkerName != workerName {
+			continue
+		}
+		if action.Status == shared.ActionStatusReconciling {
+			reconcilingIDs = append(reconcilingIDs, action.ID)
+		} else if action.Status == shared.ActionStatusRunning {
+			if _, found := reportedSet[action.ID]; !found {
+				runningNotReported = append(runningNotReported, action.ID)
+			}
+		}
+	}
+	s.ActionsMu.RUnlock()
+
+	// Handle Reconciling actions via the existing reconciliation logic.
+	if len(reconcilingIDs) > 0 {
+		s.ReconcileWorkerActions(workerName, reportedActions)
+	}
+
+	// For Running actions not reported by the worker, query the worker directly.
+	if len(runningNotReported) > 0 {
+		worker, ok := s.WorkerMgr.GetWorker(workerName)
+		if !ok {
+			return
+		}
+		for _, actionID := range runningNotReported {
+			asr, err := QueryActionStatus(worker, actionID, s.Token)
+			if err != nil {
+				log.Warn().Err(err).Str("action", actionID).Str("worker", workerName).Msg("failed to query action status from worker")
+				continue
+			}
+			if !asr.Found || asr.Status == shared.ActionStatusSucceeded || asr.Status == shared.ActionStatusFailed {
+				// Action finished on the worker but we missed the WebSocket message.
+				status := shared.ActionStatusFailed
+				if asr.Found && asr.Status == shared.ActionStatusSucceeded {
+					status = shared.ActionStatusSucceeded
+				}
+				s.ActionsMu.Lock()
+				action, exists := s.ActiveActions[actionID]
+				if exists {
+					action.Status = status
+					action.FinishedAt = time.Now()
+					action.UpdatedAt = time.Now()
+					if asr.Found {
+						action.ContainerExitCode = asr.ExitCode
+						action.ContainerExitReason = asr.ExitReason
+					} else {
+						action.ContainerExitReason = "action not found on worker"
+					}
+					delete(s.ActiveActions, actionID)
+				}
+				s.ActionsMu.Unlock()
+
+				if exists {
+					if err := UpsertAction(action); err != nil {
+						log.Error().Err(err).Str("action", actionID).Msg("failed to persist action status from heartbeat diff")
+					}
+					s.finishJob(action.JobID, status == shared.ActionStatusSucceeded)
+					log.Info().Str("action", actionID).Str("status", status).Str("worker", workerName).Msg("action resolved via heartbeat diff")
+				}
+			}
+		}
 	}
 }
 
