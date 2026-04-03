@@ -35,7 +35,7 @@ VOLUME ["/logs", "/Configs"]
 
 COPY --from=go-build /out/mirrorgo /mirrorgo
 
-EXPOSE 8080
+EXPOSE 8080 9090
 
 ENTRYPOINT ["/mirrorgo"]
 
