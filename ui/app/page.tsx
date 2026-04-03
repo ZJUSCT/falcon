@@ -3,8 +3,12 @@
 import { useState, useEffect } from 'react';
 import { Sidebar, PageId } from '@/components/sidebar';
 import { OverviewView } from '@/components/overview-view';
+import { MirrorsView } from '@/components/mirrors-view';
+import { MirrorDetail } from '@/components/mirror-detail';
+import { WorkersView } from '@/components/workers-view';
 import { ActionsView } from '@/components/actions-view';
 import { QueueView } from '@/components/queue-view';
+import { ConfigsView } from '@/components/configs-view';
 import { ActionDetail } from '@/components/action-detail';
 
 type RouteType =
@@ -61,7 +65,7 @@ export default function Dashboard() {
   const renderView = () => {
     if (typeof currentRoute === 'object') {
       if (currentRoute.type === 'mirror-detail') {
-        return <div className="p-6 text-muted-foreground">Mirror detail: {currentRoute.mirrorId} (placeholder)</div>;
+        return <MirrorDetail mirrorId={currentRoute.mirrorId} onBack={() => navigate('mirrors')} onActionClick={(id) => navigate({ type: 'action-detail', actionId: id })} />;
       }
       if (currentRoute.type === 'action-detail') {
         return <ActionDetail actionId={currentRoute.actionId} onBack={() => navigate('actions')} onJobClick={(id) => navigate({ type: 'mirror-detail', mirrorId: id })} />;
@@ -71,15 +75,15 @@ export default function Dashboard() {
       case 'overview':
         return <OverviewView onNavigateToJob={(id) => navigate({ type: 'mirror-detail', mirrorId: id })} />;
       case 'mirrors':
-        return <div className="p-6 text-muted-foreground">Mirrors view (placeholder)</div>;
+        return <MirrorsView onMirrorClick={(id) => navigate({ type: 'mirror-detail', mirrorId: id })} />;
       case 'workers':
-        return <div className="p-6 text-muted-foreground">Workers view (placeholder)</div>;
+        return <WorkersView />;
       case 'queue':
         return <QueueView />;
       case 'actions':
         return <ActionsView onActionClick={(id) => navigate({ type: 'action-detail', actionId: id })} />;
       case 'configs':
-        return <div className="p-6 text-muted-foreground">Configs view (placeholder)</div>;
+        return <ConfigsView />;
       default:
         return <OverviewView onNavigateToJob={(id) => navigate({ type: 'mirror-detail', mirrorId: id })} />;
     }

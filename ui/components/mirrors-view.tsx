@@ -1,0 +1,248 @@
+'use client';
+
+import { useState, useEffect } from 'react';
+import type { KeyboardEvent } from 'react';
+import { StatusBadge } from '@/components/status-badge';
+import { RelativeTime } from '@/components/relative-time';
+import { TriggerButton } from '@/components/trigger-button';
+import { apiClient } from '@/lib/api';
+import { Job, Repo } from '@/types';
+import { Search } from 'lucide-react';
+
+interface MirrorsViewProps {
+  onMirrorClick: (id: string) => void;
+}
+
+interface MirrorRow {
+  id: string;
+  repo: Repo | null;
+  job: Job | null;
+}
+
+export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
+  const [mirrors, setMirrors] = useState<MirrorRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<string>('All');
+
+  const buildMirrors = (repos: Repo[], jobs: Job[]): MirrorRow[] => {
+    const jobMap = new Map(jobs.map(j => [j.id, j]));
+    const repoMap = new Map(repos.map(r => [r.id, r]));
+    const allIds = new Set([...repos.map(r => r.id), ...jobs.map(j => j.id)]);
+
+    return Array.from(allIds)
+      .map(id => ({
+        id,
+        repo: repoMap.get(id) || null,
+        job: jobMap.get(id) || null,
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+  };
+
+  const fetchUpdates = async () => {
+    try {
+      const [repos, jobs] = await Promise.all([
+        apiClient.getRepos(),
+        apiClient.getJobs(),
+      ]);
+      setMirrors(buildMirrors(repos, jobs));
+      setError(null);
+    } catch (err) {
+      console.warn('Background mirrors refresh failed:', err);
+    }
+  };
+
+  const forceRefresh = () => {
+    fetchUpdates();
+  };
+
+  useEffect(() => {
+    const fetchInitial = async () => {
+      try {
+        setLoading(true);
+        const [repos, jobs] = await Promise.all([
+          apiClient.getRepos(),
+          apiClient.getJobs(),
+        ]);
+        setMirrors(buildMirrors(repos, jobs));
+        setError(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to fetch mirrors');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchInitial();
+    const interval = setInterval(fetchUpdates, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  if (loading && mirrors.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="text-muted-foreground">Loading mirrors...</div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="text-destructive">Error: {error}</div>
+      </div>
+    );
+  }
+
+  const filtered = mirrors.filter(m => {
+    if (search && !m.id.toLowerCase().includes(search.toLowerCase())) return false;
+    if (statusFilter !== 'All') {
+      const jobStatus = m.job?.status || '';
+      const actionStatus = m.job?.last_action_status || '';
+      if (statusFilter === 'Failed') {
+        return actionStatus === 'Failed';
+      }
+      return jobStatus === statusFilter;
+    }
+    return true;
+  });
+
+  const handleRowKeyDown = (event: KeyboardEvent<HTMLTableRowElement>, id: string) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      onMirrorClick(id);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-2xl sm:text-3xl font-bold tracking-tight">Mirrors</h2>
+        <p className="text-sm text-muted-foreground mt-1">Unified view of repositories and sync jobs</p>
+      </div>
+
+      <div className="flex flex-col sm:flex-row gap-3">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <input
+            type="text"
+            placeholder="Filter by name..."
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            className="w-full pl-9 pr-3 py-2 text-sm rounded-md border border-border bg-card text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/60"
+          />
+        </div>
+        <select
+          value={statusFilter}
+          onChange={e => setStatusFilter(e.target.value)}
+          className="px-3 py-2 text-sm rounded-md border border-border bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary/60"
+        >
+          <option value="All">All Statuses</option>
+          <option value="Running">Running</option>
+          <option value="Waiting">Waiting</option>
+          <option value="Scheduled">Scheduled</option>
+          <option value="Failed">Failed</option>
+        </select>
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">
+          No mirrors match the current filter.
+        </div>
+      ) : (
+        <div className="rounded-lg border border-border bg-card overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs sm:text-sm">
+              <thead className="bg-muted/40 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 text-left">Name</th>
+                  <th className="px-3 py-2 text-center">Status</th>
+                  <th className="hidden md:table-cell px-3 py-2 text-center">Last Action</th>
+                  <th className="hidden lg:table-cell px-3 py-2 text-left">Worker</th>
+                  <th className="hidden md:table-cell px-3 py-2 text-left">Last Sync</th>
+                  <th className="hidden md:table-cell px-3 py-2 text-left">Next Sync</th>
+                  <th className="px-3 py-2 text-center w-12"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {filtered.map(m => {
+                  const job = m.job;
+                  const repo = m.repo;
+                  const lastActionStatus = (job?.last_action_status || '').trim();
+                  const workerLabel = repo?.sync.node || '';
+
+                  return (
+                    <tr
+                      key={m.id}
+                      onClick={() => onMirrorClick(m.id)}
+                      onKeyDown={event => handleRowKeyDown(event, m.id)}
+                      tabIndex={0}
+                      className="group cursor-pointer bg-background transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+                    >
+                      <td className="px-3 py-2 align-top">
+                        <div className="font-mono text-sm sm:text-base">{m.id}</div>
+                        <div className="mt-1 text-[11px] text-muted-foreground md:hidden">
+                          {job ? (
+                            <>
+                              <span className="uppercase tracking-wide">Last </span>
+                              <RelativeTime date={job.last_attempt_at} variant="compact" />
+                            </>
+                          ) : (
+                            <span>No job</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-center align-top">
+                        {job ? (
+                          <StatusBadge status={job.status} />
+                        ) : (
+                          <span className="font-mono text-muted-foreground text-xs">--</span>
+                        )}
+                      </td>
+                      <td className="hidden md:table-cell px-3 py-2 text-center align-top">
+                        {lastActionStatus ? (
+                          <StatusBadge status={lastActionStatus} />
+                        ) : (
+                          <span className="font-mono text-muted-foreground text-xs">--</span>
+                        )}
+                      </td>
+                      <td className="hidden lg:table-cell px-3 py-2 align-top">
+                        <span className="font-mono text-xs text-muted-foreground">{workerLabel || '--'}</span>
+                      </td>
+                      <td className="hidden md:table-cell px-3 py-2 align-top">
+                        {job ? (
+                          <RelativeTime date={job.last_attempt_at} variant="compact" />
+                        ) : (
+                          <span className="font-mono text-muted-foreground text-xs">--</span>
+                        )}
+                      </td>
+                      <td className="hidden md:table-cell px-3 py-2 align-top">
+                        {job ? (
+                          <RelativeTime date={job.next_attempt_at} variant="compact" />
+                        ) : (
+                          <span className="font-mono text-muted-foreground text-xs">--</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-center align-top">
+                        {job && (
+                          <TriggerButton
+                            jobId={job.id}
+                            jobStatus={job.status}
+                            variant="icon"
+                            size="sm"
+                            onSuccess={forceRefresh}
+                          />
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
