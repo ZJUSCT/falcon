@@ -1,52 +1,190 @@
-#  Mirror Go
+# MirrorGo
 
-A Grand Sync Controller for MirrorSite
+A cluster-aware sync controller for mirror sites.
 
-一个用于 MirrorSite 的通用同步控制器，负责任务排队、调度分发、执行与监控，面向多节点与容器化执行场景。
+## Architecture
 
-## Features
+MirrorGo uses a master-worker architecture. A single binary `mirrorgo` runs as either `master` or `worker` via subcommands.
 
-- [ ] Job Queuing
-    - [ ] Retry & Backoff
-    - [ ] Cron Scheduling
-- [ ] Docker Execution
-- [ ] Multi-Node Sync
-- [ ] Job Monitoring
-- [ ] Web UI
-- [ ] Metrics & Alerting
+- **Master**: scheduling, Web UI, worker management. No Docker dependency.
+- **Worker**: registers to master, executes sync containers via Docker, reports status via WebSocket.
 
+```
+                  ┌──────────────┐
+   UI / API ────► │    Master    │ ◄──── Configs/*.json
+                  │  :8080       │
+                  │  SQLite DB   │
+                  └──┬───┬───┬──┘
+           register  │   │   │  dispatch
+          heartbeat  │   │   │  log proxy
+          websocket  │   │   │
+                  ┌──┴┐ ┌┴──┐┌┴──┐
+                  │ W1│ │W2 ││W3 │  Workers
+                  │:9090:9090:9090  (Docker)
+                  └───┘ └───┘└───┘
+```
 
-##  Process Of Queue
+## Quick Start
 
-1. When program starts, read all jobs from data folder, each repo is a json file in `Configs` folder, the Job info will be loaded into memory `Repos`
-2. When program starts, read sync job state file (sqlite), store job runtime status into `Jobs`
-3. When program starts, read sync activeaction state file (sqlite), store job runtime status into `ActiveActions`
+### Build
 
-4. Then do some migrations(if have)
-    if there is a new repo that doest exist in Jobs, create a new job in `Jobs`, or update status from "Orphan" to "Waiting"
-    if there is a job no longer exists in Repos, mark it as "orphan job" (status: Orphan), remove it from Queue (if have), remove it from active actions (if have) (we just dropped the container running wildly)
+```bash
+docker compose build
+```
 
+Or build the binary directly:
 
-5. Start Scheduling
-    A Job have following status:
-        - Waiting (Waiting for NextAttemptAt to be arrived)
-        - Scheduled (NextAttemptAt is passed)
-        - Running (if the max_parallel is not reached, from Scheduled to Running)
-        - Orphan (if the job no longer exists in Repos)
+```bash
+go build -o mirrorgo .
+```
 
-    Status Transition:
-        - Waiting to Scheduled: NextAttemptAt is passed, add to FIFO queue
-        - Scheduled to Running: if the max_parallel is not reached, Start A New Action (container),
-        - Running to Waiting: if the action is finished (container exited), update NextAttemptAt = Now + Interval
+### Deploy (Docker Compose)
 
+1. Create `.env` with a shared auth token:
 
-    Polling:
-        - Every 10 seconds, check if there is a job in FIFO queue, if there is, start a new action if active actions is less than max_parallel
-        - for every action, a goroutine will be started to monitor the action, if the action is finished, update the action status, and update the job status
-        - Every 5 second, poll the jobs, if the time is passed, update the job status to "Scheduled"
+```bash
+echo "AUTH_TOKEN=$(openssl rand -hex 16)" > .env
+```
 
-    there should be  locks for "Jobs" map, ActiveActions map, and Queue
+2. Put repo configs in `Configs/` (JSON files, see `Configs/debian.json` for example).
 
-    Use sqlite to store the state of Jobs and ActiveActions
+3. Start:
 
-    In this first version, docker Part should be "mocked", every container should be exited in 20-60 seconds, and the exit code will be 0
+```bash
+docker compose up -d
+```
+
+This starts one master and one worker on the same host. The master Web UI is at `http://localhost:8080`.
+
+### Multi-Host Deploy
+
+On the master host, run only the master service. On each worker host, run a worker pointing to the master:
+
+```bash
+# Worker host
+docker run -d \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /var/lib/docker:/var/lib/docker \
+  -v /data/mirrors:/data/mirrors \
+  -v /data/mirrorgo/logs:/data/mirrorgo/logs \
+  mirrorgo:latest \
+  worker \
+    --name worker-2 \
+    --master http://master-host:8080 \
+    --auth-token "$AUTH_TOKEN" \
+    --addr :9090 \
+    --labels storage=hdd,zone=b \
+    --basedir /data/mirrorgo \
+    --repodir /data/mirrors/
+```
+
+## CLI Reference
+
+### Master
+
+```
+mirrorgo master [flags]
+
+Flags:
+  --addr       Listen address (default: :8080)
+  --db         SQLite database path (default: state.db)
+  --auth-token PSK token for worker auth (or AUTH_TOKEN env var)
+  --configs    Config directory (default: Configs)
+  --basedir    Base directory for mirrorgo.json/mirrorz.json output
+```
+
+### Worker
+
+```
+mirrorgo worker [flags]
+
+Flags:
+  --name       Worker name (unique, used as hostname in Docker Compose)
+  --master     Master URL (e.g. http://master:8080)
+  --auth-token PSK token (or AUTH_TOKEN env var)
+  --addr       Listen address or reachable URL (default: :9090)
+  --labels     Comma-separated key=value labels (e.g. storage=ssd,zone=a)
+  --basedir    Base directory for logs (default: /home/zjusct/mirrorgo)
+  --repodir    Mirror data directory (default: /test1/mirrors/)
+  --dryrun     Simulate Docker execution (for testing)
+```
+
+## Node Affinity
+
+Repos can be pinned to specific workers via `sync.node` or matched by labels via `sync.nodeSelector`:
+
+```json
+{
+  "id": "debian",
+  "sync": {
+    "node": "worker-1",
+    "nodeSelector": {"storage": "ssd"},
+    ...
+  }
+}
+```
+
+- `node`: exact worker name, highest priority
+- `nodeSelector`: all key-value pairs must match worker labels
+- Neither set: schedules to any online worker
+
+## API Endpoints
+
+### Public (no auth)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/repos` | List repo configs |
+| GET | `/api/jobs` | List all jobs |
+| GET | `/api/actions` | List active actions |
+| GET | `/api/actions/recent?limit=N` | Recent actions |
+| GET | `/api/actions/by_repo?repo_id=X` | Actions for a repo |
+| GET | `/api/queue` | Queue state |
+| GET | `/api/workers` | List workers |
+| GET | `/api/mirrors` | Mirror status |
+| GET | `/mirrorz.json` | MirrorZ format |
+| POST | `/api/jobs/next_attempt_now?repo_id=X` | Trigger immediate sync |
+| POST | `/api/queue/pause` | Pause dispatch |
+| POST | `/api/queue/continue` | Resume dispatch |
+| POST | `/api/queue/set_max_concurrency?max=N` | Set parallelism |
+| POST | `/api/queue/delete?repo_id=X` | Remove from queue |
+| POST | `/api/workers/remove?name=X` | Remove offline worker |
+| GET | `/api/logs/list?action_id=X` | List log files |
+| GET | `/api/logs/raw?action_id=X&file=Y` | Download log |
+| GET | `/api/logs/stream?action_id=X&file=Y` | Stream log (SSE) |
+
+### Internal (PSK auth, `/api/internal/*`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/internal/register` | Worker registration |
+| POST | `/api/internal/heartbeat` | Worker heartbeat |
+| GET | `/api/internal/ws` | WebSocket (status push) |
+| POST | `/api/internal/dispatch` | Task dispatch (worker) |
+| GET | `/api/internal/action_status` | Query action (worker) |
+
+## Job State Machine
+
+```
+Waiting ──(time)──► Scheduled ──(dispatch)──► Running ──(done)──► Waiting
+                                                                    ↑
+Config deleted → Orphan                              NextAttemptAt = Now + Interval
+```
+
+## Worker State Machine
+
+```
+Unregistered ──(register)──► Online ◄──(re-register)── Offline
+                               │                          ↑
+                               └──(30s no heartbeat)──────┘
+```
+
+## Dryrun Mode
+
+For testing without Docker:
+
+```bash
+mirrorgo worker --name test --master http://localhost:8080 --auth-token test --dryrun
+```
+
+Simulates container execution (5-15s random duration, always succeeds). Useful for validating scheduling, WebSocket communication, and API behavior.
