@@ -2,6 +2,7 @@ package master
 
 import (
 	"context"
+	"io/fs"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ type State struct {
 	WSHub     *WSHub
 	Token     string
 	BaseDir   string // for mirrorgo.json path
+	UIFS      fs.FS  // embedded UI filesystem (set from main.go)
 }
 
 // ScheduleLoop checks Waiting jobs every 5s and enqueues those whose
