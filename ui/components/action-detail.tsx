@@ -143,6 +143,10 @@ export function ActionDetail({ actionId, onBack, onJobClick }: ActionDetailProps
                 <div><StatusBadge status={action.status} /></div>
               </div>
               <div>
+                <div className="font-medium text-muted-foreground">Worker</div>
+                <div className="font-mono text-sm">{action.worker_name || '\u2014'}</div>
+              </div>
+              <div>
                 <div className="font-medium text-muted-foreground">Message</div>
                 <div className="font-mono text-sm break-words">
                   {action.message || 'No message'}

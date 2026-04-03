@@ -148,6 +148,7 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
                 <tr>
                   <th className="px-3 py-2 text-left">Action</th>
                   <th className="px-3 py-2 text-left">Status</th>
+                  <th className="hidden md:table-cell px-3 py-2 text-left">Worker</th>
                   <th className="hidden md:table-cell px-3 py-2 text-left">Updated</th>
                   <th className="hidden lg:table-cell px-3 py-2 text-left">Timing</th>
                   <th className="hidden xl:table-cell px-3 py-2 text-left">Container</th>
@@ -181,6 +182,9 @@ export function ActionsView({ onActionClick }: ActionsViewProps) {
                           exit {action.container_exit_code}{action.container_exit_reason ? ` • ${action.container_exit_reason}` : ''}
                         </div>
                       )}
+                    </td>
+                    <td className="hidden md:table-cell px-3 py-2 align-top">
+                      <span className="font-mono text-xs text-muted-foreground">{action.worker_name || '\u2014'}</span>
                     </td>
                     <td className="hidden md:table-cell px-3 py-2 align-top">
                       <RelativeTime date={action.updated_at} variant="compact" />
