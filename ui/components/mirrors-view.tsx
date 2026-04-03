@@ -133,11 +133,36 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
     }
   };
 
+  const jobsByStatus = mirrors.reduce((acc, m) => {
+    const s = m.job?.status || 'Unknown';
+    acc[s] = (acc[s] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+
   return (
-    <div className="p-6 space-y-6">
-      <div>
+    <div className="p-6 space-y-4">
+      <div className="flex items-center justify-between">
         <h2 className="text-lg font-bold">Mirrors</h2>
-        <p className="text-xs text-muted-foreground">Unified view of repositories and sync jobs</p>
+        <span className="text-xs text-muted-foreground font-mono">{mirrors.length} total</span>
+      </div>
+
+      <div className="grid gap-3 grid-cols-2 md:grid-cols-4">
+        <div className="rounded-lg border bg-card p-3">
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Running</div>
+          <div className="text-xl font-bold tabular-nums text-blue-500 mt-1">{jobsByStatus.Running || 0}</div>
+        </div>
+        <div className="rounded-lg border bg-card p-3">
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Scheduled</div>
+          <div className="text-xl font-bold tabular-nums text-purple-500 mt-1">{jobsByStatus.Scheduled || 0}</div>
+        </div>
+        <div className="rounded-lg border bg-card p-3">
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Waiting</div>
+          <div className="text-xl font-bold tabular-nums text-yellow-500 mt-1">{jobsByStatus.Waiting || 0}</div>
+        </div>
+        <div className="rounded-lg border bg-card p-3">
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Orphan</div>
+          <div className="text-xl font-bold tabular-nums text-muted-foreground mt-1">{jobsByStatus.Orphan || 0}</div>
+        </div>
       </div>
 
       <div className="flex flex-col sm:flex-row gap-3">
@@ -148,13 +173,13 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
             placeholder="Filter by name..."
             value={search}
             onChange={e => setSearch(e.target.value)}
-            className="w-full pl-9 pr-3 py-2 text-sm rounded-md border border-border bg-card text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/60"
+            className="w-full pl-9 pr-3 py-1.5 text-xs rounded-md border border-border bg-card text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/60"
           />
         </div>
         <select
           value={statusFilter}
           onChange={e => setStatusFilter(e.target.value)}
-          className="px-3 py-2 text-sm rounded-md border border-border bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary/60"
+          className="px-3 py-1.5 text-xs rounded-md border border-border bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary/60"
         >
           <option value="All">All Statuses</option>
           <option value="Running">Running</option>
@@ -171,24 +196,22 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
       ) : (
         <div className="rounded-lg border border-border bg-card overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full text-xs sm:text-sm">
+            <table className="w-full text-xs">
               <thead className="bg-muted/40 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 <tr>
-                  <th className="px-3 py-2 text-left">Name</th>
+                  <th className="px-3 py-2 text-center">Job</th>
                   <th className="px-3 py-2 text-center">Status</th>
                   <th className="hidden md:table-cell px-3 py-2 text-center">Last Action</th>
-                  <th className="hidden lg:table-cell px-3 py-2 text-left">Worker</th>
-                  <th className="hidden md:table-cell px-3 py-2 text-left">Last Sync</th>
-                  <th className="hidden md:table-cell px-3 py-2 text-left">Next Sync</th>
-                  <th className="px-3 py-2 text-center w-12"></th>
+                  <th className="hidden md:table-cell px-3 py-2 text-left">Next Attempt</th>
+                  <th className="hidden md:table-cell px-3 py-2 text-left">Last Attempt</th>
+                  <th className="hidden lg:table-cell px-3 py-2 text-left">Last Success</th>
+                  <th className="hidden xl:table-cell px-3 py-2 text-left">Last Failure</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {filtered.map(m => {
                   const job = m.job;
-                  const repo = m.repo;
                   const lastActionStatus = (job?.last_action_status || '').trim();
-                  const workerLabel = repo?.sync.node || '';
 
                   return (
                     <tr
@@ -199,58 +222,77 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                       className="group cursor-pointer bg-background transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
                     >
                       <td className="px-3 py-2 align-top">
-                        <div className="font-mono text-sm sm:text-base">{m.id}</div>
-                        <div className="mt-1 text-[11px] text-muted-foreground md:hidden">
+                        <div className="font-mono text-sm">{m.id}</div>
+                        <div className="mt-0.5 text-[11px] text-muted-foreground md:hidden">
                           {job ? (
                             <>
-                              <span className="uppercase tracking-wide">Last </span>
-                              <RelativeTime date={job.last_attempt_at} variant="compact" />
+                              <span className="uppercase tracking-wide">Next </span>
+                              <RelativeTime date={job.next_attempt_at} variant="compact" />
                             </>
                           ) : (
                             <span>No job</span>
                           )}
                         </div>
+                        <div className="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground md:hidden">
+                          <span className="uppercase tracking-wide">Last Action</span>
+                          {lastActionStatus ? (
+                            <StatusBadge status={lastActionStatus} />
+                          ) : (
+                            <span className="font-mono">—</span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-3 py-2 text-center align-top">
-                        {job ? (
-                          <StatusBadge status={job.status} />
-                        ) : (
-                          <span className="font-mono text-muted-foreground text-xs">--</span>
-                        )}
+                        <div className="flex items-center gap-2">
+                          {job ? (
+                            <StatusBadge status={job.status} />
+                          ) : (
+                            <span className="font-mono text-muted-foreground">--</span>
+                          )}
+                          {job && (
+                            <TriggerButton
+                              jobId={job.id}
+                              jobStatus={job.status}
+                              variant="icon"
+                              size="sm"
+                              onSuccess={forceRefresh}
+                            />
+                          )}
+                        </div>
                       </td>
                       <td className="hidden md:table-cell px-3 py-2 text-center align-top">
                         {lastActionStatus ? (
                           <StatusBadge status={lastActionStatus} />
                         ) : (
-                          <span className="font-mono text-muted-foreground text-xs">--</span>
-                        )}
-                      </td>
-                      <td className="hidden lg:table-cell px-3 py-2 align-top">
-                        <span className="font-mono text-xs text-muted-foreground">{workerLabel || '--'}</span>
-                      </td>
-                      <td className="hidden md:table-cell px-3 py-2 align-top">
-                        {job ? (
-                          <RelativeTime date={job.last_attempt_at} variant="compact" />
-                        ) : (
-                          <span className="font-mono text-muted-foreground text-xs">--</span>
+                          <StatusBadge status="Unknown" />
                         )}
                       </td>
                       <td className="hidden md:table-cell px-3 py-2 align-top">
                         {job ? (
                           <RelativeTime date={job.next_attempt_at} variant="compact" />
                         ) : (
-                          <span className="font-mono text-muted-foreground text-xs">--</span>
+                          <span className="font-mono text-muted-foreground">--</span>
                         )}
                       </td>
-                      <td className="px-3 py-2 text-center align-top">
-                        {job && (
-                          <TriggerButton
-                            jobId={job.id}
-                            jobStatus={job.status}
-                            variant="icon"
-                            size="sm"
-                            onSuccess={forceRefresh}
-                          />
+                      <td className="hidden md:table-cell px-3 py-2 align-top">
+                        {job ? (
+                          <RelativeTime date={job.last_attempt_at} variant="compact" />
+                        ) : (
+                          <span className="font-mono text-muted-foreground">--</span>
+                        )}
+                      </td>
+                      <td className="hidden lg:table-cell px-3 py-2 align-top">
+                        {job ? (
+                          <RelativeTime date={job.last_success_at} variant="compact" />
+                        ) : (
+                          <span className="font-mono text-muted-foreground">--</span>
+                        )}
+                      </td>
+                      <td className="hidden xl:table-cell px-3 py-2 align-top">
+                        {job ? (
+                          <RelativeTime date={job.last_failure_at} variant="compact" />
+                        ) : (
+                          <span className="font-mono text-muted-foreground">--</span>
                         )}
                       </td>
                     </tr>
