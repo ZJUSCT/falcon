@@ -1,8 +1,11 @@
 package master
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +18,20 @@ import (
 // ---------------------------------------------------------------------------
 // Public API handlers (methods on *State)
 // ---------------------------------------------------------------------------
+
+// handleReposDispatch dispatches /api/repos by HTTP method.
+func (s *State) handleReposDispatch(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleRepos(w, r)
+	case http.MethodPost:
+		s.handleRepoSave(w, r)
+	case http.MethodDelete:
+		s.handleRepoDelete(w, r)
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	}
+}
 
 // handleRepos — GET /api/repos
 func (s *State) handleRepos(w http.ResponseWriter, r *http.Request) {
@@ -32,6 +49,93 @@ func (s *State) handleRepos(w http.ResponseWriter, r *http.Request) {
 		out = append(out, s.Repos[k])
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleRepoSave — POST /api/repos
+func (s *State) handleRepoSave(w http.ResponseWriter, r *http.Request) {
+	var repo shared.Repo
+	if err := json.NewDecoder(r.Body).Decode(&repo); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	if strings.TrimSpace(repo.RepoID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo id is required"})
+		return
+	}
+
+	// Write to config file
+	filePath := filepath.Join(s.ConfigDir, repo.RepoID+".json")
+	data, err := json.MarshalIndent(repo, "", "  ")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Update in-memory state
+	s.ReposMu.Lock()
+	s.Repos[repo.RepoID] = repo
+	s.ReposMu.Unlock()
+
+	// Ensure job exists
+	s.JobsMu.Lock()
+	job, exists := s.Jobs[repo.RepoID]
+	if !exists {
+		job = &shared.Job{
+			RepoID:        repo.RepoID,
+			Status:        shared.JobStatusWaiting,
+			NextAttemptAt: time.Now(),
+			UpdatedAt:     time.Now(),
+		}
+		s.Jobs[repo.RepoID] = job
+	} else if job.Status == shared.JobStatusOrphan {
+		job.Status = shared.JobStatusWaiting
+		job.NextAttemptAt = time.Now()
+		job.UpdatedAt = time.Now()
+	}
+	s.JobsMu.Unlock()
+	_ = UpsertJob(job)
+
+	writeJSON(w, http.StatusOK, repo)
+}
+
+// handleRepoDelete — DELETE /api/repos?id=<id>
+func (s *State) handleRepoDelete(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing id parameter"})
+		return
+	}
+
+	// Remove config file
+	filePath := filepath.Join(s.ConfigDir, id+".json")
+	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Remove from in-memory state
+	s.ReposMu.Lock()
+	delete(s.Repos, id)
+	s.ReposMu.Unlock()
+
+	// Mark job as orphan
+	s.JobsMu.Lock()
+	if job, ok := s.Jobs[id]; ok {
+		job.Status = shared.JobStatusOrphan
+		job.UpdatedAt = time.Now()
+		_ = UpsertJob(job)
+	}
+	s.JobsMu.Unlock()
+
+	// Remove from queue
+	s.JobQueue.Remove(id)
+	_ = DBDeleteAllQueueByJob(id)
+
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
 // handleJobs — GET /api/jobs
@@ -548,7 +652,7 @@ func (s *State) StartWebServer(addr, authToken string) {
 	mux := http.NewServeMux()
 
 	// Public API routes.
-	mux.HandleFunc("/api/repos", s.handleRepos)
+	mux.HandleFunc("/api/repos", s.handleReposDispatch)
 	mux.HandleFunc("/api/jobs", s.handleJobs)
 	mux.HandleFunc("/api/jobs/next_attempt_now", s.handleJobNextAttemptNow)
 	mux.HandleFunc("/api/actions", s.handleActions)

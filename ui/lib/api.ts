@@ -168,6 +168,29 @@ class ApiClient {
     return `${API_BASE}/logs/raw?action_id=${encodeURIComponent(actionId)}&file=${encodeURIComponent(fileName)}`;
   }
 
+  async saveRepo(repo: Repo): Promise<Repo> {
+    const response = await fetch(`${API_BASE}/repos`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(repo),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: response.statusText }));
+      throw new Error(errorData.error || `API request failed: ${response.statusText}`);
+    }
+    return response.json();
+  }
+
+  async deleteRepo(id: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/repos?id=${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: response.statusText }));
+      throw new Error(errorData.error || `API request failed: ${response.statusText}`);
+    }
+  }
+
   async getWorkers(): Promise<Worker[]> {
     return this.fetch<Worker[]>('/workers');
   }

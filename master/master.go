@@ -48,6 +48,7 @@ func Run(cfg MasterConfig) {
 		WSHub:         NewWSHub(cfg.AuthToken),
 		Token:         cfg.AuthToken,
 		BaseDir:       cfg.BaseDir,
+		ConfigDir:     cfg.ConfigDir,
 		UIFS:          cfg.UIFS,
 	}
 

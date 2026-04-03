@@ -29,6 +29,7 @@ type State struct {
 	WSHub     *WSHub
 	Token     string
 	BaseDir   string // for mirrorgo.json path
+	ConfigDir string // directory containing repo JSON config files
 	UIFS      fs.FS  // embedded UI filesystem (set from main.go)
 }
 
