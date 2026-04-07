@@ -58,18 +58,29 @@ func HandleDispatchWS(da shared.DispatchAction) (bool, string) {
 		return true, "container already running"
 	}
 	if cExists && !cRunning {
-		// Remove tracker entry only if it's in PendingCleanup (already acked).
-		// PendingAck entries must NOT be removed — master hasn't received the result yet.
+		// Check if the old container's action is still tracked.
+		oldTracked := false
 		if tracker != nil && !DryRun {
 			inspect, err := DockerClient.ContainerInspect(context.Background(), act.ContainerName)
 			if err == nil {
 				if oldID := inspect.Config.Labels["mirrorgo.action-id"]; oldID != "" {
-					if ta := tracker.Get(oldID); ta != nil && ta.Phase == PhasePendingCleanup {
-						tracker.Remove(oldID)
+					if ta := tracker.Get(oldID); ta != nil {
+						if ta.Phase == PhasePendingCleanup {
+							// Already acked — safe to remove and delete container.
+							tracker.Remove(oldID)
+						} else {
+							// PendingAck — master hasn't received the result yet.
+							// Don't delete container; let cleanup handle it after ack.
+							oldTracked = true
+							log.Warn().Str("container", act.ContainerName).Str("old_action", oldID).Msg("old container still pending ack, skipping removal")
+						}
 					}
 				}
 			}
-			log.Info().Str("container", act.ContainerName).Msg("removing exited container from previous dispatch")
+		}
+		if oldTracked {
+			// Can't start new container while old one exists and is pending ack.
+			return false, "previous container pending ack, retry later"
 		}
 		if DryRun {
 			log.Info().Msgf("[dryrun] Would run: docker rm -f %s", act.ContainerName)

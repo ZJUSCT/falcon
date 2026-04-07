@@ -95,9 +95,7 @@ func (s *State) DispatchLoop(ctx context.Context) {
 func (s *State) dispatchTick() {
 	// Check concurrency limit.
 	maxConc := s.JobQueue.GetMaxConcurrency()
-	s.ActionsMu.RLock()
-	runningCount := len(s.ActiveActions)
-	s.ActionsMu.RUnlock()
+	runningCount := s.countRunningActions()
 	if runningCount >= maxConc {
 		return
 	}
@@ -259,9 +257,7 @@ func (s *State) dispatchTick() {
 		log.Info().Str("job", jobID).Str("action", actionID).Str("worker", worker.Name).Msg("dispatched action")
 
 		// Re-check concurrency limit.
-		s.ActionsMu.RLock()
-		runningCount = len(s.ActiveActions)
-		s.ActionsMu.RUnlock()
+		runningCount = s.countRunningActions()
 		if runningCount >= maxConc {
 			break
 		}
@@ -561,6 +557,20 @@ func (s *State) HandleHeartbeatDiff(workerName string, reportedActions []string)
 // ---------------------------------------------------------------------------
 // Lookup helpers
 // ---------------------------------------------------------------------------
+
+// countRunningActions returns the number of actions in Running status.
+// Reconciling actions are excluded so they don't block unrelated dispatches.
+func (s *State) countRunningActions() int {
+	s.ActionsMu.RLock()
+	defer s.ActionsMu.RUnlock()
+	count := 0
+	for _, a := range s.ActiveActions {
+		if a.Status == shared.ActionStatusRunning {
+			count++
+		}
+	}
+	return count
+}
 
 // HasActiveActionForJob returns true if there is any active action (Running or
 // Reconciling) for the given job ID. This serves as the repo sync lock —

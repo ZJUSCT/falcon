@@ -108,20 +108,27 @@ func (s *State) handleRepoSave(w http.ResponseWriter, r *http.Request) {
 	s.Repos[repo.RepoID] = repo
 	s.ReposMu.Unlock()
 
-	// Ensure job exists
+	// Ensure job exists (only for "free" interval type — same logic as migrateJobs)
+	isFree := strings.ToLower(strings.TrimSpace(repo.SyncParams.Interval.Type)) == "free"
 	s.JobsMu.Lock()
 	job, exists := s.Jobs[repo.RepoID]
-	if !exists {
-		job = &shared.Job{
-			RepoID:        repo.RepoID,
-			Status:        shared.JobStatusWaiting,
-			NextAttemptAt: time.Now(),
-			UpdatedAt:     time.Now(),
+	if isFree {
+		if !exists {
+			job = &shared.Job{
+				RepoID:        repo.RepoID,
+				Status:        shared.JobStatusWaiting,
+				NextAttemptAt: time.Now(),
+				UpdatedAt:     time.Now(),
+			}
+			s.Jobs[repo.RepoID] = job
+		} else if job.Status == shared.JobStatusOrphan {
+			job.Status = shared.JobStatusWaiting
+			job.NextAttemptAt = time.Now()
+			job.UpdatedAt = time.Now()
 		}
-		s.Jobs[repo.RepoID] = job
-	} else if job.Status == shared.JobStatusOrphan {
-		job.Status = shared.JobStatusWaiting
-		job.NextAttemptAt = time.Now()
+	} else if exists && job.Status != shared.JobStatusOrphan {
+		// Non-free interval: mark as orphan so scheduler ignores it
+		job.Status = shared.JobStatusOrphan
 		job.UpdatedAt = time.Now()
 	}
 	jobCopy := *job
