@@ -105,6 +105,7 @@ type WorkerModel struct {
 	Name           string            `gorm:"primaryKey;column:name"`
 	Addr           string            `gorm:"column:addr"`
 	Labels         JSONMap            `gorm:"column:labels;type:TEXT"`
+	Vars           JSONMap            `gorm:"column:vars;type:TEXT"`
 	Status         string            `gorm:"column:status"`
 	LastHeartbeat  time.Time         `gorm:"column:last_heartbeat"`
 	RunningActions shared.StringList `gorm:"column:running_actions;type:TEXT"`
@@ -172,6 +173,11 @@ func UpsertJob(j *shared.Job) error {
 		LastActionStatus: j.LastActionStatus,
 	}
 	return gormDB.Clauses(clause.OnConflict{UpdateAll: true}).Create(&m).Error
+}
+
+// DeleteJob removes a job record by repo ID.
+func DeleteJob(repoID string) error {
+	return gormDB.Where("repo_id = ?", repoID).Delete(&JobModel{}).Error
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +371,7 @@ func UpsertWorker(w *shared.Worker) error {
 		Name:           w.Name,
 		Addr:           w.Addr,
 		Labels:         JSONMap(w.Labels),
+		Vars:           JSONMap(w.Vars),
 		Status:         w.Status,
 		LastHeartbeat:  w.LastHeartbeat,
 		RunningActions: w.RunningActions,
@@ -385,6 +392,7 @@ func LoadWorkersFromDB() (map[string]*shared.Worker, error) {
 			Name:           m.Name,
 			Addr:           m.Addr,
 			Labels:         map[string]string(m.Labels),
+			Vars:           map[string]string(m.Vars),
 			Status:         m.Status,
 			LastHeartbeat:  m.LastHeartbeat,
 			RunningActions: m.RunningActions,

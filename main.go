@@ -74,9 +74,8 @@ func parseMasterFlags(args []string) master.MasterConfig {
 
 func parseWorkerFlags(args []string) worker.WorkerConfig {
 	cfg := worker.WorkerConfig{
-		Addr:    ":9090",
-		BaseDir: "/home/zjusct/mirrorgo",
-		RepoDir: "/test1/mirrors/",
+		Addr: ":9090",
+		Vars: make(map[string]string),
 	}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -96,11 +95,19 @@ func parseWorkerFlags(args []string) worker.WorkerConfig {
 			i++
 			cfg.Labels = parseLabels(args[i])
 		case "--basedir":
+			// sugar for --var BASEDIR=<value>
 			i++
-			cfg.BaseDir = args[i]
+			cfg.Vars["BASEDIR"] = args[i]
 		case "--repodir":
+			// sugar for --var REPODIR=<value>
 			i++
-			cfg.RepoDir = args[i]
+			cfg.Vars["REPODIR"] = args[i]
+		case "--var":
+			i++
+			parts := strings.SplitN(args[i], "=", 2)
+			if len(parts) == 2 {
+				cfg.Vars[parts[0]] = parts[1]
+			}
 		case "--dryrun":
 			cfg.DryRun = true
 		}

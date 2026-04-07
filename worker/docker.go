@@ -20,13 +20,20 @@ import (
 
 var (
 	DockerClient *client.Client
-	BaseDir      string
-	RepoDir      string
+	Vars         map[string]string // e.g. {"BASEDIR": "/home/mirrorgo", "REPODIR": "/mnt/mirrors"}
 	DryRun       bool
 
 	dryRunMu    sync.Mutex
 	dryRunTimes = make(map[string]dryRunInfo) // action ID -> info
 )
+
+// expandVars replaces all $KEY placeholders in s using the Vars map.
+func expandVars(s string) string {
+	for k, v := range Vars {
+		s = strings.ReplaceAll(s, "$"+k, v)
+	}
+	return s
+}
 
 type dryRunInfo struct {
 	startTime time.Time
@@ -35,17 +42,23 @@ type dryRunInfo struct {
 
 // ContainerInfo holds information about a Docker container discovered during scanning.
 type ContainerInfo struct {
-	ContainerID   string
-	ContainerName string
-	ActionID      string // extracted if possible, or empty
-	IsRunning     bool
-	ExitCode      int
+	ContainerID      string
+	ContainerName    string
+	ActionID         string // from label mirrorgo.action-id
+	JobID            string // from label mirrorgo.job-id
+	IsRunning        bool
+	ExitCode         int
+	ExitReason       string
+	StartedAt        time.Time // actual container start time
+	FinishedAt       time.Time // actual container finish time (exited only)
+	ContainerTimeout string    // from label mirrorgo.timeout
 }
 
 // ContainerExistsByName checks if a Docker container with the given name exists
 // and whether it is currently running.
 func ContainerExistsByName(name string) (exists bool, running bool, err error) {
 	if DryRun {
+		log.Info().Str("container", name).Msgf("[dryrun] Would run: docker inspect %s", name)
 		return false, false, nil
 	}
 	inspect, err := DockerClient.ContainerInspect(context.Background(), name)
@@ -64,10 +77,34 @@ func StartContainer(act *shared.Action) error {
 	if DryRun {
 		log.Info().Str("job", act.JobID).Str("action", act.ID).Str("image", act.ContainerImage).Msg("[dryrun] Simulating container start")
 
+		// Build and log the equivalent docker commands
+		var mountArgs []string
+		for _, v := range act.ContainerVolumes {
+			src := expandVars(v.Source)
+			mountArgs = append(mountArgs, fmt.Sprintf("--mount type=bind,source=%s,target=%s", src, v.Destination))
+		}
 		logDir, err := CreatLogDir(act)
 		if err != nil {
 			return err
 		}
+		mountArgs = append(mountArgs, fmt.Sprintf("--mount type=bind,source=%s,target=/mirrorlogs", logDir))
+
+		var envArgs []string
+		for _, e := range act.ContainerEnv {
+			envArgs = append(envArgs, fmt.Sprintf("-e %s", e))
+		}
+		envArgs = append(envArgs, "-e MIRRORGO_LOGS_PATH=/mirrorlogs")
+
+		cmdStr := strings.Join(act.ContainerCommand, " ")
+		dockerCmd := fmt.Sprintf("docker create --name %s --hostname %s --user root --restart no --network host --log-driver json-file --log-opt max-size=1000m --log-opt max-file=1 --label mirrorgo.action-id=%s --label mirrorgo.job-id=%s --label mirrorgo.timeout=%s %s %s %s %s",
+			act.ContainerName, act.ContainerName,
+			act.ID, act.JobID, act.ContainerTimeout,
+			strings.Join(mountArgs, " "), strings.Join(envArgs, " "),
+			act.ContainerImage, cmdStr)
+		log.Info().Msgf("[dryrun] Would run: %s", dockerCmd)
+		log.Info().Msgf("[dryrun] Would run: docker start %s", act.ContainerName)
+		log.Info().Msgf("[dryrun] Would run: docker inspect %s", act.ContainerName)
+
 		// Write a dummy log file so log endpoints work
 		_ = os.WriteFile(filepath.Join(logDir, "container.log"), []byte(fmt.Sprintf("dryrun: simulating container for %s\n", act.JobID)), 0644)
 
@@ -91,33 +128,40 @@ func StartContainer(act *shared.Action) error {
 		return err
 	}
 
-	act.ContainerVolumes = append(act.ContainerVolumes, shared.Volume{
+	// Build mounts and env locally — do NOT mutate act.ContainerVolumes/Env
+	// so the action struct keeps the original dispatch payload.
+	allVolumes := make([]shared.Volume, len(act.ContainerVolumes), len(act.ContainerVolumes)+1)
+	copy(allVolumes, act.ContainerVolumes)
+	allVolumes = append(allVolumes, shared.Volume{
 		Source:      logDir,
 		Destination: "/mirrorlogs",
 	})
 
-	mounts := []mount.Mount{}
-
-	act.ContainerEnv = append(act.ContainerEnv, "MIRRORGO_LOGS_PATH=/mirrorlogs")
-
-	for _, volume := range act.ContainerVolumes {
-		volume.Source = strings.ReplaceAll(volume.Source, "$BASEDIR", BaseDir)
-		volume.Source = strings.ReplaceAll(volume.Source, "$REPODIR", RepoDir)
-
+	mounts := make([]mount.Mount, 0, len(allVolumes))
+	for _, volume := range allVolumes {
 		mounts = append(mounts, mount.Mount{
 			Type:   mount.TypeBind,
-			Source: volume.Source,
+			Source: expandVars(volume.Source),
 			Target: volume.Destination,
 		})
 	}
+
+	env := make([]string, len(act.ContainerEnv), len(act.ContainerEnv)+1)
+	copy(env, act.ContainerEnv)
+	env = append(env, "MIRRORGO_LOGS_PATH=/mirrorlogs")
 
 	resp, err := DockerClient.ContainerCreate(context.Background(), &container.Config{
 		Hostname: act.ContainerName,
 		Image:    act.ContainerImage,
 		Cmd:      act.ContainerCommand,
-		Env:      act.ContainerEnv,
+		Env:      env,
 		Tty:      false,
 		User:     "root",
+		Labels: map[string]string{
+			"mirrorgo.action-id": act.ID,
+			"mirrorgo.job-id":    act.JobID,
+			"mirrorgo.timeout":   act.ContainerTimeout,
+		},
 	}, &container.HostConfig{
 		RestartPolicy: container.RestartPolicy{
 			Name: "no",
@@ -148,6 +192,10 @@ func StartContainer(act *shared.Action) error {
 		act.ContainerExitCode = 11452
 		act.ContainerExitReason = "Failed to start container: " + err.Error()
 		log.Error().Err(err).Str("job", act.JobID).Str("action", act.ID).Str("image", act.ContainerImage).Msg("Failed to start container")
+		// Clean up the created-but-not-started container.
+		if rmErr := DockerClient.ContainerRemove(context.Background(), resp.ID, container.RemoveOptions{Force: true}); rmErr != nil {
+			log.Error().Err(rmErr).Str("action", act.ID).Msg("Failed to remove container after start failure")
+		}
 		return err
 	}
 
@@ -169,6 +217,7 @@ func StartContainer(act *shared.Action) error {
 // It does NOT delete the container — deletion is deferred to CleanupContainer.
 func CheckContainer(act *shared.Action) (bool, error) {
 	if DryRun {
+		log.Debug().Msgf("[dryrun] Would run: docker inspect %s", act.ContainerID)
 		dryRunMu.Lock()
 		info, ok := dryRunTimes[act.ID]
 		dryRunMu.Unlock()
@@ -214,6 +263,8 @@ func CheckContainer(act *shared.Action) (bool, error) {
 // to the action log directory, and removes the container.
 func DeleteContainer(act *shared.Action) error {
 	if DryRun {
+		log.Info().Str("action", act.ID).Msgf("[dryrun] Would run: docker inspect %s", act.ContainerID)
+		log.Info().Str("action", act.ID).Msgf("[dryrun] Would run: docker rm -f %s", act.ContainerID)
 		log.Info().Str("action", act.ID).Msg("[dryrun] Skipping container deletion (simulated)")
 		return nil
 	}
@@ -263,6 +314,7 @@ func CleanupContainer(act *shared.Action) error {
 // containers to specific actions is left to the caller.
 func ScanExistingContainers() (running []*ContainerInfo, exited []*ContainerInfo, err error) {
 	if DryRun {
+		log.Info().Msg("[dryrun] Would run: docker ps -a")
 		log.Info().Msg("[dryrun] Skipping container scan (no containers in dryrun mode)")
 		return nil, nil, nil
 	}
@@ -289,18 +341,35 @@ func ScanExistingContainers() (running []*ContainerInfo, exited []*ContainerInfo
 		}
 
 		info := &ContainerInfo{
-			ContainerID:   c.ID,
-			ContainerName: name,
+			ContainerID:      c.ID,
+			ContainerName:    name,
+			ActionID:         c.Labels["mirrorgo.action-id"],
+			JobID:            c.Labels["mirrorgo.job-id"],
+			ContainerTimeout: c.Labels["mirrorgo.timeout"],
 		}
 
 		if c.State == "running" {
 			info.IsRunning = true
+			// Inspect to get actual start time for timeout enforcement after recovery.
+			inspect, inspectErr := DockerClient.ContainerInspect(context.Background(), c.ID)
+			if inspectErr == nil && inspect.State != nil {
+				if t, err := time.Parse(time.RFC3339Nano, inspect.State.StartedAt); err == nil {
+					info.StartedAt = t
+				}
+			}
 			running = append(running, info)
 		} else {
-			// For exited containers, inspect to get the exit code.
+			// For exited containers, inspect to get exit code, start time, and error.
 			inspect, inspectErr := DockerClient.ContainerInspect(context.Background(), c.ID)
 			if inspectErr == nil && inspect.State != nil {
 				info.ExitCode = inspect.State.ExitCode
+				info.ExitReason = inspect.State.Error
+				if t, err := time.Parse(time.RFC3339Nano, inspect.State.StartedAt); err == nil {
+					info.StartedAt = t
+				}
+				if t, err := time.Parse(time.RFC3339Nano, inspect.State.FinishedAt); err == nil {
+					info.FinishedAt = t
+				}
 			}
 			exited = append(exited, info)
 		}

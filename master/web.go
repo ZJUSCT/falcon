@@ -189,6 +189,40 @@ func (s *State) handleJobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleJobDelete — POST /api/jobs/delete?id=<id>
+// Only Orphan jobs can be deleted.
+func (s *State) handleJobDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing id"})
+		return
+	}
+
+	s.JobsMu.Lock()
+	job, exists := s.Jobs[id]
+	if !exists {
+		s.JobsMu.Unlock()
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+		return
+	}
+	if job.Status != shared.JobStatusOrphan {
+		s.JobsMu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "only orphan jobs can be deleted"})
+		return
+	}
+	delete(s.Jobs, id)
+	s.JobsMu.Unlock()
+
+	_ = DeleteJob(id)
+	_ = DBDeleteAllQueueByJob(id)
+
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+}
+
 // handleActions — GET /api/actions (active actions)
 func (s *State) handleActions(w http.ResponseWriter, r *http.Request) {
 	s.ActionsMu.RLock()
@@ -525,24 +559,18 @@ func (s *State) handleWorkersRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fail any remaining Reconciling actions for that worker.
-	s.ActionsMu.Lock()
-	var toFail []*shared.Action
+	// Fail any remaining Reconciling/Running actions for that worker.
+	var actionIDs []string
+	s.ActionsMu.RLock()
 	for _, action := range s.ActiveActions {
-		if action.WorkerName == name && action.Status == shared.ActionStatusReconciling {
-			action.Status = shared.ActionStatusFailed
-			action.FinishedAt = time.Now()
-			action.UpdatedAt = time.Now()
-			action.ContainerExitReason = "worker removed"
-			toFail = append(toFail, action)
-			delete(s.ActiveActions, action.ID)
-			_ = UpsertAction(action)
+		if action.WorkerName == name {
+			actionIDs = append(actionIDs, action.ID)
 		}
 	}
-	s.ActionsMu.Unlock()
+	s.ActionsMu.RUnlock()
 
-	for _, action := range toFail {
-		s.finishJob(action.JobID, false)
+	for _, id := range actionIDs {
+		s.resolveAction(id, shared.ActionStatusFailed, 0, "worker removed", name)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "worker removed"})
@@ -687,6 +715,7 @@ func (s *State) StartWebServer(addr, authToken string) {
 	// Public API routes.
 	mux.HandleFunc("/api/repos", s.handleReposDispatch)
 	mux.HandleFunc("/api/jobs", s.handleJobs)
+	mux.HandleFunc("/api/jobs/delete", s.handleJobDelete)
 	mux.HandleFunc("/api/jobs/next_attempt_now", s.handleJobNextAttemptNow)
 	mux.HandleFunc("/api/actions", s.handleActions)
 	mux.HandleFunc("/api/actions/lookup", s.handleActionsLookup)

@@ -162,6 +162,7 @@ type Worker struct {
 	Name           string            `json:"name"`
 	Addr           string            `json:"addr"`
 	Labels         map[string]string `json:"labels"`
+	Vars           map[string]string `json:"vars,omitempty"`
 	Status         string            `json:"status"`
 	LastHeartbeat  time.Time         `json:"last_heartbeat"`
 	RunningActions []string          `json:"running_actions"`
@@ -180,11 +181,8 @@ const (
 	ActionStatusSucceeded   = "Succeeded"
 	ActionStatusFailed      = "Failed"
 
-	ContainerStatusStarting   = "Starting"
-	ContainerStatusNotCreated = "NotCreated"
-	ContainerStatusOrphan     = "Orphan"
-	ContainerStatusRunning    = "Running"
-	ContainerStatusExited     = "Exited"
+	ContainerStatusRunning = "Running"
+	ContainerStatusExited  = "Exited"
 
 	WorkerStatusOnline  = "Online"
 	WorkerStatusOffline = "Offline"

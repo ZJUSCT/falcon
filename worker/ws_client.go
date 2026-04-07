@@ -11,31 +11,33 @@ import (
 	"github.com/star/mirrorgo/shared"
 )
 
+// WSClient manages the WebSocket connection to the master.
+// It does NOT buffer messages internally — on reconnect it replays all
+// PendingAck actions from the Tracker, which is the single source of truth.
 type WSClient struct {
 	mu        sync.Mutex
 	conn      *websocket.Conn
-	masterURL string // e.g. "http://master:8080"
+	masterURL string
 	name      string
 	token     string
 
 	writeMu sync.Mutex // protects all writes to conn
 
-	bufMu  sync.Mutex
-	buffer []*shared.WSMessage
-
-	OnAck func(actionID string) // callback when Master acks an action
+	tracker *Tracker              // used to replay PendingAck on reconnect
+	OnAck   func(actionID string) // callback when Master acks an action
 }
 
-func NewWSClient(masterURL, name, token string) *WSClient {
+func NewWSClient(masterURL, name, token string, tracker *Tracker) *WSClient {
 	return &WSClient{
 		masterURL: masterURL,
 		name:      name,
 		token:     token,
+		tracker:   tracker,
 	}
 }
 
-// ConnectLoop runs an infinite reconnect loop: connect, flush buffer, read
-// (blocks), then retry with exponential backoff on disconnect.
+// ConnectLoop runs an infinite reconnect loop: connect, replay pending acks,
+// read (blocks), then retry with exponential backoff on disconnect.
 func (ws *WSClient) ConnectLoop() {
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
@@ -52,10 +54,12 @@ func (ws *WSClient) ConnectLoop() {
 			continue
 		}
 
-		// Connected — reset backoff and flush any buffered messages.
 		backoff = time.Second
 		log.Info().Str("master", ws.masterURL).Msg("WebSocket connected to master")
-		ws.flushBuffer()
+
+		// Replay all PendingAck results — the tracker is the reliable source.
+		ws.replayPendingAcks()
+
 		ws.readLoop()
 
 		// readLoop returned — connection lost.
@@ -71,7 +75,6 @@ func (ws *WSClient) ConnectLoop() {
 }
 
 func (ws *WSClient) connect() error {
-	// Build ws[s]:// URL from http[s]://
 	u := ws.masterURL
 	u = strings.Replace(u, "https://", "wss://", 1)
 	u = strings.Replace(u, "http://", "ws://", 1)
@@ -116,70 +119,55 @@ func (ws *WSClient) readLoop() {
 	}
 }
 
-// writeMessage sends raw data to the WebSocket connection while holding the
-// write mutex. gorilla/websocket does not support concurrent writes, so all
-// writes must go through this method.
+// writeMessage sends raw data while holding the write mutex.
 func (ws *WSClient) writeMessage(conn *websocket.Conn, data []byte) error {
 	ws.writeMu.Lock()
 	defer ws.writeMu.Unlock()
 	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
-// Send tries to write msg to the connection. If the connection is nil or the
-// write fails, the message is buffered for later delivery.
-func (ws *WSClient) Send(msg *shared.WSMessage) {
+// SendResult sends an action result message to the master.
+// If the connection is down, the message is NOT buffered — the tracker
+// retains the PendingAck state and replayPendingAcks will resend on reconnect.
+func (ws *WSClient) SendResult(act *shared.Action) {
+	msg := &shared.WSMessage{
+		Type:            "action_result",
+		ActionID:        act.ID,
+		Status:          act.Status,
+		ContainerStatus: shared.ContainerStatusExited,
+		ExitCode:        act.ContainerExitCode,
+		ExitReason:      act.ContainerExitReason,
+		UpdatedAt:       time.Now(),
+	}
+
 	ws.mu.Lock()
 	conn := ws.conn
 	ws.mu.Unlock()
 
-	if conn != nil {
-		data, err := json.Marshal(msg)
-		if err != nil {
-			log.Error().Err(err).Msg("WebSocket: failed to marshal message")
-			return
-		}
-		if err := ws.writeMessage(conn, data); err == nil {
-			return
-		}
-		log.Warn().Err(err).Str("action", msg.ActionID).Msg("WebSocket write failed, buffering")
+	if conn == nil {
+		log.Debug().Str("action", act.ID).Msg("WebSocket not connected, result will be replayed on reconnect")
+		return
 	}
 
-	ws.bufMu.Lock()
-	ws.buffer = append(ws.buffer, msg)
-	ws.bufMu.Unlock()
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Error().Err(err).Msg("WebSocket: failed to marshal message")
+		return
+	}
+	if err := ws.writeMessage(conn, data); err != nil {
+		log.Warn().Err(err).Str("action", act.ID).Msg("WebSocket write failed, result will be replayed on reconnect")
+	}
 }
 
-func (ws *WSClient) flushBuffer() {
-	ws.bufMu.Lock()
-	pending := ws.buffer
-	ws.buffer = nil
-	ws.bufMu.Unlock()
+// replayPendingAcks resends results for all PendingAck actions after reconnect.
+func (ws *WSClient) replayPendingAcks() {
+	pending := ws.tracker.PendingAckActions()
+	if len(pending) == 0 {
+		return
+	}
 
-	for _, msg := range pending {
-		ws.mu.Lock()
-		conn := ws.conn
-		ws.mu.Unlock()
-		if conn == nil {
-			// Re-buffer remaining messages.
-			ws.bufMu.Lock()
-			ws.buffer = append(pending, ws.buffer...)
-			ws.bufMu.Unlock()
-			return
-		}
-
-		data, err := json.Marshal(msg)
-		if err != nil {
-			log.Error().Err(err).Msg("WebSocket: failed to marshal buffered message")
-			continue
-		}
-		if err := ws.writeMessage(conn, data); err != nil {
-			log.Warn().Err(err).Msg("WebSocket: flush write failed, re-buffering remaining")
-			ws.bufMu.Lock()
-			ws.buffer = append(pending, ws.buffer...)
-			ws.bufMu.Unlock()
-			return
-		}
-		// Advance past the successfully sent message.
-		pending = pending[1:]
+	log.Info().Int("count", len(pending)).Msg("Replaying PendingAck results after reconnect")
+	for _, act := range pending {
+		ws.SendResult(act)
 	}
 }

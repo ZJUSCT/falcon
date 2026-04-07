@@ -106,6 +106,7 @@ export function WorkersView() {
         <div className="grid gap-4 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
           {workers.map(worker => {
             const labels = worker.labels ? Object.entries(worker.labels) : [];
+            const vars = worker.vars ? Object.entries(worker.vars) : [];
             const runningCount = worker.running_actions?.length || 0;
 
             return (
@@ -137,6 +138,19 @@ export function WorkersView() {
                         {k}={v}
                       </span>
                     ))}
+                  </div>
+                )}
+
+                {vars.length > 0 && (
+                  <div>
+                    <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">Variables</div>
+                    <div className="space-y-0.5">
+                      {vars.map(([k, v]) => (
+                        <div key={k} className="font-mono text-xs text-muted-foreground">
+                          <span className="text-foreground/70">${k}</span> = {v}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
 

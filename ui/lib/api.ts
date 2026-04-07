@@ -195,6 +195,16 @@ class ApiClient {
     return this.fetch<Worker[]>('/workers');
   }
 
+  async deleteJob(id: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/jobs/delete?id=${encodeURIComponent(id)}`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: response.statusText }));
+      throw new Error(errorData.error || `API request failed: ${response.statusText}`);
+    }
+  }
+
   async removeWorker(name: string): Promise<void> {
     const response = await fetch(`${API_BASE}/workers/remove?name=${encodeURIComponent(name)}`, {
       method: 'POST',

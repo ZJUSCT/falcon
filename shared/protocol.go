@@ -7,6 +7,7 @@ type RegisterRequest struct {
 	Name   string            `json:"name"`
 	Labels map[string]string `json:"labels"`
 	Addr   string            `json:"addr"`
+	Vars   map[string]string `json:"vars,omitempty"`
 }
 
 type RegisterResponse struct {

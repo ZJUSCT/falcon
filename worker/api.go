@@ -20,14 +20,16 @@ import (
 
 // Package-level state set by worker.go before starting the API.
 var (
-	OnNewAction func(act *shared.Action) // set by worker.go
-	actionCache *ActionCache             // set by worker.go
-	authToken   string                   // set by worker.go
+	OnNewAction  func(act *shared.Action)
+	actionCache  *ActionCache
+	tracker      *Tracker
+	authToken    string
 )
 
 // SetWorkerAPIState configures package-level state used by the HTTP handlers.
-func SetWorkerAPIState(cache *ActionCache, token string, onNew func(act *shared.Action)) {
+func SetWorkerAPIState(cache *ActionCache, t *Tracker, token string, onNew func(act *shared.Action)) {
 	actionCache = cache
+	tracker = t
 	authToken = token
 	OnNewAction = onNew
 }
@@ -53,7 +55,11 @@ func HandleDispatch(w http.ResponseWriter, r *http.Request) {
 
 	da := req.Action
 
-	// Idempotency: check if the action is already known.
+	// Idempotency: check tracker first, then cache.
+	if tracker.Has(da.ID) {
+		writeJSON(w, http.StatusOK, shared.DispatchResponse{OK: true, Message: "already tracked"})
+		return
+	}
 	if actionCache != nil {
 		if _, found := actionCache.Get(da.ID); found {
 			writeJSON(w, http.StatusOK, shared.DispatchResponse{OK: true, Message: "already known"})
@@ -61,34 +67,47 @@ func HandleDispatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build a shared.Action from the dispatch request.
 	act := &shared.Action{
 		ID:               da.ID,
 		JobID:            da.JobID,
 		Status:           shared.ActionStatusRunning,
-		ContainerName:    "syncing-" + da.JobID + "-" + da.ID,
+		ContainerName:    "syncing-" + da.JobID,
 		ContainerImage:   da.ContainerImage,
 		ContainerCommand: da.ContainerCommand,
 		ContainerVolumes: shared.VolumeList(da.ContainerVolumes),
 		ContainerEnv:     da.ContainerEnv,
 		ContainerTimeout: da.ContainerTimeout,
-		ContainerStatus:  shared.ContainerStatusStarting,
+		ContainerStatus:  shared.ContainerStatusRunning,
 		CreatedAt:        time.Now(),
 		StartedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
 	}
 
-	// Check for duplicate container from a previous dispatch attempt.
+	// Docker-level duplicate check: container name = "syncing-{jobID}",
+	// so Docker itself prevents two containers for the same repo.
 	cExists, cRunning, _ := ContainerExistsByName(act.ContainerName)
 	if cExists && cRunning {
-		// Already running from a previous dispatch attempt - return OK.
-		// The existing monitor will handle it.
+		// Container is already running for this repo. Ensure it's tracked
+		// (e.g. worker restarted and received dispatch before scan completed).
+		if !tracker.Has(da.ID) && OnNewAction != nil {
+			// Inspect to get the real ContainerID before tracking.
+			if !DryRun {
+				inspect, err := DockerClient.ContainerInspect(context.Background(), act.ContainerName)
+				if err == nil {
+					act.ContainerID = inspect.ID
+				}
+			}
+			OnNewAction(act)
+		}
 		writeJSON(w, http.StatusOK, shared.DispatchResponse{OK: true, Message: "container already running"})
 		return
 	}
 	if cExists && !cRunning {
-		// Exited container from previous attempt - remove it before starting new one.
-		DockerClient.ContainerRemove(context.Background(), act.ContainerName, container.RemoveOptions{Force: true})
+		if DryRun {
+			log.Info().Msgf("[dryrun] Would run: docker rm -f %s", act.ContainerName)
+		} else {
+			DockerClient.ContainerRemove(context.Background(), act.ContainerName, container.RemoveOptions{Force: true})
+		}
 	}
 
 	if err := StartContainer(act); err != nil {
@@ -109,6 +128,7 @@ func HandleDispatch(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleActionStatus handles GET /api/internal/action_status?id=xxx
+// Single lookup into the tracker — no stitching between multiple stores.
 func HandleActionStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	if id == "" {
@@ -116,17 +136,27 @@ func HandleActionStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if actionCache == nil {
-		writeJSON(w, http.StatusOK, &shared.ActionStatusResponse{Found: false, ActionID: id})
+	// Primary: check tracker (covers Running, PendingAck, PendingCleanup).
+	if tracker != nil {
+		resp := tracker.ToStatusResponse(id)
+		if resp.Found {
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+	}
+
+	// Fallback: check cache for actions that have been cleaned up already.
+	if actionCache != nil {
+		resp := actionCache.ToStatusResponse(id)
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
-	resp := actionCache.ToStatusResponse(id)
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, &shared.ActionStatusResponse{Found: false, ActionID: id})
 }
 
 // ---------------------------------------------------------------------------
-// Log handlers (ported from web.go)
+// Log handlers
 // ---------------------------------------------------------------------------
 
 func resolveActionLogPath(actionID string, relPath string) (string, error) {
@@ -160,7 +190,6 @@ type logEntry struct {
 	ModTime time.Time `json:"mod_time"`
 }
 
-// handleLogsList lists files and directories under the action's log directory.
 func handleLogsList(w http.ResponseWriter, r *http.Request) {
 	actionID := r.URL.Query().Get("action_id")
 	abs, err := resolveActionLogPath(actionID, ".")
@@ -214,7 +243,6 @@ func handleLogsList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleLogsRaw returns the full content of the specified log file.
 func handleLogsRaw(w http.ResponseWriter, r *http.Request) {
 	actionID := r.URL.Query().Get("action_id")
 	file := r.URL.Query().Get("file")
@@ -251,7 +279,6 @@ func handleLogsRaw(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, f)
 }
 
-// handleLogsStream streams new data appended to the file (SSE, similar to tail -f).
 func handleLogsStream(w http.ResponseWriter, r *http.Request) {
 	actionID := r.URL.Query().Get("action_id")
 	file := r.URL.Query().Get("file")
@@ -283,8 +310,6 @@ func handleLogsStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-
-	log.Info().Str("action_id", actionID).Str("file", file).Msg("handleLogsStream")
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {

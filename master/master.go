@@ -53,7 +53,7 @@ func Run(cfg MasterConfig) {
 	}
 
 	// 4. Wire callbacks.
-	state.WorkerMgr.SetCallbacks(state.OnWorkerOnline, state.OnWorkerOffline)
+	state.WorkerMgr.SetOfflineCallback(state.OnWorkerOffline)
 	state.WorkerMgr.OnHeartbeat = state.HandleHeartbeatDiff
 	state.WSHub.OnActionStatus = state.HandleActionStatus
 
@@ -135,6 +135,35 @@ func Run(cfg MasterConfig) {
 	if err := MarkAllWorkersOffline(); err != nil {
 		log.Error().Err(err).Msg("Failed to mark all workers offline")
 	}
+	state.WorkerMgr.MarkAllOffline()
+
+	// 7d. Defensive recovery: revert Running jobs that have no active action.
+	// This handles the edge case where master crashed after completing an
+	// action but before persisting the job state update in finishJob.
+	{
+		// Build set of job IDs that have active actions.
+		activeJobIDs := make(map[string]struct{})
+		state.ActionsMu.RLock()
+		for _, a := range state.ActiveActions {
+			activeJobIDs[a.JobID] = struct{}{}
+		}
+		state.ActionsMu.RUnlock()
+
+		now := time.Now()
+		state.JobsMu.Lock()
+		for _, j := range state.Jobs {
+			if j.Status == shared.JobStatusRunning {
+				if _, has := activeJobIDs[j.RepoID]; !has {
+					log.Warn().Str("job", j.RepoID).Msg("Running job has no active action, reverting to Waiting")
+					j.Status = shared.JobStatusWaiting
+					j.NextAttemptAt = now
+					j.UpdatedAt = now
+					_ = UpsertJob(j)
+				}
+			}
+		}
+		state.JobsMu.Unlock()
+	}
 
 	// 8. Migrate jobs: orphan deleted repos, create jobs for new repos.
 	migrateJobs(state)
@@ -147,6 +176,7 @@ func Run(cfg MasterConfig) {
 	go state.ScheduleLoop(ctx)
 	go state.DispatchLoop(ctx)
 	go state.WorkerMgr.OfflineCheckLoop(ctx)
+	go state.StaleReconcilingCheckLoop(ctx)
 	go state.StartWebServer(cfg.Addr, cfg.AuthToken)
 
 	// 10. Update mirrorgo.json.

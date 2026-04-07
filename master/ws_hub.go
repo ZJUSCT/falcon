@@ -13,9 +13,10 @@ import (
 // WSHub accepts WebSocket connections from workers and routes action status
 // messages back to the master via the OnActionStatus callback.
 type WSHub struct {
-	mu    sync.RWMutex
-	conns map[string]*websocket.Conn // worker name -> conn
-	token string
+	mu       sync.RWMutex
+	conns    map[string]*websocket.Conn // worker name -> conn
+	writeMus map[string]*sync.Mutex     // worker name -> write mutex
+	token    string
 
 	// OnActionStatus is called for every incoming WSMessage from a worker.
 	OnActionStatus func(workerName string, msg *shared.WSMessage)
@@ -28,8 +29,9 @@ var upgrader = websocket.Upgrader{
 // NewWSHub creates a new WSHub with the given authentication token.
 func NewWSHub(token string) *WSHub {
 	return &WSHub{
-		conns: make(map[string]*websocket.Conn),
-		token: token,
+		conns:    make(map[string]*websocket.Conn),
+		writeMus: make(map[string]*sync.Mutex),
+		token:    token,
 	}
 }
 
@@ -58,6 +60,9 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		log.Warn().Str("worker", name).Msg("closing stale websocket connection")
 	}
 	h.conns[name] = conn
+	if _, ok := h.writeMus[name]; !ok {
+		h.writeMus[name] = &sync.Mutex{}
+	}
 	h.mu.Unlock()
 
 	// Read loop — runs until the connection is closed or an error occurs.
@@ -98,8 +103,9 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 func (h *WSHub) SendAck(workerName, actionID string) {
 	h.mu.RLock()
 	conn, ok := h.conns[workerName]
+	wmu := h.writeMus[workerName]
 	h.mu.RUnlock()
-	if !ok {
+	if !ok || wmu == nil {
 		log.Warn().Str("worker", workerName).Str("action", actionID).Msg("cannot send ack: worker not connected")
 		return
 	}
@@ -108,7 +114,10 @@ func (h *WSHub) SendAck(workerName, actionID string) {
 		Type:     "ack",
 		ActionID: actionID,
 	}
-	if err := conn.WriteJSON(ack); err != nil {
+	wmu.Lock()
+	err := conn.WriteJSON(ack)
+	wmu.Unlock()
+	if err != nil {
 		log.Error().Err(err).Str("worker", workerName).Str("action", actionID).Msg("failed to send ack")
 	}
 }

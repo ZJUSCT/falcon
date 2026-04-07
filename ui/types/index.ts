@@ -77,6 +77,7 @@ export interface Worker {
   name: string;
   addr: string;
   labels: Record<string, string> | null;
+  vars: Record<string, string> | null;
   status: 'Online' | 'Offline';
   last_heartbeat: string;
   running_actions: string[] | null;

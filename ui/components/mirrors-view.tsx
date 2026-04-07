@@ -7,7 +7,7 @@ import { RelativeTime } from '@/components/relative-time';
 import { TriggerButton } from '@/components/trigger-button';
 import { apiClient } from '@/lib/api';
 import { Job, Repo, Action } from '@/types';
-import { Search } from 'lucide-react';
+import { Search, Trash2 } from 'lucide-react';
 
 interface MirrorsViewProps {
   onMirrorClick: (id: string) => void;
@@ -73,6 +73,17 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
 
   const forceRefresh = () => {
     fetchUpdates();
+  };
+
+  const handleDeleteOrphan = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm(`Delete orphan job "${id}"? Action history will be preserved in the database but the job will be removed from the list.`)) return;
+    try {
+      await apiClient.deleteJob(id);
+      await fetchUpdates();
+    } catch (err) {
+      console.error('Failed to delete orphan job:', err);
+    }
   };
 
   useEffect(() => {
@@ -251,7 +262,7 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                           ) : (
                             <span className="font-mono text-muted-foreground">--</span>
                           )}
-                          {job && (
+                          {job && job.status !== 'Orphan' && (
                             <TriggerButton
                               jobId={job.id}
                               jobStatus={job.status}
@@ -259,6 +270,15 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                               size="sm"
                               onSuccess={forceRefresh}
                             />
+                          )}
+                          {job && job.status === 'Orphan' && (
+                            <button
+                              onClick={e => handleDeleteOrphan(m.id, e)}
+                              className="p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                              title="Delete orphan job"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
                           )}
                         </div>
                       </td>

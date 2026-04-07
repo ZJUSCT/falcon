@@ -60,6 +60,11 @@ func (s *State) scheduleTick() {
 		if job.NextAttemptAt.After(now) {
 			continue
 		}
+		// Repo sync lock: never schedule if there is already an active
+		// action (Running or Reconciling) for this repo.
+		if s.HasActiveActionForJob(job.RepoID) {
+			continue
+		}
 		job.Status = shared.JobStatusScheduled
 		job.UpdatedAt = now
 		if err := UpsertJob(job); err != nil {
@@ -128,6 +133,22 @@ func (s *State) dispatchTick() {
 			continue
 		}
 
+		// Repo sync lock (secondary check): skip if an active action already
+		// exists, e.g. due to recovery restoring a Reconciling action.
+		if s.HasActiveActionForJob(jobID) {
+			log.Warn().Str("job", jobID).Msg("active action exists, skipping dispatch")
+			_ = DBDequeueOne(jobID)
+			// Revert job back to Running (it has an active action).
+			s.JobsMu.Lock()
+			if j, ok := s.Jobs[jobID]; ok && j.Status == shared.JobStatusScheduled {
+				j.Status = shared.JobStatusRunning
+				j.UpdatedAt = time.Now()
+				_ = UpsertJob(j)
+			}
+			s.JobsMu.Unlock()
+			continue
+		}
+
 		// Find a matching online worker.
 		worker := s.selectWorker(&repo)
 		if worker == nil {
@@ -164,6 +185,7 @@ func (s *State) dispatchTick() {
 			ID:               actionID,
 			JobID:            jobID,
 			Status:           shared.ActionStatusRunning,
+			ContainerName:    "syncing-" + jobID,
 			ContainerImage:   repo.SyncParams.Image,
 			ContainerCommand: repo.SyncParams.Command,
 			ContainerVolumes: repo.SyncParams.Volumes,
@@ -246,38 +268,68 @@ func (s *State) selectWorker(repo *shared.Repo) *shared.Worker {
 	return best
 }
 
+// ---------------------------------------------------------------------------
+// resolveAction — the single entry point for terminating an action
+// ---------------------------------------------------------------------------
+
+// resolveAction moves an action to a terminal state (Succeeded or Failed),
+// removes it from ActiveActions, persists it, finishes the job, and sends an
+// ack to the worker. All code paths that finish an action MUST go through here.
+//
+// If the action is not found in ActiveActions, it still sends an ack so the
+// worker can clean up orphaned containers.
+func (s *State) resolveAction(actionID, status string, exitCode int, exitReason string, workerName string) {
+	s.ActionsMu.Lock()
+	action, exists := s.ActiveActions[actionID]
+	if !exists {
+		s.ActionsMu.Unlock()
+		log.Warn().Str("action", actionID).Str("worker", workerName).Msg("resolveAction: unknown action, sending ack for cleanup")
+		s.WSHub.SendAck(workerName, actionID)
+		return
+	}
+
+	action.Status = status
+	action.ContainerStatus = shared.ContainerStatusExited
+	action.ContainerExitCode = exitCode
+	action.ContainerExitReason = exitReason
+	action.FinishedAt = time.Now()
+	action.UpdatedAt = time.Now()
+
+	// Persist BEFORE removing from ActiveActions. If persistence fails,
+	// keep the action in memory so recovery can handle it on next restart.
+	if err := UpsertAction(action); err != nil {
+		log.Error().Err(err).Str("action", actionID).Msg("resolveAction: failed to persist, keeping in ActiveActions for retry")
+		s.ActionsMu.Unlock()
+		return
+	}
+	delete(s.ActiveActions, actionID)
+	s.ActionsMu.Unlock()
+
+	s.finishJob(action.JobID, status == shared.ActionStatusSucceeded)
+	s.WSHub.SendAck(workerName, actionID)
+
+	log.Info().Str("action", actionID).Str("status", status).Str("worker", workerName).Msg("action resolved")
+}
+
 // HandleActionStatus is called by WSHub when a worker reports action status.
 func (s *State) HandleActionStatus(workerName string, msg *shared.WSMessage) {
+	isTerminal := msg.Status == shared.ActionStatusSucceeded || msg.Status == shared.ActionStatusFailed
+
+	if isTerminal {
+		s.resolveAction(msg.ActionID, msg.Status, msg.ExitCode, msg.ExitReason, workerName)
+		return
+	}
+
+	// Non-terminal update (e.g. container status change) — update in place.
 	s.ActionsMu.Lock()
 	action, exists := s.ActiveActions[msg.ActionID]
 	if !exists {
 		s.ActionsMu.Unlock()
-		log.Warn().Str("action", msg.ActionID).Str("worker", workerName).Msg("received status for unknown action (possibly from crash recovery)")
 		return
 	}
-
-	// Update action fields from message.
-	action.Status = msg.Status
 	action.ContainerStatus = msg.ContainerStatus
-	action.ContainerExitCode = msg.ExitCode
-	action.ContainerExitReason = msg.ExitReason
 	action.UpdatedAt = msg.UpdatedAt
-
-	isTerminal := msg.Status == shared.ActionStatusSucceeded || msg.Status == shared.ActionStatusFailed
-	if isTerminal {
-		action.FinishedAt = time.Now()
-		delete(s.ActiveActions, msg.ActionID)
-	}
 	s.ActionsMu.Unlock()
-
-	if err := UpsertAction(action); err != nil {
-		log.Error().Err(err).Str("action", msg.ActionID).Msg("failed to persist action status update")
-	}
-
-	if isTerminal {
-		s.finishJob(action.JobID, msg.Status == shared.ActionStatusSucceeded)
-		s.WSHub.SendAck(workerName, msg.ActionID)
-	}
 }
 
 // finishJob updates the job after an action completes and schedules the next attempt.
@@ -342,6 +394,39 @@ func (s *State) finishJob(jobID string, succeeded bool) {
 	}()
 }
 
+// WarnStaleReconcilingActions logs warnings for actions that have been in
+// Reconciling state longer than the given threshold. This runs periodically
+// so admins know to remove dead workers.
+func (s *State) WarnStaleReconcilingActions(threshold time.Duration) {
+	now := time.Now()
+	s.ActionsMu.RLock()
+	defer s.ActionsMu.RUnlock()
+	for _, action := range s.ActiveActions {
+		if action.Status == shared.ActionStatusReconciling && now.Sub(action.UpdatedAt) > threshold {
+			log.Warn().
+				Str("action", action.ID).
+				Str("job", action.JobID).
+				Str("worker", action.WorkerName).
+				Dur("stale_for", now.Sub(action.UpdatedAt)).
+				Msg("action stuck in Reconciling — consider removing the offline worker via POST /api/workers/remove")
+		}
+	}
+}
+
+// StaleReconcilingCheckLoop warns about Reconciling actions every 60s.
+func (s *State) StaleReconcilingCheckLoop(ctx context.Context) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.WarnStaleReconcilingActions(10 * time.Minute)
+		}
+	}
+}
+
 // ParseInterval parses an IntervalConfig into a time.Duration.
 func ParseInterval(ic shared.IntervalConfig) time.Duration {
 	if strings.TrimSpace(ic.Value) == "" {
@@ -376,137 +461,95 @@ func (s *State) OnWorkerOffline(workerName string) {
 	}
 }
 
-// OnWorkerOnline logs the event. Actual reconciliation happens on first heartbeat.
-func (s *State) OnWorkerOnline(workerName string) {
-	log.Info().Str("worker", workerName).Msg("worker came online")
-}
-
-// ReconcileWorkerActions compares Reconciling actions for a worker against the
-// reported running list. Actions reported as running are restored to Running;
-// actions not reported are marked Failed and their jobs are finished.
-func (s *State) ReconcileWorkerActions(workerName string, reportedRunning []string) {
-	reportedSet := make(map[string]struct{}, len(reportedRunning))
-	for _, id := range reportedRunning {
-		reportedSet[id] = struct{}{}
-	}
-
-	s.ActionsMu.Lock()
-	var toFail []*shared.Action
-	for _, action := range s.ActiveActions {
-		if action.WorkerName != workerName || action.Status != shared.ActionStatusReconciling {
-			continue
-		}
-		if _, found := reportedSet[action.ID]; found {
-			// Worker still has this action running — restore.
-			action.Status = shared.ActionStatusRunning
-			action.UpdatedAt = time.Now()
-			if err := UpsertAction(action); err != nil {
-				log.Error().Err(err).Str("action", action.ID).Msg("failed to persist restored Running status")
-			}
-			log.Info().Str("action", action.ID).Str("worker", workerName).Msg("action restored to Running after reconciliation")
-		} else {
-			// Worker does not know about this action — mark Failed.
-			action.Status = shared.ActionStatusFailed
-			action.FinishedAt = time.Now()
-			action.UpdatedAt = time.Now()
-			action.ContainerExitReason = "lost during worker offline"
-			toFail = append(toFail, action)
-			delete(s.ActiveActions, action.ID)
-			if err := UpsertAction(action); err != nil {
-				log.Error().Err(err).Str("action", action.ID).Msg("failed to persist failed reconciliation status")
-			}
-			log.Warn().Str("action", action.ID).Str("worker", workerName).Msg("action failed after reconciliation (not reported by worker)")
-		}
-	}
-	s.ActionsMu.Unlock()
-
-	// Finish jobs for failed actions outside the lock.
-	for _, action := range toFail {
-		s.finishJob(action.JobID, false)
-	}
-}
-
 // HandleHeartbeatDiff is called on each heartbeat to reconcile the master's
 // view of a worker's actions with what the worker actually reports.
+//
+// Single-pass logic:
+//   - Reconciling + reported  → restore to Running
+//   - Reconciling + absent    → resolveAction as Failed
+//   - Running     + absent    → query worker, then resolveAction if terminal
+//   - Running     + reported  → no action needed
 func (s *State) HandleHeartbeatDiff(workerName string, reportedActions []string) {
 	reportedSet := make(map[string]struct{}, len(reportedActions))
 	for _, id := range reportedActions {
 		reportedSet[id] = struct{}{}
 	}
 
-	// Collect actions for this worker that need attention.
-	var reconcilingIDs []string
-	var runningNotReported []string
+	// Single pass under lock: restore reconciling, collect IDs for async work.
+	var toQuery []string // absent from heartbeat → query worker before resolving
 
-	s.ActionsMu.RLock()
+	s.ActionsMu.Lock()
 	for _, action := range s.ActiveActions {
 		if action.WorkerName != workerName {
 			continue
 		}
-		if action.Status == shared.ActionStatusReconciling {
-			reconcilingIDs = append(reconcilingIDs, action.ID)
-		} else if action.Status == shared.ActionStatusRunning {
-			if _, found := reportedSet[action.ID]; !found {
-				runningNotReported = append(runningNotReported, action.ID)
-			}
+		_, reported := reportedSet[action.ID]
+
+		switch {
+		case action.Status == shared.ActionStatusReconciling && reported:
+			action.Status = shared.ActionStatusRunning
+			action.UpdatedAt = time.Now()
+			_ = UpsertAction(action)
+			log.Info().Str("action", action.ID).Str("worker", workerName).Msg("action restored to Running after reconciliation")
+
+		case !reported && (action.Status == shared.ActionStatusReconciling || action.Status == shared.ActionStatusRunning):
+			// Both Reconciling and Running actions absent from heartbeat
+			// must be queried before resolving — the worker may have the
+			// result in PendingAck (e.g. after worker restart).
+			toQuery = append(toQuery, action.ID)
 		}
 	}
-	s.ActionsMu.RUnlock()
+	s.ActionsMu.Unlock()
 
-	// Handle Reconciling actions via the existing reconciliation logic.
-	if len(reconcilingIDs) > 0 {
-		s.ReconcileWorkerActions(workerName, reportedActions)
+	// Query worker for actions not in heartbeat.
+	if len(toQuery) == 0 {
+		return
 	}
-
-	// For Running actions not reported by the worker, query the worker directly.
-	if len(runningNotReported) > 0 {
-		worker, ok := s.WorkerMgr.GetWorker(workerName)
-		if !ok {
-			return
+	worker, ok := s.WorkerMgr.GetWorker(workerName)
+	if !ok {
+		return
+	}
+	for _, actionID := range toQuery {
+		asr, err := QueryActionStatus(worker, actionID, s.Token)
+		if err != nil {
+			log.Warn().Err(err).Str("action", actionID).Str("worker", workerName).Msg("failed to query action status from worker")
+			continue
 		}
-		for _, actionID := range runningNotReported {
-			asr, err := QueryActionStatus(worker, actionID, s.Token)
-			if err != nil {
-				log.Warn().Err(err).Str("action", actionID).Str("worker", workerName).Msg("failed to query action status from worker")
-				continue
-			}
-			if !asr.Found || asr.Status == shared.ActionStatusSucceeded || asr.Status == shared.ActionStatusFailed {
-				// Action finished on the worker but we missed the WebSocket message.
-				status := shared.ActionStatusFailed
-				if asr.Found && asr.Status == shared.ActionStatusSucceeded {
-					status = shared.ActionStatusSucceeded
-				}
-				s.ActionsMu.Lock()
-				action, exists := s.ActiveActions[actionID]
-				if exists {
-					action.Status = status
-					action.FinishedAt = time.Now()
-					action.UpdatedAt = time.Now()
-					if asr.Found {
-						action.ContainerExitCode = asr.ExitCode
-						action.ContainerExitReason = asr.ExitReason
-					} else {
-						action.ContainerExitReason = "action not found on worker"
-					}
-					delete(s.ActiveActions, actionID)
-				}
-				s.ActionsMu.Unlock()
-
-				if exists {
-					if err := UpsertAction(action); err != nil {
-						log.Error().Err(err).Str("action", actionID).Msg("failed to persist action status from heartbeat diff")
-					}
-					s.finishJob(action.JobID, status == shared.ActionStatusSucceeded)
-					log.Info().Str("action", actionID).Str("status", status).Str("worker", workerName).Msg("action resolved via heartbeat diff")
-				}
-			}
+		if asr.Found && asr.Status == shared.ActionStatusRunning {
+			continue // still running, wait for WS
 		}
+		status := shared.ActionStatusFailed
+		if asr.Found && asr.Status == shared.ActionStatusSucceeded {
+			status = shared.ActionStatusSucceeded
+		}
+		reason := "action not found on worker"
+		exitCode := 0
+		if asr.Found {
+			reason = asr.ExitReason
+			exitCode = asr.ExitCode
+		}
+		s.resolveAction(actionID, status, exitCode, reason, workerName)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Lookup helper
+// Lookup helpers
 // ---------------------------------------------------------------------------
+
+// HasActiveActionForJob returns true if there is any active action (Running or
+// Reconciling) for the given job ID. This serves as the repo sync lock —
+// ensuring we never run two containers for the same repo concurrently.
+// Caller must NOT hold ActionsMu.
+func (s *State) HasActiveActionForJob(jobID string) bool {
+	s.ActionsMu.RLock()
+	defer s.ActionsMu.RUnlock()
+	for _, a := range s.ActiveActions {
+		if a.JobID == jobID {
+			return true
+		}
+	}
+	return false
+}
 
 // GetActionByIDFromActiveOrDB looks up an action in ActiveActions first, then
 // falls back to the database.

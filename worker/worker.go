@@ -10,7 +10,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -27,26 +26,9 @@ type WorkerConfig struct {
 	AuthToken string
 	Addr      string // e.g. ":9090"
 	Labels    map[string]string
-	BaseDir   string
-	RepoDir   string
-	LogDir    string // defaults to BaseDir + "/logs/"
+	Vars      map[string]string // e.g. {"BASEDIR": "/home/mirrorgo", "REPODIR": "/mnt/mirrors"}
+	LogDir    string            // defaults to Vars["BASEDIR"] + "/logs/"
 	DryRun    bool
-}
-
-// WorkerState tracks running and acknowledged actions in memory.
-type WorkerState struct {
-	mu             sync.RWMutex
-	runningActions map[string]*shared.Action // action ID -> action
-	ackedActions   map[string]time.Time      // action ID -> ack time (for deferred cleanup)
-	ackedActionsDB map[string]*shared.Action // action ID -> action (kept for cleanup)
-}
-
-func newWorkerState() *WorkerState {
-	return &WorkerState{
-		runningActions: make(map[string]*shared.Action),
-		ackedActions:   make(map[string]time.Time),
-		ackedActionsDB: make(map[string]*shared.Action),
-	}
 }
 
 // Run is the main entry point for the worker process.
@@ -56,8 +38,15 @@ func Run(cfg WorkerConfig) {
 		With().Timestamp().Str("worker", cfg.Name).Logger()
 
 	// Apply defaults
+	if cfg.Vars == nil {
+		cfg.Vars = make(map[string]string)
+	}
 	if cfg.LogDir == "" {
-		cfg.LogDir = filepath.Join(cfg.BaseDir, "logs")
+		if bd, ok := cfg.Vars["BASEDIR"]; ok {
+			cfg.LogDir = filepath.Join(bd, "logs")
+		} else {
+			cfg.LogDir = "logs"
+		}
 	}
 
 	// 2. Init Docker client (or skip in dryrun mode)
@@ -73,43 +62,31 @@ func Run(cfg WorkerConfig) {
 	}
 
 	// 3. Set package-level vars
-	BaseDir = cfg.BaseDir
-	RepoDir = cfg.RepoDir
+	Vars = cfg.Vars
 	LogDir = cfg.LogDir
 
-	// 4. Create ActionCache
-	cache := NewActionCache(1000)
+	// 4. Create tracker and action cache
+	tracker := NewTracker()
+	cache := NewActionCache(1000) // kept only for dispatch idempotency
 
-	// 5. Create WSClient
-	wsClient := NewWSClient(cfg.MasterURL, cfg.Name, cfg.AuthToken)
+	// 5. Create WSClient (no internal buffer — uses tracker for replay)
+	wsClient := NewWSClient(cfg.MasterURL, cfg.Name, cfg.AuthToken, tracker)
 
-	// 6. Set up in-memory action tracking
-	ws := newWorkerState()
-
-	// 7. Wire up callbacks
+	// 6. Wire up callbacks
 	onNewAction := func(act *shared.Action) {
-		ws.mu.Lock()
-		ws.runningActions[act.ID] = act
-		ws.mu.Unlock()
-		go monitorAction(ws, act, wsClient, cache)
+		tracker.Add(act, PhaseRunning)
+		go monitorAction(tracker, act, wsClient, cache)
 	}
 
 	wsClient.OnAck = func(actionID string) {
-		ws.mu.Lock()
-		defer ws.mu.Unlock()
-		if act, ok := ws.runningActions[actionID]; ok {
-			ws.ackedActions[actionID] = time.Now()
-			ws.ackedActionsDB[actionID] = act
-			delete(ws.runningActions, actionID)
+		if tracker.Ack(actionID) {
+			log.Debug().Str("action", actionID).Msg("action acked by master")
 		}
 	}
 
-	SetWorkerAPIState(cache, cfg.AuthToken, onNewAction)
+	SetWorkerAPIState(cache, tracker, cfg.AuthToken, onNewAction)
 
-	// 8. Register with Master
-	// Construct a reachable address for the worker. If cfg.Addr is just a port
-	// (e.g. ":9090"), build a URL using the worker name as hostname (works in
-	// Docker Compose where container names are DNS-resolvable).
+	// 7. Register with Master
 	regAddr := cfg.Addr
 	if strings.HasPrefix(regAddr, ":") {
 		regAddr = "http://" + cfg.Name + regAddr
@@ -120,72 +97,35 @@ func Run(cfg WorkerConfig) {
 		Name:   cfg.Name,
 		Labels: cfg.Labels,
 		Addr:   regAddr,
+		Vars:   cfg.Vars,
 	}
 	if err := register(cfg.MasterURL, cfg.AuthToken, regReq); err != nil {
 		log.Fatal().Err(err).Msg("Failed to register with master")
 	}
 	log.Info().Str("master", cfg.MasterURL).Msg("Registered with master")
 
-	// 9. Scan existing containers
+	// 8. Scan existing containers and recover state
 	running, exited, err := ScanExistingContainers()
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to scan existing containers")
 	} else {
-		for _, info := range running {
-			act := &shared.Action{
-				ID:              info.ActionID,
-				ContainerID:     info.ContainerID,
-				ContainerName:   info.ContainerName,
-				ContainerStatus: shared.ContainerStatusRunning,
-				Status:          shared.ActionStatusRunning,
-				StartedAt:       time.Now(),
-			}
-			if act.ID == "" {
-				act.ID = info.ContainerName // fallback
-			}
-			ws.mu.Lock()
-			ws.runningActions[act.ID] = act
-			ws.mu.Unlock()
-			go monitorAction(ws, act, wsClient, cache)
-			log.Info().Str("container", info.ContainerName).Msg("Recovered running container")
-		}
-		for _, info := range exited {
-			result := &CachedActionResult{
-				ActionID:   info.ContainerName,
-				Status:     shared.ActionStatusSucceeded,
-				ExitCode:   info.ExitCode,
-				FinishedAt: time.Now(),
-			}
-			if info.ExitCode != 0 {
-				result.Status = shared.ActionStatusFailed
-			}
-			cache.Put(result)
-			wsClient.Send(&shared.WSMessage{
-				Type:            "action_result",
-				ActionID:        info.ContainerName,
-				Status:          result.Status,
-				ContainerStatus: shared.ContainerStatusExited,
-				ExitCode:        info.ExitCode,
-				UpdatedAt:       time.Now(),
-			})
-			log.Info().Str("container", info.ContainerName).Int("exit_code", info.ExitCode).Msg("Reported exited container")
-		}
+		recoverContainers(running, exited, tracker, wsClient, cache)
 	}
 
-	// 10. Start goroutines
+	// 9. Start goroutines
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go wsClient.ConnectLoop()
-	go heartbeatLoop(ctx, cfg.MasterURL, cfg.AuthToken, cfg.Name, ws)
-	go cleanupLoop(ctx, ws)
+	go heartbeatLoop(ctx, cfg.MasterURL, cfg.AuthToken, cfg.Name, tracker)
+	go cleanupLoop(ctx, tracker)
 	go func() {
 		if err := StartWorkerAPI(cfg.Addr, cfg.AuthToken); err != nil {
 			log.Fatal().Err(err).Msg("Worker API server failed")
 		}
 	}()
 
-	// 11. Wait for SIGINT/SIGTERM
+	// 10. Wait for SIGINT/SIGTERM
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
@@ -193,9 +133,91 @@ func Run(cfg WorkerConfig) {
 	cancel()
 }
 
-// monitorAction monitors a single action's container until it finishes.
-func monitorAction(ws *WorkerState, act *shared.Action, wsClient *WSClient, cache *ActionCache) {
+// recoverContainers processes containers found during startup scan.
+func recoverContainers(running, exited []*ContainerInfo, tracker *Tracker, wsClient *WSClient, cache *ActionCache) {
+	for _, info := range running {
+		if info.ActionID == "" {
+			log.Warn().Str("container", info.ContainerName).Msg("Running container has no action-id label, skipping recovery")
+			continue
+		}
+		startedAt := info.StartedAt
+		if startedAt.IsZero() {
+			startedAt = time.Now()
+		}
+		act := &shared.Action{
+			ID:               info.ActionID,
+			JobID:            info.JobID,
+			ContainerID:      info.ContainerID,
+			ContainerName:    info.ContainerName,
+			ContainerStatus:  shared.ContainerStatusRunning,
+			ContainerTimeout: info.ContainerTimeout,
+			Status:           shared.ActionStatusRunning,
+			StartedAt:        startedAt,
+		}
+		tracker.Add(act, PhaseRunning)
+		go monitorAction(tracker, act, wsClient, cache)
+		log.Info().Str("container", info.ContainerName).Str("action", info.ActionID).Msg("Recovered running container")
+	}
+
+	for _, info := range exited {
+		if info.ActionID == "" {
+			log.Warn().Str("container", info.ContainerName).Msg("Exited container has no action-id label, skipping report")
+			continue
+		}
+		status := shared.ActionStatusSucceeded
+		if info.ExitCode != 0 {
+			status = shared.ActionStatusFailed
+		}
+		finishedAt := info.FinishedAt
+		if finishedAt.IsZero() {
+			finishedAt = time.Now()
+		}
+		act := &shared.Action{
+			ID:                  info.ActionID,
+			JobID:               info.JobID,
+			ContainerID:         info.ContainerID,
+			ContainerName:       info.ContainerName,
+			ContainerStatus:     shared.ContainerStatusExited,
+			ContainerExitCode:   info.ExitCode,
+			ContainerExitReason: info.ExitReason,
+			Status:              status,
+			StartedAt:           info.StartedAt,
+			FinishedAt:          finishedAt,
+		}
+		// Insert as PendingAck — wsClient will send result on connect.
+		tracker.Add(act, PhasePendingAck)
+		// Also put in cache for dispatch idempotency.
+		cache.Put(&CachedActionResult{
+			ActionID:   info.ActionID,
+			Status:     status,
+			ExitCode:   info.ExitCode,
+			FinishedAt: time.Now(),
+		})
+		log.Info().Str("container", info.ContainerName).Str("action", info.ActionID).Int("exit_code", info.ExitCode).Msg("Recovered exited container")
+	}
+}
+
+// monitorAction monitors a single action's container until it finishes or times out.
+func monitorAction(tracker *Tracker, act *shared.Action, wsClient *WSClient, cache *ActionCache) {
+	var timeout time.Duration
+	if act.ContainerTimeout != "" {
+		if d, err := time.ParseDuration(act.ContainerTimeout); err == nil {
+			timeout = d
+		} else {
+			log.Warn().Err(err).Str("action", act.ID).Str("timeout", act.ContainerTimeout).Msg("Invalid timeout, running without limit")
+		}
+	}
+
 	for {
+		if timeout > 0 && time.Since(act.StartedAt) > timeout {
+			log.Warn().Str("action", act.ID).Dur("timeout", timeout).Msg("Action timed out, killing container")
+			if DockerClient != nil {
+				_ = DockerClient.ContainerKill(context.Background(), act.ContainerID, "SIGKILL")
+			}
+			finishAction(tracker, act, shared.ActionStatusFailed, 137, fmt.Sprintf("timed out after %s", timeout), wsClient, cache)
+			return
+		}
+
 		finished, err := CheckContainer(act)
 		if err != nil {
 			log.Error().Err(err).Str("action", act.ID).Msg("Error checking container")
@@ -205,46 +227,32 @@ func monitorAction(ws *WorkerState, act *shared.Action, wsClient *WSClient, cach
 			if act.ContainerExitCode != 0 {
 				status = shared.ActionStatusFailed
 			}
-			act.Status = status
-			act.FinishedAt = time.Now()
-
-			cache.Put(&CachedActionResult{
-				ActionID:   act.ID,
-				Status:     status,
-				ExitCode:   act.ContainerExitCode,
-				ExitReason: act.ContainerExitReason,
-				StartedAt:  act.StartedAt,
-				FinishedAt: act.FinishedAt,
-			})
-
-			wsClient.Send(&shared.WSMessage{
-				Type:            "action_result",
-				ActionID:        act.ID,
-				Status:          status,
-				ContainerStatus: shared.ContainerStatusExited,
-				ExitCode:        act.ContainerExitCode,
-				ExitReason:      act.ContainerExitReason,
-				UpdatedAt:       time.Now(),
-			})
-
-			// Mark the action with its terminal status so the heartbeat no
-			// longer reports it as running. The entry stays in runningActions
-			// until the master sends an ack (OnAck handles actual removal).
-			ws.mu.Lock()
-			if a, ok := ws.runningActions[act.ID]; ok {
-				a.Status = status
-			}
-			ws.mu.Unlock()
-
-			log.Info().Str("action", act.ID).Str("status", status).Int("exit_code", act.ContainerExitCode).Msg("Action finished")
+			finishAction(tracker, act, status, act.ContainerExitCode, act.ContainerExitReason, wsClient, cache)
 			return
 		}
 		time.Sleep(1 * time.Second)
 	}
 }
 
+// finishAction transitions an action to PendingAck and sends the result.
+func finishAction(tracker *Tracker, act *shared.Action, status string, exitCode int, exitReason string, wsClient *WSClient, cache *ActionCache) {
+	tracker.Finish(act.ID, status, exitCode, exitReason)
+
+	cache.Put(&CachedActionResult{
+		ActionID:   act.ID,
+		Status:     status,
+		ExitCode:   exitCode,
+		ExitReason: exitReason,
+		StartedAt:  act.StartedAt,
+		FinishedAt: act.FinishedAt,
+	})
+
+	wsClient.SendResult(act)
+	log.Info().Str("action", act.ID).Str("status", status).Int("exit_code", exitCode).Msg("Action finished")
+}
+
 // heartbeatLoop sends periodic heartbeats to the master.
-func heartbeatLoop(ctx context.Context, masterURL, token, name string, ws *WorkerState) {
+func heartbeatLoop(ctx context.Context, masterURL, token, name string, tracker *Tracker) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
@@ -253,18 +261,9 @@ func heartbeatLoop(ctx context.Context, masterURL, token, name string, ws *Worke
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ws.mu.RLock()
-			ids := make([]string, 0, len(ws.runningActions))
-			for id, act := range ws.runningActions {
-				if act.Status == shared.ActionStatusRunning {
-					ids = append(ids, id)
-				}
-			}
-			ws.mu.RUnlock()
-
 			req := shared.HeartbeatRequest{
 				Name:           name,
-				RunningActions: ids,
+				RunningActions: tracker.RunningIDs(),
 			}
 			body, _ := json.Marshal(req)
 
@@ -290,8 +289,8 @@ func heartbeatLoop(ctx context.Context, masterURL, token, name string, ws *Worke
 	}
 }
 
-// cleanupLoop periodically cleans up acknowledged containers.
-func cleanupLoop(ctx context.Context, ws *WorkerState) {
+// cleanupLoop periodically cleans up containers that have been acked.
+func cleanupLoop(ctx context.Context, tracker *Tracker) {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
@@ -300,29 +299,14 @@ func cleanupLoop(ctx context.Context, ws *WorkerState) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ws.mu.Lock()
-			var toClean []string
-			for id, ackedAt := range ws.ackedActions {
-				if time.Since(ackedAt) > 1*time.Hour {
-					toClean = append(toClean, id)
-				}
-			}
-			// Collect actions to clean while holding the lock, then release.
-			cleanActions := make(map[string]*shared.Action)
-			for _, id := range toClean {
-				if act, ok := ws.ackedActionsDB[id]; ok {
-					cleanActions[id] = act
-				}
-				delete(ws.ackedActions, id)
-				delete(ws.ackedActionsDB, id)
-			}
-			ws.mu.Unlock()
-
-			for id, act := range cleanActions {
+			due := tracker.DueCleanup(1 * time.Hour)
+			for _, act := range due {
 				if err := CleanupContainer(act); err != nil {
-					log.Warn().Err(err).Str("action", id).Msg("Failed to cleanup container")
+					log.Warn().Err(err).Str("action", act.ID).Msg("Failed to cleanup container, will retry")
+					// Don't remove from tracker — will retry next tick.
 				} else {
-					log.Debug().Str("action", id).Msg("Cleaned up acked container")
+					tracker.Remove(act.ID)
+					log.Debug().Str("action", act.ID).Msg("Cleaned up container")
 				}
 			}
 		}

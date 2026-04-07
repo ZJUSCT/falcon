@@ -21,7 +21,6 @@ type WorkerManager struct {
 	workers map[string]*shared.Worker
 	token   string
 
-	onWorkerOnline  func(name string)
 	onWorkerOffline func(name string)
 	OnHeartbeat     func(workerName string, reportedActions []string)
 }
@@ -34,9 +33,8 @@ func NewWorkerManager(token string) *WorkerManager {
 	}
 }
 
-// SetCallbacks sets the callbacks for worker state transitions.
-func (wm *WorkerManager) SetCallbacks(onOnline, onOffline func(string)) {
-	wm.onWorkerOnline = onOnline
+// SetOfflineCallback sets the callback for when a worker goes offline.
+func (wm *WorkerManager) SetOfflineCallback(onOffline func(string)) {
 	wm.onWorkerOffline = onOffline
 }
 
@@ -50,6 +48,15 @@ func (wm *WorkerManager) LoadFromDB() error {
 	wm.workers = workers
 	wm.mu.Unlock()
 	return nil
+}
+
+// MarkAllOffline sets all in-memory workers to Offline status.
+func (wm *WorkerManager) MarkAllOffline() {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	for _, w := range wm.workers {
+		w.Status = shared.WorkerStatusOffline
+	}
 }
 
 // Register handles POST /api/internal/register.
@@ -79,6 +86,7 @@ func (wm *WorkerManager) Register(w http.ResponseWriter, r *http.Request) {
 		Name:           req.Name,
 		Addr:           req.Addr,
 		Labels:         req.Labels,
+		Vars:           req.Vars,
 		Status:         shared.WorkerStatusOnline,
 		LastHeartbeat:  now,
 		RunningActions: nil,
@@ -97,11 +105,7 @@ func (wm *WorkerManager) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Info().Str("worker", req.Name).Str("addr", req.Addr).Msg("worker registered")
-
-	if wm.onWorkerOnline != nil {
-		wm.onWorkerOnline(req.Name)
-	}
+	log.Info().Str("worker", req.Name).Str("addr", req.Addr).Msg("worker registered (online)")
 
 	writeJSON(w, http.StatusOK, shared.RegisterResponse{OK: true})
 }
