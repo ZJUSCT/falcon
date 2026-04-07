@@ -56,6 +56,11 @@ func Run(cfg MasterConfig) {
 	state.WorkerMgr.SetOfflineCallback(state.OnWorkerOffline)
 	state.WorkerMgr.OnHeartbeat = state.HandleHeartbeatDiff
 	state.WSHub.OnActionStatus = state.HandleActionStatus
+	state.WSHub.OnWorkerWSReady = state.WorkerMgr.MarkOnline
+	state.WSHub.OnWorkerWSLost = func(workerName string) {
+		state.WorkerMgr.MarkOffline(workerName)
+		state.OnWorkerOffline(workerName)
+	}
 
 	// 5. Load repo configs from ConfigDir.
 	if err := loadReposFromConfigs(cfg.ConfigDir, state); err != nil {
@@ -175,7 +180,6 @@ func Run(cfg MasterConfig) {
 
 	go state.ScheduleLoop(ctx)
 	go state.DispatchLoop(ctx)
-	go state.WorkerMgr.OfflineCheckLoop(ctx)
 	go state.StaleReconcilingCheckLoop(ctx)
 	go state.StartWebServer(cfg.Addr, cfg.AuthToken)
 

@@ -74,7 +74,6 @@ func parseMasterFlags(args []string) master.MasterConfig {
 
 func parseWorkerFlags(args []string) worker.WorkerConfig {
 	cfg := worker.WorkerConfig{
-		Addr: ":9090",
 		Vars: make(map[string]string),
 	}
 	for i := 0; i < len(args); i++ {
@@ -88,9 +87,6 @@ func parseWorkerFlags(args []string) worker.WorkerConfig {
 		case "--auth-token":
 			i++
 			cfg.AuthToken = args[i]
-		case "--addr":
-			i++
-			cfg.Addr = args[i]
 		case "--labels":
 			i++
 			cfg.Labels = parseLabels(args[i])

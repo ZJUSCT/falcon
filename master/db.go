@@ -103,7 +103,6 @@ func (QueueStateModel) TableName() string { return "queue_state" }
 
 type WorkerModel struct {
 	Name           string            `gorm:"primaryKey;column:name"`
-	Addr           string            `gorm:"column:addr"`
 	Labels         JSONMap            `gorm:"column:labels;type:TEXT"`
 	Vars           JSONMap            `gorm:"column:vars;type:TEXT"`
 	Status         string            `gorm:"column:status"`
@@ -369,7 +368,6 @@ func DBSetQueueState(paused bool, maxConcurrency int) error {
 func UpsertWorker(w *shared.Worker) error {
 	m := WorkerModel{
 		Name:           w.Name,
-		Addr:           w.Addr,
 		Labels:         JSONMap(w.Labels),
 		Vars:           JSONMap(w.Vars),
 		Status:         w.Status,
@@ -390,7 +388,6 @@ func LoadWorkersFromDB() (map[string]*shared.Worker, error) {
 	for _, m := range rows {
 		w := &shared.Worker{
 			Name:           m.Name,
-			Addr:           m.Addr,
 			Labels:         map[string]string(m.Labels),
 			Vars:           map[string]string(m.Vars),
 			Status:         m.Status,

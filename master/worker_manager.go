@@ -1,11 +1,8 @@
 package master
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -59,6 +56,28 @@ func (wm *WorkerManager) MarkAllOffline() {
 	}
 }
 
+// MarkOffline sets a worker's status to Offline. Called when WS disconnects.
+func (wm *WorkerManager) MarkOffline(name string) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	if w, ok := wm.workers[name]; ok {
+		w.Status = shared.WorkerStatusOffline
+		_ = UpsertWorker(w)
+	}
+}
+
+// MarkOnline sets a worker's status to Online. Called when WS connects.
+func (wm *WorkerManager) MarkOnline(name string) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	if w, ok := wm.workers[name]; ok {
+		w.Status = shared.WorkerStatusOnline
+		w.LastHeartbeat = time.Now()
+		_ = UpsertWorker(w)
+		log.Info().Str("worker", name).Msg("worker online (WS connected)")
+	}
+}
+
 // Register handles POST /api/internal/register.
 func (wm *WorkerManager) Register(w http.ResponseWriter, r *http.Request) {
 	var req shared.RegisterRequest
@@ -67,33 +86,36 @@ func (wm *WorkerManager) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Name == "" || req.Addr == "" {
-		writeJSON(w, http.StatusBadRequest, shared.RegisterResponse{OK: false, Message: "name and addr are required"})
+	if req.Name == "" {
+		writeJSON(w, http.StatusBadRequest, shared.RegisterResponse{OK: false, Message: "name is required"})
 		return
 	}
 
+	// If the old instance was Online, trigger offline callback first so
+	// its Running actions are marked Reconciling before the new instance
+	// takes over. This is the restart-recovery path.
 	wm.mu.Lock()
 	existing, exists := wm.workers[req.Name]
+	wasOnline := exists && existing.Status == shared.WorkerStatusOnline
+	wm.mu.Unlock()
 
-	if exists && existing.Status == shared.WorkerStatusOnline {
-		wm.mu.Unlock()
-		writeJSON(w, http.StatusConflict, shared.RegisterResponse{OK: false, Message: "worker already online"})
-		return
+	if wasOnline && wm.onWorkerOffline != nil {
+		log.Warn().Str("worker", req.Name).Msg("worker re-registering while still marked online — running offline handler for old instance")
+		wm.onWorkerOffline(req.Name)
 	}
 
 	now := time.Now()
 	worker := &shared.Worker{
 		Name:           req.Name,
-		Addr:           req.Addr,
 		Labels:         req.Labels,
 		Vars:           req.Vars,
-		Status:         shared.WorkerStatusOnline,
+		Status:         shared.WorkerStatusOffline, // stays Offline until WS connects
 		LastHeartbeat:  now,
 		RunningActions: nil,
 		RegisteredAt:   now,
 	}
+	wm.mu.Lock()
 	if exists {
-		// Re-register: keep the original registration time.
 		worker.RegisteredAt = existing.RegisteredAt
 	}
 	wm.workers[req.Name] = worker
@@ -105,7 +127,7 @@ func (wm *WorkerManager) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Info().Str("worker", req.Name).Str("addr", req.Addr).Msg("worker registered (online)")
+	log.Info().Str("worker", req.Name).Msg("worker registered (online)")
 
 	writeJSON(w, http.StatusOK, shared.RegisterResponse{OK: true})
 }
@@ -128,10 +150,10 @@ func (wm *WorkerManager) Heartbeat(w http.ResponseWriter, r *http.Request) {
 
 	worker.LastHeartbeat = time.Now()
 	worker.RunningActions = req.RunningActions
-	worker.Status = shared.WorkerStatusOnline
+	workerCopy := *worker
 	wm.mu.Unlock()
 
-	if err := UpsertWorker(worker); err != nil {
+	if err := UpsertWorker(&workerCopy); err != nil {
 		log.Error().Err(err).Str("worker", req.Name).Msg("failed to persist heartbeat")
 	}
 
@@ -142,47 +164,9 @@ func (wm *WorkerManager) Heartbeat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, shared.HeartbeatResponse{OK: true})
 }
 
-// CheckOffline scans workers and marks stale ones as Offline. Returns names of
-// workers that were transitioned to Offline.
-func (wm *WorkerManager) CheckOffline(threshold time.Duration) []string {
-	now := time.Now()
-	var offlined []string
-
-	wm.mu.Lock()
-	for name, w := range wm.workers {
-		if w.Status == shared.WorkerStatusOnline && now.Sub(w.LastHeartbeat) > threshold {
-			w.Status = shared.WorkerStatusOffline
-			offlined = append(offlined, name)
-			if err := UpsertWorker(w); err != nil {
-				log.Error().Err(err).Str("worker", name).Msg("failed to persist offline status")
-			}
-		}
-	}
-	wm.mu.Unlock()
-
-	for _, name := range offlined {
-		log.Warn().Str("worker", name).Msg("worker marked offline (heartbeat timeout)")
-		if wm.onWorkerOffline != nil {
-			wm.onWorkerOffline(name)
-		}
-	}
-
-	return offlined
-}
-
-// OfflineCheckLoop runs CheckOffline every 5 seconds until the context is cancelled.
-func (wm *WorkerManager) OfflineCheckLoop(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			wm.CheckOffline(30 * time.Second)
-		}
-	}
-}
+// Note: Worker online/offline is now driven entirely by WS connection
+// (OnWorkerWSReady/OnWorkerWSLost). The old heartbeat-based CheckOffline
+// loop has been removed to avoid conflicting with WS-driven status.
 
 // GetOnlineWorkers returns a snapshot of all online workers (copies).
 func (wm *WorkerManager) GetOnlineWorkers() []*shared.Worker {
@@ -251,73 +235,6 @@ func MatchWorker(worker *shared.Worker, repo *shared.Repo) bool {
 		}
 	}
 	return true
-}
-
-// ---------------------------------------------------------------------------
-// HTTP helpers for dispatching to workers
-// ---------------------------------------------------------------------------
-
-// DispatchToWorker sends a dispatch request to a worker.
-func DispatchToWorker(worker *shared.Worker, req *shared.DispatchRequest, token string) error {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("marshal dispatch request: %w", err)
-	}
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	httpReq, err := http.NewRequest("POST", worker.Addr+"/api/internal/dispatch", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("dispatch to %s: %w", worker.Name, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("dispatch to %s: status %d: %s", worker.Name, resp.StatusCode, string(respBody))
-	}
-
-	var dr shared.DispatchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&dr); err != nil {
-		return fmt.Errorf("decode dispatch response from %s: %w", worker.Name, err)
-	}
-	if !dr.OK {
-		return fmt.Errorf("worker %s rejected dispatch: %s", worker.Name, dr.Message)
-	}
-	return nil
-}
-
-// QueryActionStatus queries a worker for the status of a specific action.
-func QueryActionStatus(worker *shared.Worker, actionID, token string) (*shared.ActionStatusResponse, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	httpReq, err := http.NewRequest("GET", worker.Addr+"/api/internal/action_status?id="+actionID, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("query action status from %s: %w", worker.Name, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("query action status from %s: status %d: %s", worker.Name, resp.StatusCode, string(respBody))
-	}
-
-	var asr shared.ActionStatusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&asr); err != nil {
-		return nil, fmt.Errorf("decode action status response from %s: %w", worker.Name, err)
-	}
-	return &asr, nil
 }
 
 // ---------------------------------------------------------------------------

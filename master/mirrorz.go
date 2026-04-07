@@ -7,10 +7,43 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/star/mirrorgo/shared"
 )
+
+// jsonWriteMu serializes writes to mirrorgo.json and mirrorz.json.
+var jsonWriteMu sync.Mutex
+
+// atomicWriteJSON writes JSON to a file atomically (write tmp + rename).
+func atomicWriteJSON(path string, v interface{}, indent bool) error {
+	jsonWriteMu.Lock()
+	defer jsonWriteMu.Unlock()
+
+	tmp := path + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+
+	enc := json.NewEncoder(f)
+	if indent {
+		enc.SetIndent("", "  ")
+	}
+	if err := enc.Encode(v); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	f.Close()
+	return os.Rename(tmp, path)
+}
 
 // ---------------------------------------------------------------------------
 // MirrorZ types
@@ -207,17 +240,10 @@ func (s *State) GenerateMirrorZ() MirrorZ {
 	}
 }
 
-// WriteMirrorZJSON writes the MirrorZ JSON to BaseDir/mirrorz.json.
+// WriteMirrorZJSON writes the MirrorZ JSON to BaseDir/mirrorz.json atomically.
 func (s *State) WriteMirrorZJSON(doc MirrorZ) error {
 	filePath := filepath.Join(s.BaseDir, "mirrorz.json")
-	f, err := os.Create(filePath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	return enc.Encode(doc)
+	return atomicWriteJSON(filePath, doc, true)
 }
 
 // UpdateMirrorZJSON regenerates and writes the MirrorZ JSON document to disk.
@@ -297,18 +323,10 @@ func (s *State) getMirrorStatus() ([]MirrorStatus, error) {
 	return mirrors, nil
 }
 
-// writeMirrorgoJSON writes the mirror status list to BaseDir/mirrorgo.json.
+// writeMirrorgoJSON writes the mirror status list to BaseDir/mirrorgo.json atomically.
 func (s *State) writeMirrorgoJSON(mirrors []MirrorStatus) error {
 	filePath := filepath.Join(s.BaseDir, "mirrorgo.json")
-	file, err := os.Create(filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "")
-	return encoder.Encode(mirrors)
+	return atomicWriteJSON(filePath, mirrors, false)
 }
 
 // UpdateMirrorgoJSON updates the mirrorgo.json file with current status.

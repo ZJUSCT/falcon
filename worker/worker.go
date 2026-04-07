@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -24,12 +23,14 @@ type WorkerConfig struct {
 	Name      string
 	MasterURL string // e.g. "http://master:8080"
 	AuthToken string
-	Addr      string // e.g. ":9090"
 	Labels    map[string]string
 	Vars      map[string]string // e.g. {"BASEDIR": "/home/mirrorgo", "REPODIR": "/mnt/mirrors"}
 	LogDir    string            // defaults to Vars["BASEDIR"] + "/logs/"
 	DryRun    bool
 }
+
+// package-level tracker reference for use by api.go and ws_client.go
+var tracker *Tracker
 
 // Run is the main entry point for the worker process.
 func Run(cfg WorkerConfig) {
@@ -66,10 +67,10 @@ func Run(cfg WorkerConfig) {
 	LogDir = cfg.LogDir
 
 	// 4. Create tracker and action cache
-	tracker := NewTracker()
-	cache := NewActionCache(1000) // kept only for dispatch idempotency
+	tracker = NewTracker()
+	cache := NewActionCache(1000)
 
-	// 5. Create WSClient (no internal buffer — uses tracker for replay)
+	// 5. Create WSClient
 	wsClient := NewWSClient(cfg.MasterURL, cfg.Name, cfg.AuthToken, tracker)
 
 	// 6. Wire up callbacks
@@ -84,19 +85,18 @@ func Run(cfg WorkerConfig) {
 		}
 	}
 
-	SetWorkerAPIState(cache, tracker, cfg.AuthToken, onNewAction)
-
-	// 7. Register with Master
-	regAddr := cfg.Addr
-	if strings.HasPrefix(regAddr, ":") {
-		regAddr = "http://" + cfg.Name + regAddr
-	} else if !strings.HasPrefix(regAddr, "http://") && !strings.HasPrefix(regAddr, "https://") {
-		regAddr = "http://" + regAddr
+	wsClient.OnDispatch = func(da shared.DispatchAction) (bool, string) {
+		return HandleDispatchWS(da)
 	}
+
+	// Set package-level state for api.go
+	OnNewAction = onNewAction
+	actionCache = cache
+
+	// 7. Register with Master (no Addr needed — all communication via WS)
 	regReq := &shared.RegisterRequest{
 		Name:   cfg.Name,
 		Labels: cfg.Labels,
-		Addr:   regAddr,
 		Vars:   cfg.Vars,
 	}
 	if err := register(cfg.MasterURL, cfg.AuthToken, regReq); err != nil {
@@ -119,11 +119,6 @@ func Run(cfg WorkerConfig) {
 	go wsClient.ConnectLoop()
 	go heartbeatLoop(ctx, cfg.MasterURL, cfg.AuthToken, cfg.Name, tracker)
 	go cleanupLoop(ctx, tracker)
-	go func() {
-		if err := StartWorkerAPI(cfg.Addr, cfg.AuthToken); err != nil {
-			log.Fatal().Err(err).Msg("Worker API server failed")
-		}
-	}()
 
 	// 10. Wait for SIGINT/SIGTERM
 	sigCh := make(chan os.Signal, 1)
@@ -184,14 +179,12 @@ func recoverContainers(running, exited []*ContainerInfo, tracker *Tracker, wsCli
 			StartedAt:           info.StartedAt,
 			FinishedAt:          finishedAt,
 		}
-		// Insert as PendingAck — wsClient will send result on connect.
 		tracker.Add(act, PhasePendingAck)
-		// Also put in cache for dispatch idempotency.
 		cache.Put(&CachedActionResult{
 			ActionID:   info.ActionID,
 			Status:     status,
 			ExitCode:   info.ExitCode,
-			FinishedAt: time.Now(),
+			FinishedAt: finishedAt,
 		})
 		log.Info().Str("container", info.ContainerName).Str("action", info.ActionID).Int("exit_code", info.ExitCode).Msg("Recovered exited container")
 	}
@@ -303,7 +296,6 @@ func cleanupLoop(ctx context.Context, tracker *Tracker) {
 			for _, act := range due {
 				if err := CleanupContainer(act); err != nil {
 					log.Warn().Err(err).Str("action", act.ID).Msg("Failed to cleanup container, will retry")
-					// Don't remove from tracker — will retry next tick.
 				} else {
 					tracker.Remove(act.ID)
 					log.Debug().Str("action", act.ID).Msg("Cleaned up container")
@@ -358,3 +350,4 @@ func register(masterURL, token string, req *shared.RegisterRequest) error {
 
 	return fmt.Errorf("registration failed after %d attempts", maxAttempts)
 }
+

@@ -12,8 +12,8 @@ import (
 )
 
 // WSClient manages the WebSocket connection to the master.
-// It does NOT buffer messages internally — on reconnect it replays all
-// PendingAck actions from the Tracker, which is the single source of truth.
+// All master↔worker communication (dispatch, query, ack, action results,
+// logs) flows through this single connection.
 type WSClient struct {
 	mu        sync.Mutex
 	conn      *websocket.Conn
@@ -23,8 +23,11 @@ type WSClient struct {
 
 	writeMu sync.Mutex // protects all writes to conn
 
-	tracker *Tracker              // used to replay PendingAck on reconnect
-	OnAck   func(actionID string) // callback when Master acks an action
+	tracker *Tracker
+	OnAck   func(actionID string)
+
+	// OnDispatch is called when master sends a dispatch request.
+	OnDispatch func(action shared.DispatchAction) (ok bool, message string)
 }
 
 func NewWSClient(masterURL, name, token string, tracker *Tracker) *WSClient {
@@ -36,8 +39,7 @@ func NewWSClient(masterURL, name, token string, tracker *Tracker) *WSClient {
 	}
 }
 
-// ConnectLoop runs an infinite reconnect loop: connect, replay pending acks,
-// read (blocks), then retry with exponential backoff on disconnect.
+// ConnectLoop runs an infinite reconnect loop.
 func (ws *WSClient) ConnectLoop() {
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
@@ -57,18 +59,20 @@ func (ws *WSClient) ConnectLoop() {
 		backoff = time.Second
 		log.Info().Str("master", ws.masterURL).Msg("WebSocket connected to master")
 
-		// Replay all PendingAck results — the tracker is the reliable source.
+		// Replay all PendingAck results.
 		ws.replayPendingAcks()
 
 		ws.readLoop()
 
-		// readLoop returned — connection lost.
 		ws.mu.Lock()
 		if ws.conn != nil {
 			_ = ws.conn.Close()
 			ws.conn = nil
 		}
 		ws.mu.Unlock()
+
+		// Stop all active log streams — they can't deliver data anymore.
+		stopAllStreams()
 
 		log.Warn().Msg("WebSocket disconnected from master, reconnecting")
 	}
@@ -107,30 +111,88 @@ func (ws *WSClient) readLoop() {
 			return
 		}
 
-		var ack shared.WSAck
-		if err := json.Unmarshal(data, &ack); err != nil {
-			log.Warn().Err(err).Msg("WebSocket: failed to parse message from master")
+		var env shared.WSEnvelope
+		if err := json.Unmarshal(data, &env); err != nil {
+			log.Warn().Err(err).Msg("WebSocket: failed to parse message")
 			continue
 		}
 
-		if ack.Type == "ack" && ws.OnAck != nil {
-			ws.OnAck(ack.ActionID)
+		switch env.Type {
+		case "ack":
+			var ack shared.WSAck
+			if err := json.Unmarshal(data, &ack); err == nil && ws.OnAck != nil {
+				ws.OnAck(ack.ActionID)
+			}
+
+		case "dispatch":
+			var msg shared.WSDispatch
+			if err := json.Unmarshal(data, &msg); err != nil {
+				log.Warn().Err(err).Msg("WebSocket: invalid dispatch message")
+				continue
+			}
+			go ws.handleDispatch(msg)
+
+		case "query_action":
+			var msg shared.WSQueryAction
+			if err := json.Unmarshal(data, &msg); err != nil {
+				log.Warn().Err(err).Msg("WebSocket: invalid query_action message")
+				continue
+			}
+			go ws.handleQueryAction(msg)
+
+		case "log_list":
+			var msg shared.WSLogList
+			if err := json.Unmarshal(data, &msg); err == nil {
+				go ws.handleLogList(msg)
+			}
+
+		case "log_raw":
+			var msg shared.WSLogRaw
+			if err := json.Unmarshal(data, &msg); err == nil {
+				go ws.handleLogRaw(msg)
+			}
+
+		case "log_stream_start":
+			var msg shared.WSLogStreamStart
+			if err := json.Unmarshal(data, &msg); err == nil {
+				go ws.handleLogStream(msg)
+			}
+
+		case "log_stream_stop":
+			// Handled by cancellation in handleLogStream via streamMu.
+			ws.stopStream(data)
+
+		default:
+			log.Warn().Str("type", env.Type).Msg("WebSocket: unknown message type from master")
 		}
 	}
 }
 
-// writeMessage sends raw data while holding the write mutex.
+// writeMessage sends raw data with proper locking.
 func (ws *WSClient) writeMessage(conn *websocket.Conn, data []byte) error {
 	ws.writeMu.Lock()
 	defer ws.writeMu.Unlock()
 	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
+// sendJSON marshals and sends a JSON message.
+func (ws *WSClient) sendJSON(v interface{}) error {
+	ws.mu.Lock()
+	conn := ws.conn
+	ws.mu.Unlock()
+	if conn == nil {
+		return nil
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return ws.writeMessage(conn, data)
+}
+
 // SendResult sends an action result message to the master.
-// If the connection is down, the message is NOT buffered — the tracker
-// retains the PendingAck state and replayPendingAcks will resend on reconnect.
 func (ws *WSClient) SendResult(act *shared.Action) {
-	msg := &shared.WSMessage{
+	msg := &shared.WSActionResult{
 		Type:            "action_result",
 		ActionID:        act.ID,
 		Status:          act.Status,
@@ -140,34 +202,135 @@ func (ws *WSClient) SendResult(act *shared.Action) {
 		UpdatedAt:       time.Now(),
 	}
 
-	ws.mu.Lock()
-	conn := ws.conn
-	ws.mu.Unlock()
-
-	if conn == nil {
-		log.Debug().Str("action", act.ID).Msg("WebSocket not connected, result will be replayed on reconnect")
-		return
-	}
-
-	data, err := json.Marshal(msg)
-	if err != nil {
-		log.Error().Err(err).Msg("WebSocket: failed to marshal message")
-		return
-	}
-	if err := ws.writeMessage(conn, data); err != nil {
-		log.Warn().Err(err).Str("action", act.ID).Msg("WebSocket write failed, result will be replayed on reconnect")
+	if err := ws.sendJSON(msg); err != nil {
+		log.Warn().Err(err).Str("action", act.ID).Msg("WebSocket send failed, result will be replayed on reconnect")
 	}
 }
 
-// replayPendingAcks resends results for all PendingAck actions after reconnect.
 func (ws *WSClient) replayPendingAcks() {
 	pending := ws.tracker.PendingAckActions()
 	if len(pending) == 0 {
 		return
 	}
-
 	log.Info().Int("count", len(pending)).Msg("Replaying PendingAck results after reconnect")
 	for _, act := range pending {
 		ws.SendResult(act)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Request handlers (master → worker)
+// ---------------------------------------------------------------------------
+
+func (ws *WSClient) handleDispatch(msg shared.WSDispatch) {
+	ok, message := false, "no dispatch handler"
+	if ws.OnDispatch != nil {
+		ok, message = ws.OnDispatch(msg.Action)
+	}
+	_ = ws.sendJSON(shared.WSDispatchResult{
+		Type:    "dispatch_result",
+		ReqID:   msg.ReqID,
+		OK:      ok,
+		Message: message,
+	})
+}
+
+func (ws *WSClient) handleQueryAction(msg shared.WSQueryAction) {
+	resp := ws.tracker.ToStatusResponse(msg.ActionID)
+	// Fallback to action cache if not in tracker.
+	if !resp.Found && actionCache != nil {
+		resp = actionCache.ToStatusResponse(msg.ActionID)
+	}
+	_ = ws.sendJSON(shared.WSQueryResult{
+		Type:     "query_result",
+		ReqID:    msg.ReqID,
+		Response: *resp,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Log request handlers
+// ---------------------------------------------------------------------------
+
+func (ws *WSClient) handleLogList(msg shared.WSLogList) {
+	entries, err := listLogDir(msg.ActionID)
+	if err != nil {
+		_ = ws.sendJSON(shared.WSLogListResult{
+			Type:  "log_list_result",
+			ReqID: msg.ReqID,
+			OK:    false,
+			Error: err.Error(),
+		})
+		return
+	}
+	data, _ := json.Marshal(entries)
+	_ = ws.sendJSON(shared.WSLogListResult{
+		Type:    "log_list_result",
+		ReqID:   msg.ReqID,
+		OK:      true,
+		Entries: data,
+	})
+}
+
+func (ws *WSClient) handleLogRaw(msg shared.WSLogRaw) {
+	content, err := readLogFile(msg.ActionID, msg.File)
+	if err != nil {
+		_ = ws.sendJSON(shared.WSLogRawResult{
+			Type:  "log_raw_result",
+			ReqID: msg.ReqID,
+			OK:    false,
+			Error: err.Error(),
+		})
+		return
+	}
+	_ = ws.sendJSON(shared.WSLogRawResult{
+		Type:  "log_raw_result",
+		ReqID: msg.ReqID,
+		OK:    true,
+		Data:  content,
+	})
+}
+
+// Stream management.
+var (
+	streamMu     sync.Mutex
+	activeStreams = make(map[string]chan struct{}) // reqID -> stop channel
+)
+
+func (ws *WSClient) stopStream(data []byte) {
+	var msg shared.WSLogStreamStop
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return
+	}
+	streamMu.Lock()
+	if ch, ok := activeStreams[msg.ReqID]; ok {
+		close(ch)
+		delete(activeStreams, msg.ReqID)
+	}
+	streamMu.Unlock()
+}
+
+// stopAllStreams stops all active log streams (called on WS disconnect).
+func stopAllStreams() {
+	streamMu.Lock()
+	for reqID, ch := range activeStreams {
+		close(ch)
+		delete(activeStreams, reqID)
+	}
+	streamMu.Unlock()
+}
+
+func (ws *WSClient) handleLogStream(msg shared.WSLogStreamStart) {
+	stopCh := make(chan struct{})
+	streamMu.Lock()
+	activeStreams[msg.ReqID] = stopCh
+	streamMu.Unlock()
+
+	defer func() {
+		streamMu.Lock()
+		delete(activeStreams, msg.ReqID)
+		streamMu.Unlock()
+	}()
+
+	streamLogFile(msg.ActionID, msg.File, msg.ReqID, stopCh, ws)
 }

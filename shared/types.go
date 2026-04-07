@@ -160,7 +160,6 @@ type Action struct {
 
 type Worker struct {
 	Name           string            `json:"name"`
-	Addr           string            `json:"addr"`
 	Labels         map[string]string `json:"labels"`
 	Vars           map[string]string `json:"vars,omitempty"`
 	Status         string            `json:"status"`

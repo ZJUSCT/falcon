@@ -158,28 +158,9 @@ func (s *State) dispatchTick() {
 			continue
 		}
 
-		// Build dispatch request.
+		// Create and persist action BEFORE dispatch, so a crash mid-dispatch
+		// leaves a recoverable Reconciling action (repo sync lock holds).
 		actionID := fmt.Sprintf("%d-%04x", time.Now().UnixNano(), rand.Intn(0xFFFF))
-		dispReq := &shared.DispatchRequest{
-			Action: shared.DispatchAction{
-				ID:               actionID,
-				JobID:            jobID,
-				ContainerImage:   repo.SyncParams.Image,
-				ContainerCommand: repo.SyncParams.Command,
-				ContainerVolumes: repo.SyncParams.Volumes,
-				ContainerEnv:     repo.SyncParams.Environments,
-				ContainerTimeout: repo.SyncParams.Timeout,
-			},
-		}
-
-		err := DispatchToWorker(worker, dispReq, s.Token)
-		if err != nil {
-			log.Error().Err(err).Str("job", jobID).Str("worker", worker.Name).Msg("dispatch failed, requeuing")
-			s.JobQueue.Enqueue(jobID)
-			requeued++
-			continue
-		}
-
 		now := time.Now()
 		action := &shared.Action{
 			ID:               actionID,
@@ -201,10 +182,14 @@ func (s *State) dispatchTick() {
 		s.ActiveActions[actionID] = action
 		s.ActionsMu.Unlock()
 
-		// Persist action FIRST, then job, then dequeue — so on crash recovery
-		// the action exists in DB and RevertScheduledJobsToWaiting handles the job.
 		if err := UpsertAction(action); err != nil {
 			log.Error().Err(err).Str("action", actionID).Msg("failed to persist action")
+			s.ActionsMu.Lock()
+			delete(s.ActiveActions, actionID)
+			s.ActionsMu.Unlock()
+			s.JobQueue.Enqueue(jobID)
+			requeued++
+			continue
 		}
 
 		// Update job to Running.
@@ -213,17 +198,50 @@ func (s *State) dispatchTick() {
 		job.LastAttemptAt = now
 		job.UpdatedAt = now
 		job.Actions = append(job.Actions, actionID)
-		// Keep only last 100 action IDs.
 		if len(job.Actions) > 100 {
 			job.Actions = job.Actions[len(job.Actions)-100:]
 		}
+		jobCopy := *job
 		s.JobsMu.Unlock()
 
-		if err := UpsertJob(job); err != nil {
+		if err := UpsertJob(&jobCopy); err != nil {
 			log.Error().Err(err).Str("job", jobID).Msg("failed to persist running job")
 		}
 
-		// Remove from persistent queue LAST — after action and job are persisted.
+		// Now dispatch — action and job are durable. If dispatch fails,
+		// resolve the action as Failed (which reverts the job to Waiting).
+		dispAction := shared.DispatchAction{
+			ID:               actionID,
+			JobID:            jobID,
+			ContainerImage:   repo.SyncParams.Image,
+			ContainerCommand: repo.SyncParams.Command,
+			ContainerVolumes: repo.SyncParams.Volumes,
+			ContainerEnv:     repo.SyncParams.Environments,
+			ContainerTimeout: repo.SyncParams.Timeout,
+		}
+
+		if err := s.WSHub.Dispatch(worker.Name, dispAction); err != nil {
+			_ = DBDequeueOne(jobID) // always dequeue from persistent queue
+			if _, rejected := err.(*DispatchRejectedError); rejected {
+				log.Error().Err(err).Str("job", jobID).Str("worker", worker.Name).Msg("dispatch rejected by worker")
+				s.resolveAction(actionID, shared.ActionStatusFailed, 0, err.Error(), worker.Name)
+			} else {
+				log.Warn().Err(err).Str("job", jobID).Str("worker", worker.Name).Str("action", actionID).Msg("dispatch reply lost, marking Reconciling")
+				s.ActionsMu.Lock()
+				if a, ok := s.ActiveActions[actionID]; ok {
+					a.Status = shared.ActionStatusReconciling
+					a.UpdatedAt = time.Now()
+					actionCopy := *a
+					s.ActionsMu.Unlock()
+					_ = UpsertAction(&actionCopy)
+				} else {
+					s.ActionsMu.Unlock()
+				}
+			}
+			continue
+		}
+
+		// Remove from persistent queue LAST — after action, job, and dispatch.
 		_ = DBDequeueOne(jobID)
 
 		// Re-check that the worker is still online; if not, mark action as Reconciling.
@@ -233,8 +251,9 @@ func (s *State) dispatchTick() {
 			s.ActionsMu.Lock()
 			action.Status = shared.ActionStatusReconciling
 			action.UpdatedAt = time.Now()
+			actionCopy := *action
 			s.ActionsMu.Unlock()
-			_ = UpsertAction(action)
+			_ = UpsertAction(&actionCopy)
 		}
 
 		log.Info().Str("job", jobID).Str("action", actionID).Str("worker", worker.Name).Msg("dispatched action")
@@ -249,14 +268,18 @@ func (s *State) dispatchTick() {
 	}
 }
 
-// selectWorker picks the online worker matching the repo's affinity that has
-// the fewest running actions.
+// selectWorker picks an online, WS-connected worker matching the repo's
+// affinity that has the fewest running actions.
 func (s *State) selectWorker(repo *shared.Repo) *shared.Worker {
 	online := s.WorkerMgr.GetOnlineWorkers()
 	var best *shared.Worker
 	bestLoad := -1
 	for _, w := range online {
 		if !MatchWorker(w, repo) {
+			continue
+		}
+		// Only select workers with an active WS connection — dispatch goes via WS.
+		if !s.WSHub.IsConnected(w.Name) {
 			continue
 		}
 		load := len(w.RunningActions)
@@ -298,8 +321,11 @@ func (s *State) resolveAction(actionID, status string, exitCode int, exitReason 
 	// Persist BEFORE removing from ActiveActions. If persistence fails,
 	// keep the action in memory so recovery can handle it on next restart.
 	if err := UpsertAction(action); err != nil {
-		log.Error().Err(err).Str("action", actionID).Msg("resolveAction: failed to persist, keeping in ActiveActions for retry")
+		log.Error().Err(err).Str("action", actionID).Msg("resolveAction: persist failed, will ack worker but keep action for recovery")
+		// Still ack so worker can clean up, but keep in ActiveActions
+		// so master restart re-processes it.
 		s.ActionsMu.Unlock()
+		s.WSHub.SendAck(workerName, actionID)
 		return
 	}
 	delete(s.ActiveActions, actionID)
@@ -312,7 +338,7 @@ func (s *State) resolveAction(actionID, status string, exitCode int, exitReason 
 }
 
 // HandleActionStatus is called by WSHub when a worker reports action status.
-func (s *State) HandleActionStatus(workerName string, msg *shared.WSMessage) {
+func (s *State) HandleActionStatus(workerName string, msg *shared.WSActionResult) {
 	isTerminal := msg.Status == shared.ActionStatusSucceeded || msg.Status == shared.ActionStatusFailed
 
 	if isTerminal {
@@ -333,8 +359,19 @@ func (s *State) HandleActionStatus(workerName string, msg *shared.WSMessage) {
 }
 
 // finishJob updates the job after an action completes and schedules the next attempt.
+// Lock ordering: ReposMu before JobsMu (same as web.go repo handlers).
 func (s *State) finishJob(jobID string, succeeded bool) {
 	now := time.Now()
+
+	// Read repo interval FIRST (ReposMu before JobsMu to avoid deadlock).
+	s.ReposMu.RLock()
+	repo, repoExists := s.Repos[jobID]
+	s.ReposMu.RUnlock()
+
+	interval := time.Hour
+	if repoExists {
+		interval = ParseInterval(repo.SyncParams.Interval)
+	}
 
 	s.JobsMu.Lock()
 	job, exists := s.Jobs[jobID]
@@ -344,7 +381,6 @@ func (s *State) finishJob(jobID string, succeeded bool) {
 		return
 	}
 
-	// Don't resurrect orphaned jobs
 	if job.Status == shared.JobStatusOrphan {
 		s.JobsMu.Unlock()
 		return
@@ -358,22 +394,13 @@ func (s *State) finishJob(jobID string, succeeded bool) {
 		job.LastActionStatus = shared.ActionStatusFailed
 	}
 
-	// Compute next attempt from repo interval.
-	s.ReposMu.RLock()
-	repo, repoExists := s.Repos[jobID]
-	s.ReposMu.RUnlock()
-
-	interval := time.Hour // default fallback
-	if repoExists {
-		interval = ParseInterval(repo.SyncParams.Interval)
-	}
-
 	job.NextAttemptAt = now.Add(interval)
 	job.Status = shared.JobStatusWaiting
 	job.UpdatedAt = now
+	jobCopy := *job // copy before unlock to avoid data race on UpsertJob
 	s.JobsMu.Unlock()
 
-	if err := UpsertJob(job); err != nil {
+	if err := UpsertJob(&jobCopy); err != nil {
 		log.Error().Err(err).Str("job", jobID).Msg("failed to persist job finish")
 	}
 
@@ -505,12 +532,11 @@ func (s *State) HandleHeartbeatDiff(workerName string, reportedActions []string)
 	if len(toQuery) == 0 {
 		return
 	}
-	worker, ok := s.WorkerMgr.GetWorker(workerName)
-	if !ok {
+	if !s.WSHub.IsConnected(workerName) {
 		return
 	}
 	for _, actionID := range toQuery {
-		asr, err := QueryActionStatus(worker, actionID, s.Token)
+		asr, err := s.WSHub.QueryActionStatus(workerName, actionID)
 		if err != nil {
 			log.Warn().Err(err).Str("action", actionID).Str("worker", workerName).Msg("failed to query action status from worker")
 			continue

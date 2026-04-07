@@ -177,8 +177,6 @@ func StartContainer(act *shared.Action) error {
 		NetworkMode: "host",
 	}, nil, nil, act.ContainerName)
 
-	act.ContainerID = resp.ID
-
 	if err != nil {
 		act.ContainerStatus = shared.ContainerStatusExited
 		act.ContainerExitCode = 11451
@@ -186,6 +184,8 @@ func StartContainer(act *shared.Action) error {
 		log.Error().Err(err).Str("job", act.JobID).Str("action", act.ID).Str("image", act.ContainerImage).Msg("Failed to create container")
 		return err
 	}
+
+	act.ContainerID = resp.ID
 
 	if err := DockerClient.ContainerStart(context.Background(), resp.ID, container.StartOptions{}); err != nil {
 		act.ContainerStatus = shared.ContainerStatusExited
@@ -201,8 +201,10 @@ func StartContainer(act *shared.Action) error {
 
 	inspect, err := DockerClient.ContainerInspect(context.Background(), resp.ID)
 	if err != nil {
-		log.Error().Err(err).Str("job", act.JobID).Str("action", act.ID).Str("image", act.ContainerImage).Msg("Failed to inspect container")
-		return err
+		// Container is running but we couldn't inspect it for the log path.
+		// Not fatal — just skip the log symlink.
+		log.Warn().Err(err).Str("job", act.JobID).Str("action", act.ID).Msg("Failed to inspect container after start, skipping log symlink")
+		return nil
 	}
 
 	err = os.Symlink(inspect.LogPath, filepath.Join(logDir, "container.log"))
@@ -350,7 +352,6 @@ func ScanExistingContainers() (running []*ContainerInfo, exited []*ContainerInfo
 
 		if c.State == "running" {
 			info.IsRunning = true
-			// Inspect to get actual start time for timeout enforcement after recovery.
 			inspect, inspectErr := DockerClient.ContainerInspect(context.Background(), c.ID)
 			if inspectErr == nil && inspect.State != nil {
 				if t, err := time.Parse(time.RFC3339Nano, inspect.State.StartedAt); err == nil {
@@ -358,8 +359,10 @@ func ScanExistingContainers() (running []*ContainerInfo, exited []*ContainerInfo
 				}
 			}
 			running = append(running, info)
-		} else {
-			// For exited containers, inspect to get exit code, start time, and error.
+		} else if c.State == "exited" {
+			// Only recover truly exited containers. Containers in "created"
+			// state (never started) are removed — they represent a failed
+			// dispatch that crashed before ContainerStart.
 			inspect, inspectErr := DockerClient.ContainerInspect(context.Background(), c.ID)
 			if inspectErr == nil && inspect.State != nil {
 				info.ExitCode = inspect.State.ExitCode
@@ -372,6 +375,10 @@ func ScanExistingContainers() (running []*ContainerInfo, exited []*ContainerInfo
 				}
 			}
 			exited = append(exited, info)
+		} else {
+			// Container in "created", "paused", "dead", etc. — remove it.
+			log.Warn().Str("container", name).Str("state", c.State).Msg("removing container in unexpected state")
+			_ = DockerClient.ContainerRemove(context.Background(), c.ID, container.RemoveOptions{Force: true})
 		}
 	}
 

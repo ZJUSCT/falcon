@@ -2,7 +2,7 @@ package master
 
 import (
 	"encoding/json"
-	"io"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -405,6 +405,16 @@ func (s *State) handleQueueSetMaxConcurrency(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, map[string]any{"max_concurrency": max})
 }
 
+// queueMoveResponse persists the queue after a move and writes the response.
+func (s *State) queueMoveResponse(w http.ResponseWriter, ok bool) {
+	if ok {
+		if err := DBFlushQueue(s.JobQueue.Snapshot()); err != nil {
+			log.Error().Err(err).Msg("failed to persist queue after move")
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "queue": s.JobQueue.Snapshot(), "max_concurrency": s.JobQueue.GetMaxConcurrency()})
+}
+
 // handleQueueMoveToHead — POST /api/queue/move_to_head?repo_id=<id>
 func (s *State) handleQueueMoveToHead(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -416,8 +426,7 @@ func (s *State) handleQueueMoveToHead(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing repo_id"})
 		return
 	}
-	ok := s.JobQueue.MoveToHead(id)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "queue": s.JobQueue.Snapshot(), "max_concurrency": s.JobQueue.GetMaxConcurrency()})
+	s.queueMoveResponse(w, s.JobQueue.MoveToHead(id))
 }
 
 // handleQueueMoveToTail — POST /api/queue/move_to_tail?repo_id=<id>
@@ -431,8 +440,7 @@ func (s *State) handleQueueMoveToTail(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing repo_id"})
 		return
 	}
-	ok := s.JobQueue.MoveToTail(id)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "queue": s.JobQueue.Snapshot(), "max_concurrency": s.JobQueue.GetMaxConcurrency()})
+	s.queueMoveResponse(w, s.JobQueue.MoveToTail(id))
 }
 
 // handleQueueMoveBefore — POST /api/queue/move_before?target_id=<id>&ref_id=<id>
@@ -447,8 +455,7 @@ func (s *State) handleQueueMoveBefore(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing target_id or ref_id"})
 		return
 	}
-	ok := s.JobQueue.MoveBefore(target, ref)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "queue": s.JobQueue.Snapshot(), "max_concurrency": s.JobQueue.GetMaxConcurrency()})
+	s.queueMoveResponse(w, s.JobQueue.MoveBefore(target, ref))
 }
 
 // handleQueueMoveAfter — POST /api/queue/move_after?target_id=<id>&ref_id=<id>
@@ -463,8 +470,7 @@ func (s *State) handleQueueMoveAfter(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing target_id or ref_id"})
 		return
 	}
-	ok := s.JobQueue.MoveAfter(target, ref)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "queue": s.JobQueue.Snapshot(), "max_concurrency": s.JobQueue.GetMaxConcurrency()})
+	s.queueMoveResponse(w, s.JobQueue.MoveAfter(target, ref))
 }
 
 // handleQueueDelete — POST /api/queue/delete?repo_id=<id>
@@ -580,127 +586,113 @@ func (s *State) handleWorkersRemove(w http.ResponseWriter, r *http.Request) {
 // Log proxy handlers (proxy to worker)
 // ---------------------------------------------------------------------------
 
+// resolveActionWorker finds the worker name for an action.
+func (s *State) resolveActionWorker(actionID string) (string, error) {
+	if strings.TrimSpace(actionID) == "" {
+		return "", fmt.Errorf("missing action_id")
+	}
+	action := s.GetActionByIDFromActiveOrDB(actionID)
+	if action == nil {
+		return "", fmt.Errorf("action not found")
+	}
+	if !s.WSHub.IsConnected(action.WorkerName) {
+		return "", fmt.Errorf("worker not connected")
+	}
+	return action.WorkerName, nil
+}
+
 // handleLogsList — GET /api/logs/list?action_id=<id>
 func (s *State) handleLogsList(w http.ResponseWriter, r *http.Request) {
-	s.proxyLogRequest(w, r)
+	actionID := r.URL.Query().Get("action_id")
+	workerName, err := s.resolveActionWorker(actionID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	entries, err := s.WSHub.LogList(workerName, actionID)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	// entries is already JSON, write it directly wrapped in the expected format.
+	_, _ = w.Write([]byte(`{"action_id":"` + actionID + `","entries":`))
+	_, _ = w.Write(entries)
+	_, _ = w.Write([]byte(`}`))
 }
 
 // handleLogsRaw — GET /api/logs/raw?action_id=<id>&file=<name>
 func (s *State) handleLogsRaw(w http.ResponseWriter, r *http.Request) {
-	s.proxyLogRequest(w, r)
+	actionID := r.URL.Query().Get("action_id")
+	file := r.URL.Query().Get("file")
+	workerName, err := s.resolveActionWorker(actionID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	content, err := s.WSHub.LogRaw(workerName, actionID, file)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(content))
 }
 
-// handleLogsStream — GET /api/logs/stream?action_id=<id>&file=<name>&from=<start|end>
+// handleLogsStream — GET /api/logs/stream?action_id=<id>&file=<name>
 func (s *State) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 	actionID := r.URL.Query().Get("action_id")
-	if strings.TrimSpace(actionID) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing action_id"})
+	file := r.URL.Query().Get("file")
+	workerName, err := s.resolveActionWorker(actionID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
-	action := s.GetActionByIDFromActiveOrDB(actionID)
-	if action == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "action not found"})
-		return
-	}
-
-	worker, ok := s.WorkerMgr.GetWorker(action.WorkerName)
+	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "worker not available"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming not supported"})
 		return
 	}
 
-	// Build the proxy URL.
-	proxyURL := worker.Addr + r.URL.Path + "?" + r.URL.RawQuery
-
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, proxyURL, nil)
+	_, dataCh, stop, err := s.WSHub.LogStream(workerName, actionID, file)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create proxy request"})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+s.Token)
+	defer stop()
 
-	client := &http.Client{} // no timeout for streaming
-	resp, err := client.Do(req)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to reach worker: " + err.Error()})
-		return
-	}
-	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 
-	// Copy all response headers.
-	for k, vals := range resp.Header {
-		for _, v := range vals {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write([]byte("data: MIRRORGO LOG STREAM: Connected\n\n"))
+	flusher.Flush()
 
-	// Stream the response body with flushing for SSE.
-	flusher, flushOK := w.(http.Flusher)
-	buf := make([]byte, 32*1024)
 	for {
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			_, writeErr := w.Write(buf[:n])
-			if writeErr != nil {
+		select {
+		case <-r.Context().Done():
+			return
+		case chunk, ok := <-dataCh:
+			if !ok {
 				return
 			}
-			if flushOK {
-				flusher.Flush()
+			lines := strings.Split(chunk, "\n")
+			for _, line := range lines {
+				if _, err := w.Write([]byte("data: " + line + "\n\n")); err != nil {
+					return
+				}
 			}
-		}
-		if readErr != nil {
-			return
+			flusher.Flush()
 		}
 	}
-}
-
-// proxyLogRequest proxies a log list/raw request to the appropriate worker.
-func (s *State) proxyLogRequest(w http.ResponseWriter, r *http.Request) {
-	actionID := r.URL.Query().Get("action_id")
-	if strings.TrimSpace(actionID) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing action_id"})
-		return
-	}
-
-	action := s.GetActionByIDFromActiveOrDB(actionID)
-	if action == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "action not found"})
-		return
-	}
-
-	worker, ok := s.WorkerMgr.GetWorker(action.WorkerName)
-	if !ok {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "worker not available"})
-		return
-	}
-
-	proxyURL := worker.Addr + r.URL.Path + "?" + r.URL.RawQuery
-
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, proxyURL, nil)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create proxy request"})
-		return
-	}
-	req.Header.Set("Authorization", "Bearer "+s.Token)
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to reach worker: " + err.Error()})
-		return
-	}
-	defer resp.Body.Close()
-
-	// Forward response headers and body.
-	for k, vals := range resp.Header {
-		for _, v := range vals {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
 }
 
 // ---------------------------------------------------------------------------
