@@ -492,6 +492,7 @@ func (s *State) ZFSPullLoop(ctx context.Context) {
 
 func (s *State) pullZFSReports() {
 	online := s.WorkerMgr.GetOnlineWorkers()
+	fresh := make(map[string]*shared.ZFSWorkerReport)
 	for _, w := range online {
 		if !s.WSHub.IsConnected(w.Name) {
 			continue
@@ -502,37 +503,101 @@ func (s *State) pullZFSReports() {
 			continue
 		}
 		report.WorkerName = w.Name
-		s.mapDatasetsToRepos(report, w)
-		s.ZFSReportsMu.Lock()
-		s.ZFSReports[w.Name] = report
-		s.ZFSReportsMu.Unlock()
+		fresh[w.Name] = report
 		log.Debug().Str("worker", w.Name).Int("datasets", len(report.Datasets)).Int("pools", len(report.Pools)).Msg("ZFS report pulled")
 	}
+
+	// Map datasets to repos using the full picture across all workers.
+	s.mapAllReportsToRepos(fresh)
+
+	s.ZFSReportsMu.Lock()
+	for k, v := range fresh {
+		s.ZFSReports[k] = v
+	}
+	s.ZFSReportsMu.Unlock()
+
 	s.refreshMirrorJSONAsync()
 }
 
-// mapDatasetsToRepos sets RepoID on each dataset by matching mountpoints
-// against repo config volume sources expanded with the worker's vars.
-func (s *State) mapDatasetsToRepos(report *shared.ZFSWorkerReport, worker *shared.Worker) {
-	// Build mountpoint -> dataset index for fast lookup.
-	mpIndex := make(map[string]int, len(report.Datasets))
-	for i := range report.Datasets {
-		mp := filepath.Clean(report.Datasets[i].MountPoint)
-		if mp != "" {
-			mpIndex[mp] = i
+// mapAllReportsToRepos resolves each repo to its single authoritative worker
+// and sets RepoID only on that worker's dataset. Called after all reports are
+// pulled so the full picture is available.
+//
+// Resolution order (same as buildRepoSizes):
+//  1. repo.sync.node
+//  2. last action's worker_name
+//  3. nodeSelector match
+func (s *State) mapAllReportsToRepos(reports map[string]*shared.ZFSWorkerReport) {
+	// Build per-worker mountpoint index: worker -> mountpoint -> dataset index
+	type mpEntry struct {
+		worker string
+		idx    int
+	}
+	workerMPIndex := make(map[string]map[string]int) // worker -> mp -> idx
+	for wName, report := range reports {
+		m := make(map[string]int, len(report.Datasets))
+		for i := range report.Datasets {
+			report.Datasets[i].RepoID = "" // clear stale mappings
+			mp := filepath.Clean(report.Datasets[i].MountPoint)
+			if mp != "" {
+				m[mp] = i
+			}
 		}
+		workerMPIndex[wName] = m
 	}
 
-	// For each repo, expand its first volume source with the worker's vars
-	// and check if any dataset mountpoint matches.
 	s.ReposMu.RLock()
+	s.JobsMu.RLock()
 	defer s.ReposMu.RUnlock()
+	defer s.JobsMu.RUnlock()
+
 	for repoID, repo := range s.Repos {
+		worker := ""
+
+		// 1. Explicit node pinning
+		if repo.SyncParams.Node != "" {
+			worker = repo.SyncParams.Node
+		}
+
+		// 2. Last action's worker
+		if worker == "" {
+			if job, ok := s.Jobs[repoID]; ok && len(job.Actions) > 0 {
+				lastActionID := job.Actions[len(job.Actions)-1]
+				if a := s.GetActionByIDFromActiveOrDB(lastActionID); a != nil && a.WorkerName != "" {
+					worker = a.WorkerName
+				}
+			}
+		}
+
+		// 3. nodeSelector match among workers that have reports
+		if worker == "" && len(repo.SyncParams.NodeSelector) > 0 {
+			for wName := range reports {
+				if w, ok := s.WorkerMgr.GetWorker(wName); ok && MatchWorker(w, &repo) {
+					worker = wName
+					break
+				}
+			}
+		}
+
+		if worker == "" {
+			continue
+		}
+
+		mpIdx, ok := workerMPIndex[worker]
+		if !ok {
+			continue
+		}
+
+		// Match repo volume sources against dataset mountpoints on this worker.
+		w, wOK := s.WorkerMgr.GetWorker(worker)
+		if !wOK {
+			continue
+		}
 		for _, vol := range repo.SyncParams.Volumes {
-			expanded := expandWorkerVars(vol.Source, worker.Vars)
+			expanded := expandWorkerVars(vol.Source, w.Vars)
 			expanded = filepath.Clean(expanded)
-			if idx, ok := mpIndex[expanded]; ok {
-				report.Datasets[idx].RepoID = repoID
+			if idx, ok := mpIdx[expanded]; ok {
+				reports[worker].Datasets[idx].RepoID = repoID
 				break
 			}
 		}
