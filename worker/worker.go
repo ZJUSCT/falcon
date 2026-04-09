@@ -75,7 +75,6 @@ func Run(cfg WorkerConfig) {
 
 	// 6. Wire up callbacks
 	onNewAction := func(act *shared.Action) {
-		tracker.Add(act, PhaseRunning)
 		go monitorAction(tracker, act, wsClient, cache)
 	}
 
@@ -244,6 +243,13 @@ func finishAction(tracker *Tracker, act *shared.Action, status string, exitCode 
 	log.Info().Str("action", act.ID).Str("status", status).Int("exit_code", exitCode).Msg("Action finished")
 }
 
+const (
+	cleanupScanInterval = 5 * time.Second
+	cleanupGracePeriod  = 0 * time.Second
+)
+
+var cleanupContainer = CleanupContainer
+
 // heartbeatLoop sends periodic heartbeats to the master.
 func heartbeatLoop(ctx context.Context, masterURL, token, name string, tracker *Tracker) {
 	ticker := time.NewTicker(10 * time.Second)
@@ -284,7 +290,7 @@ func heartbeatLoop(ctx context.Context, masterURL, token, name string, tracker *
 
 // cleanupLoop periodically cleans up containers that have been acked.
 func cleanupLoop(ctx context.Context, tracker *Tracker) {
-	ticker := time.NewTicker(60 * time.Second)
+	ticker := time.NewTicker(cleanupScanInterval)
 	defer ticker.Stop()
 
 	for {
@@ -292,15 +298,19 @@ func cleanupLoop(ctx context.Context, tracker *Tracker) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			due := tracker.DueCleanup(1 * time.Hour)
-			for _, act := range due {
-				if err := CleanupContainer(act); err != nil {
-					log.Warn().Err(err).Str("action", act.ID).Msg("Failed to cleanup container, will retry")
-				} else {
-					tracker.Remove(act.ID)
-					log.Debug().Str("action", act.ID).Msg("Cleaned up container")
-				}
-			}
+			cleanupDueActions(tracker)
+		}
+	}
+}
+
+func cleanupDueActions(tracker *Tracker) {
+	due := tracker.DueCleanup(cleanupGracePeriod)
+	for _, act := range due {
+		if err := cleanupContainer(act); err != nil {
+			log.Warn().Err(err).Str("action", act.ID).Msg("Failed to cleanup container, will retry")
+		} else {
+			tracker.Remove(act.ID)
+			log.Debug().Str("action", act.ID).Msg("Cleaned up container")
 		}
 	}
 }
@@ -350,4 +360,3 @@ func register(masterURL, token string, req *shared.RegisterRequest) error {
 
 	return fmt.Errorf("registration failed after %d attempts", maxAttempts)
 }
-

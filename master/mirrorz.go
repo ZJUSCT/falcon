@@ -1,13 +1,16 @@
 package master
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/star/mirrorgo/shared"
@@ -16,22 +19,29 @@ import (
 // jsonWriteMu serializes writes to mirrorgo.json and mirrorz.json.
 var jsonWriteMu sync.Mutex
 
+var renameFile = os.Rename
+
 // atomicWriteJSON writes JSON to a file atomically (write tmp + rename).
 func atomicWriteJSON(path string, v interface{}, indent bool) error {
 	jsonWriteMu.Lock()
 	defer jsonWriteMu.Unlock()
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	if indent {
+		enc.SetIndent("", "  ")
+	}
+	if err := enc.Encode(v); err != nil {
+		return err
+	}
+	data := buf.Bytes()
 
 	tmp := path + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-
-	enc := json.NewEncoder(f)
-	if indent {
-		enc.SetIndent("", "  ")
-	}
-	if err := enc.Encode(v); err != nil {
+	if _, err := f.Write(data); err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return err
@@ -42,7 +52,37 @@ func atomicWriteJSON(path string, v interface{}, indent bool) error {
 		return err
 	}
 	f.Close()
-	return os.Rename(tmp, path)
+
+	if err := renameFile(tmp, path); err != nil {
+		if !errors.Is(err, syscall.EBUSY) && !errors.Is(err, syscall.EEXIST) {
+			os.Remove(tmp)
+			return err
+		}
+		// Single-file bind mounts cannot be replaced by rename(2), so fall
+		// back to truncating and overwriting the mounted file in place.
+		dst, openErr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		if openErr != nil {
+			os.Remove(tmp)
+			return openErr
+		}
+		if _, writeErr := dst.Write(data); writeErr != nil {
+			dst.Close()
+			os.Remove(tmp)
+			return writeErr
+		}
+		if syncErr := dst.Sync(); syncErr != nil {
+			dst.Close()
+			os.Remove(tmp)
+			return syncErr
+		}
+		if closeErr := dst.Close(); closeErr != nil {
+			os.Remove(tmp)
+			return closeErr
+		}
+		os.Remove(tmp)
+		return nil
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +154,10 @@ type MirrorStatus struct {
 	LastFailure   int64             `json:"lastFailure"`
 }
 
+func isSyncingActionStatus(status string) bool {
+	return status == shared.ActionStatusRunning || status == shared.ActionStatusReconciling
+}
+
 // ---------------------------------------------------------------------------
 // MirrorZ generation
 // ---------------------------------------------------------------------------
@@ -167,7 +211,9 @@ func (s *State) GenerateMirrorZ() MirrorZ {
 				lastAction = s.GetActionByIDFromActiveOrDB(job.Actions[len(job.Actions)-1])
 			}
 
-			if lastAction != nil && lastAction.Status == shared.ActionStatusRunning {
+			if lastAction != nil && isSyncingActionStatus(lastAction.Status) {
+				// Active sync in progress — show syncing even if job is Paused
+				// (action will finish, then Paused takes effect).
 				if !lastAction.StartedAt.IsZero() {
 					startSync = lastAction.StartedAt.Unix()
 				} else if !lastAction.CreatedAt.IsZero() {
@@ -179,6 +225,13 @@ func (s *State) GenerateMirrorZ() MirrorZ {
 				}
 				if lastSuccess > 0 {
 					status += "O" + strconv.FormatInt(lastSuccess, 10)
+				}
+			} else if job.Status == shared.JobStatusPaused {
+				// Paused takes priority over historical success/failure —
+				// it reflects the current administrative state.
+				status = "P"
+				if !job.LastAttemptAt.IsZero() {
+					status += strconv.FormatInt(job.LastAttemptAt.Unix(), 10)
 				}
 			} else if lastFailure > 0 && (lastSuccess == 0 || lastFailure >= lastSuccess) {
 				status = "F" + strconv.FormatInt(lastFailure, 10)
@@ -289,7 +342,7 @@ func (s *State) getMirrorStatus() ([]MirrorStatus, error) {
 				lastAction := s.GetActionByIDFromActiveOrDB(job.Actions[len(job.Actions)-1])
 				if lastAction != nil {
 					switch lastAction.Status {
-					case shared.ActionStatusRunning:
+					case shared.ActionStatusRunning, shared.ActionStatusReconciling:
 						mirror.Status = "syncing"
 					case shared.ActionStatusSucceeded:
 						mirror.Status = "succeeded"

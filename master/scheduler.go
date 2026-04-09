@@ -33,6 +33,17 @@ type State struct {
 	UIFS      fs.FS  // embedded UI filesystem (set from main.go)
 }
 
+func (s *State) refreshMirrorJSONAsync() {
+	go func() {
+		if err := s.UpdateMirrorgoJSON(); err != nil {
+			log.Error().Err(err).Msg("failed to update mirrorgo.json")
+		}
+		if err := s.UpdateMirrorZJSON(); err != nil {
+			log.Error().Err(err).Msg("failed to update mirrorz.json")
+		}
+	}()
+}
+
 // ScheduleLoop checks Waiting jobs every 5s and enqueues those whose
 // NextAttemptAt has passed.
 func (s *State) ScheduleLoop(ctx context.Context) {
@@ -95,7 +106,7 @@ func (s *State) DispatchLoop(ctx context.Context) {
 func (s *State) dispatchTick() {
 	// Check concurrency limit.
 	maxConc := s.JobQueue.GetMaxConcurrency()
-	runningCount := s.countRunningActions()
+	runningCount := s.countConcurrencyActions()
 	if runningCount >= maxConc {
 		return
 	}
@@ -190,9 +201,12 @@ func (s *State) dispatchTick() {
 			continue
 		}
 
-		// Update job to Running.
+		// Update job to Running (only if still Scheduled — status may have
+		// been changed to Paused or Orphan by a concurrent API call).
 		s.JobsMu.Lock()
-		job.Status = shared.JobStatusRunning
+		if job.Status == shared.JobStatusScheduled {
+			job.Status = shared.JobStatusRunning
+		}
 		job.LastAttemptAt = now
 		job.UpdatedAt = now
 		job.Actions = append(job.Actions, actionID)
@@ -232,6 +246,7 @@ func (s *State) dispatchTick() {
 					actionCopy := *a
 					s.ActionsMu.Unlock()
 					_ = UpsertAction(&actionCopy)
+					s.refreshMirrorJSONAsync()
 				} else {
 					s.ActionsMu.Unlock()
 				}
@@ -255,9 +270,10 @@ func (s *State) dispatchTick() {
 		}
 
 		log.Info().Str("job", jobID).Str("action", actionID).Str("worker", worker.Name).Msg("dispatched action")
+		s.refreshMirrorJSONAsync()
 
 		// Re-check concurrency limit.
-		runningCount = s.countRunningActions()
+		runningCount = s.countConcurrencyActions()
 		if runningCount >= maxConc {
 			break
 		}
@@ -278,7 +294,7 @@ func (s *State) selectWorker(repo *shared.Repo) *shared.Worker {
 		if !s.WSHub.IsConnected(w.Name) {
 			continue
 		}
-		load := len(w.RunningActions)
+		load := s.countWorkerActiveActions(w.Name)
 		if best == nil || load < bestLoad {
 			best = w
 			bestLoad = load
@@ -391,7 +407,10 @@ func (s *State) finishJob(jobID string, succeeded bool) {
 	}
 
 	job.NextAttemptAt = now.Add(interval)
-	job.Status = shared.JobStatusWaiting
+	// Preserve Paused status — only revert to Waiting if not paused.
+	if job.Status != shared.JobStatusPaused {
+		job.Status = shared.JobStatusWaiting
+	}
 	job.UpdatedAt = now
 	jobCopy := *job // copy before unlock to avoid data race on UpsertJob
 	s.JobsMu.Unlock()
@@ -407,14 +426,7 @@ func (s *State) finishJob(jobID string, succeeded bool) {
 	}
 
 	// Trigger mirrorgo.json/mirrorz.json update in background.
-	go func() {
-		if err := s.UpdateMirrorgoJSON(); err != nil {
-			log.Error().Err(err).Msg("failed to update mirrorgo.json")
-		}
-		if err := s.UpdateMirrorZJSON(); err != nil {
-			log.Error().Err(err).Msg("failed to update mirrorz.json")
-		}
-	}()
+	s.refreshMirrorJSONAsync()
 }
 
 // WarnStaleReconcilingActions logs warnings for actions that have been in
@@ -471,7 +483,7 @@ func ParseInterval(ic shared.IntervalConfig) time.Duration {
 // OnWorkerOffline marks all Running actions on the given worker as Reconciling.
 func (s *State) OnWorkerOffline(workerName string) {
 	s.ActionsMu.Lock()
-	defer s.ActionsMu.Unlock()
+	changed := false
 	for _, action := range s.ActiveActions {
 		if action.WorkerName == workerName && action.Status == shared.ActionStatusRunning {
 			action.Status = shared.ActionStatusReconciling
@@ -480,7 +492,12 @@ func (s *State) OnWorkerOffline(workerName string) {
 				log.Error().Err(err).Str("action", action.ID).Msg("failed to persist reconciling status")
 			}
 			log.Warn().Str("action", action.ID).Str("worker", workerName).Msg("action marked Reconciling (worker offline)")
+			changed = true
 		}
+	}
+	s.ActionsMu.Unlock()
+	if changed {
+		s.refreshMirrorJSONAsync()
 	}
 }
 
@@ -500,6 +517,7 @@ func (s *State) HandleHeartbeatDiff(workerName string, reportedActions []string)
 
 	// Single pass under lock: restore reconciling, collect IDs for async work.
 	var toQuery []string // absent from heartbeat → query worker before resolving
+	restored := false
 
 	s.ActionsMu.Lock()
 	for _, action := range s.ActiveActions {
@@ -514,6 +532,7 @@ func (s *State) HandleHeartbeatDiff(workerName string, reportedActions []string)
 			action.UpdatedAt = time.Now()
 			_ = UpsertAction(action)
 			log.Info().Str("action", action.ID).Str("worker", workerName).Msg("action restored to Running after reconciliation")
+			restored = true
 
 		case !reported && (action.Status == shared.ActionStatusReconciling || action.Status == shared.ActionStatusRunning):
 			// Both Reconciling and Running actions absent from heartbeat
@@ -523,6 +542,9 @@ func (s *State) HandleHeartbeatDiff(workerName string, reportedActions []string)
 		}
 	}
 	s.ActionsMu.Unlock()
+	if restored {
+		s.refreshMirrorJSONAsync()
+	}
 
 	// Query worker for actions not in heartbeat.
 	if len(toQuery) == 0 {
@@ -558,14 +580,28 @@ func (s *State) HandleHeartbeatDiff(workerName string, reportedActions []string)
 // Lookup helpers
 // ---------------------------------------------------------------------------
 
-// countRunningActions returns the number of actions in Running status.
-// Reconciling actions are excluded so they don't block unrelated dispatches.
-func (s *State) countRunningActions() int {
+// countConcurrencyActions returns the number of active actions currently
+// occupying concurrency slots. Reconciling actions are included because after
+// master restart or WS interruption they may still correspond to live
+// containers until reconciliation proves otherwise.
+func (s *State) countConcurrencyActions() int {
 	s.ActionsMu.RLock()
 	defer s.ActionsMu.RUnlock()
 	count := 0
 	for _, a := range s.ActiveActions {
-		if a.Status == shared.ActionStatusRunning {
+		if a.Status == shared.ActionStatusRunning || a.Status == shared.ActionStatusReconciling {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *State) countWorkerActiveActions(workerName string) int {
+	s.ActionsMu.RLock()
+	defer s.ActionsMu.RUnlock()
+	count := 0
+	for _, a := range s.ActiveActions {
+		if a.WorkerName == workerName {
 			count++
 		}
 	}
@@ -603,4 +639,3 @@ func (s *State) GetActionByIDFromActiveOrDB(id string) *shared.Action {
 	}
 	return a
 }
-

@@ -122,19 +122,26 @@ func Run(cfg MasterConfig) {
 		state.ActionsMu.Unlock()
 	}
 
-	if err := RevertScheduledJobsToWaiting(); err != nil {
-		log.Error().Err(err).Msg("Failed to revert scheduled jobs to waiting")
-	} else {
-		// Update in-memory jobs to match.
-		now := time.Now()
-		state.JobsMu.Lock()
+	// 7b. Recover Scheduled jobs: the queue was already restored from DB above,
+	// so Scheduled jobs should stay Scheduled and dispatchTick will process them.
+	// Only re-enqueue Scheduled jobs that are missing from the restored queue
+	// (e.g. if DBEnqueue failed before a crash).
+	{
+		queueSet := make(map[string]struct{})
+		for _, id := range state.JobQueue.Snapshot() {
+			queueSet[id] = struct{}{}
+		}
+		state.JobsMu.RLock()
 		for _, j := range state.Jobs {
 			if j.Status == shared.JobStatusScheduled {
-				j.Status = shared.JobStatusWaiting
-				j.NextAttemptAt = now
+				if _, inQueue := queueSet[j.RepoID]; !inQueue {
+					state.JobQueue.Enqueue(j.RepoID)
+					_ = DBEnqueue(j.RepoID)
+					log.Warn().Str("job", j.RepoID).Msg("Scheduled job missing from queue, re-enqueued")
+				}
 			}
 		}
-		state.JobsMu.Unlock()
+		state.JobsMu.RUnlock()
 	}
 
 	if err := MarkAllWorkersOffline(); err != nil {

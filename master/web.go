@@ -113,7 +113,7 @@ func (s *State) handleRepoSave(w http.ResponseWriter, r *http.Request) {
 	s.JobsMu.Lock()
 	job, exists := s.Jobs[repo.RepoID]
 	if isFree {
-		if !exists {
+		if !exists || job == nil {
 			job = &shared.Job{
 				RepoID:        repo.RepoID,
 				Status:        shared.JobStatusWaiting,
@@ -131,9 +131,16 @@ func (s *State) handleRepoSave(w http.ResponseWriter, r *http.Request) {
 		job.Status = shared.JobStatusOrphan
 		job.UpdatedAt = time.Now()
 	}
-	jobCopy := *job
+	var jobCopy *shared.Job
+	if job != nil {
+		copied := *job
+		jobCopy = &copied
+	}
 	s.JobsMu.Unlock()
-	_ = UpsertJob(&jobCopy)
+	if jobCopy != nil {
+		_ = UpsertJob(jobCopy)
+		s.refreshMirrorJSONAsync()
+	}
 
 	writeJSON(w, http.StatusOK, repo)
 }
@@ -175,6 +182,7 @@ func (s *State) handleRepoDelete(w http.ResponseWriter, r *http.Request) {
 	s.JobQueue.Remove(id)
 	_ = DBDeleteAllQueueByJob(id)
 
+	s.refreshMirrorJSONAsync()
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
@@ -330,8 +338,11 @@ func (s *State) handleQueue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleJobNextAttemptNow — POST /api/jobs/next_attempt_now?repo_id=<id>
-func (s *State) handleJobNextAttemptNow(w http.ResponseWriter, r *http.Request) {
+// handleJobSetNextAttempt — POST /api/jobs/set_next_attempt?repo_id=<id>[&time=<RFC3339>]
+// Sets the next attempt time for a Waiting or Scheduled job. If no time is
+// given, defaults to now. If the job is Scheduled, it is removed from the
+// queue and reverted to Waiting first.
+func (s *State) handleJobSetNextAttempt(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
@@ -341,6 +352,17 @@ func (s *State) handleJobNextAttemptNow(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing repo_id"})
 		return
 	}
+
+	nextAt := time.Now()
+	if t := r.URL.Query().Get("time"); t != "" {
+		parsed, err := time.Parse(time.RFC3339, t)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid time format, use RFC3339"})
+			return
+		}
+		nextAt = parsed
+	}
+
 	s.JobsMu.Lock()
 	job, ok := s.Jobs[repoID]
 	if !ok {
@@ -348,12 +370,23 @@ func (s *State) handleJobNextAttemptNow(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
 		return
 	}
-	if job.Status != shared.JobStatusWaiting {
+	if job.Status == shared.JobStatusRunning || job.Status == shared.JobStatusOrphan {
 		s.JobsMu.Unlock()
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "job is not in Waiting status"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "job must be Waiting, Scheduled, or Paused"})
 		return
 	}
-	job.NextAttemptAt = time.Now()
+
+	// If Scheduled, remove from queue.
+	if job.Status == shared.JobStatusScheduled {
+		s.JobQueue.Remove(repoID)
+		_ = DBDeleteAllQueueByJob(repoID)
+	}
+
+	// Preserve Paused status; only revert Scheduled to Waiting.
+	if job.Status != shared.JobStatusPaused {
+		job.Status = shared.JobStatusWaiting
+	}
+	job.NextAttemptAt = nextAt
 	job.UpdatedAt = time.Now()
 	jobCopy := *job
 	s.JobsMu.Unlock()
@@ -362,6 +395,73 @@ func (s *State) handleJobNextAttemptNow(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	s.refreshMirrorJSONAsync()
+	writeJSON(w, http.StatusOK, &jobCopy)
+}
+
+// handleJobPause — POST /api/jobs/pause?repo_id=<id>&paused=true|false
+// Pauses or unpauses a job. A paused job will not be scheduled.
+// If the job is Scheduled, it is removed from the queue first.
+func (s *State) handleJobPause(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	repoID := r.URL.Query().Get("repo_id")
+	if strings.TrimSpace(repoID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing repo_id"})
+		return
+	}
+	pause := r.URL.Query().Get("paused") != "false" // default true
+
+	s.JobsMu.Lock()
+	job, ok := s.Jobs[repoID]
+	if !ok {
+		s.JobsMu.Unlock()
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+		return
+	}
+
+	if pause {
+		if job.Status == shared.JobStatusOrphan || job.Status == shared.JobStatusPaused {
+			s.JobsMu.Unlock()
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "job cannot be paused in current status"})
+			return
+		}
+		// If Scheduled, remove from queue.
+		if job.Status == shared.JobStatusScheduled {
+			s.JobQueue.Remove(repoID)
+			_ = DBDeleteAllQueueByJob(repoID)
+		}
+		// Running jobs: set to Paused now; finishJob will preserve it
+		// when the current action completes.
+		job.Status = shared.JobStatusPaused
+	} else {
+		if job.Status != shared.JobStatusPaused {
+			s.JobsMu.Unlock()
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "job is not paused"})
+			return
+		}
+		// If an action is still running, resume as Running (not Waiting)
+		// so the state machine stays consistent.
+		if s.HasActiveActionForJob(repoID) {
+			job.Status = shared.JobStatusRunning
+		} else {
+			job.Status = shared.JobStatusWaiting
+			// Don't override NextAttemptAt — preserve the value set by
+			// finishJob (now+interval) or by the user via set_next_attempt.
+			// scheduleTick will pick it up when it's due.
+		}
+	}
+	job.UpdatedAt = time.Now()
+	jobCopy := *job
+	s.JobsMu.Unlock()
+
+	if err := UpsertJob(&jobCopy); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	s.refreshMirrorJSONAsync()
 	writeJSON(w, http.StatusOK, &jobCopy)
 }
 
@@ -514,6 +614,7 @@ func (s *State) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
 	s.JobsMu.Unlock()
 	if jobCopy != nil {
 		_ = UpsertJob(jobCopy)
+		s.refreshMirrorJSONAsync()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"removed": removed, "queue": s.JobQueue.Snapshot(), "paused": s.JobQueue.IsPaused(), "max_concurrency": s.JobQueue.GetMaxConcurrency()})
 }
@@ -715,7 +816,9 @@ func (s *State) StartWebServer(addr, authToken string) {
 	mux.HandleFunc("/api/repos", s.handleReposDispatch)
 	mux.HandleFunc("/api/jobs", s.handleJobs)
 	mux.HandleFunc("/api/jobs/delete", s.handleJobDelete)
-	mux.HandleFunc("/api/jobs/next_attempt_now", s.handleJobNextAttemptNow)
+	mux.HandleFunc("/api/jobs/set_next_attempt", s.handleJobSetNextAttempt)
+	mux.HandleFunc("/api/jobs/next_attempt_now", s.handleJobSetNextAttempt) // legacy alias
+	mux.HandleFunc("/api/jobs/pause", s.handleJobPause)
 	mux.HandleFunc("/api/actions", s.handleActions)
 	mux.HandleFunc("/api/actions/lookup", s.handleActionsLookup)
 	mux.HandleFunc("/api/actions/by_repo", s.handleActionsByRepo)

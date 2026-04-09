@@ -173,6 +173,7 @@ const (
 	JobStatusWaiting   = "Waiting"
 	JobStatusScheduled = "Scheduled"
 	JobStatusRunning   = "Running"
+	JobStatusPaused    = "Paused"
 	JobStatusOrphan    = "Orphan"
 
 	ActionStatusRunning     = "Running"

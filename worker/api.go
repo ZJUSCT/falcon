@@ -12,8 +12,9 @@ import (
 
 // Package-level state set by worker.go before starting the API.
 var (
-	OnNewAction func(act *shared.Action)
-	actionCache *ActionCache
+	OnNewAction    func(act *shared.Action)
+	actionCache    *ActionCache
+	startContainer = StartContainer
 )
 
 func writeJSON(v interface{}) ([]byte, error) {
@@ -89,9 +90,23 @@ func HandleDispatchWS(da shared.DispatchAction) (bool, string) {
 		}
 	}
 
-	if err := StartContainer(act); err != nil {
+	// Track the action before container startup so heartbeat/query_action can
+	// observe it even if the container exits or heartbeat races with startup.
+	tracked := tracker != nil
+	if tracked {
+		tracker.Add(act, PhaseRunning)
+	}
+	keepTracked := false
+	defer func() {
+		if tracked && !keepTracked {
+			tracker.Remove(act.ID)
+		}
+	}()
+
+	if err := startContainer(act); err != nil {
 		return false, "failed to start container: " + err.Error()
 	}
+	keepTracked = true
 
 	act.ContainerStatus = shared.ContainerStatusRunning
 

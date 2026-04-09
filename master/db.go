@@ -416,15 +416,6 @@ func MarkAllRunningActionsReconciling() error {
 		Update("status", shared.ActionStatusReconciling).Error
 }
 
-// RevertScheduledJobsToWaiting sets all Scheduled jobs back to Waiting with next_attempt_at = now.
-func RevertScheduledJobsToWaiting() error {
-	return gormDB.Model(&JobModel{}).
-		Where("status = ?", shared.JobStatusScheduled).
-		Updates(map[string]interface{}{
-			"status":          shared.JobStatusWaiting,
-			"next_attempt_at": time.Now(),
-		}).Error
-}
 
 // MarkAllWorkersOffline sets all Online workers to Offline.
 func MarkAllWorkersOffline() error {

@@ -42,15 +42,21 @@ class ApiClient {
   }
 
   async triggerJobNow(repoId: string): Promise<Job> {
-    const response = await fetch(`${API_BASE}/jobs/next_attempt_now?repo_id=${encodeURIComponent(repoId)}`, {
+    return this.setNextAttempt(repoId);
+  }
+
+  async setNextAttempt(repoId: string, time?: string): Promise<Job> {
+    const params = new URLSearchParams({ repo_id: repoId });
+    if (time) params.set('time', time);
+    const response = await fetch(`${API_BASE}/jobs/set_next_attempt?${params}`, {
       method: 'POST',
     });
-    
+
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({ error: response.statusText }));
       throw new Error(errorData.error || `API request failed: ${response.statusText}`);
     }
-    
+
     return response.json();
   }
 
@@ -193,6 +199,17 @@ class ApiClient {
 
   async getWorkers(): Promise<Worker[]> {
     return this.fetch<Worker[]>('/workers');
+  }
+
+  async pauseJob(repoId: string, paused: boolean = true): Promise<Job> {
+    const response = await fetch(`${API_BASE}/jobs/pause?repo_id=${encodeURIComponent(repoId)}&paused=${paused}`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: response.statusText }));
+      throw new Error(errorData.error || `API request failed: ${response.statusText}`);
+    }
+    return response.json();
   }
 
   async deleteJob(id: string): Promise<void> {

@@ -158,6 +158,8 @@ export function getStatusColor(status: string): string {
       return 'text-yellow-600 bg-yellow-50 border-yellow-200 hover:bg-yellow-100';
     case 'Scheduled':
       return 'bg-purple-600 border-purple-200 hover:bg-purple-700';
+    case 'Paused':
+      return 'text-orange-600 bg-orange-50 border-orange-200 hover:bg-orange-100';
     case 'Orphan':
       return 'text-gray-600 bg-gray-400 border-gray-200 hover:bg-gray-600';
     case 'Reconciling':

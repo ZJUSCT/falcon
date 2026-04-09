@@ -42,7 +42,8 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
           'Running': 0,
           'Scheduled': 1,
           'Waiting': 2,
-          'Orphan': 3,
+          'Paused': 3,
+          'Orphan': 4,
         };
         const pA = statusPriority[a.job?.status || ''] ?? 4;
         const pB = statusPriority[b.job?.status || ''] ?? 4;
@@ -157,7 +158,7 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
         <span className="text-xs text-muted-foreground font-mono">{mirrors.length} total</span>
       </div>
 
-      <div className="grid gap-3 grid-cols-2 md:grid-cols-4">
+      <div className="grid gap-3 grid-cols-2 md:grid-cols-5">
         <div className="rounded-lg border bg-card p-3">
           <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Running</div>
           <div className="text-xl font-bold tabular-nums text-blue-500 mt-1">{jobsByStatus.Running || 0}</div>
@@ -169,6 +170,10 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
         <div className="rounded-lg border bg-card p-3">
           <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Waiting</div>
           <div className="text-xl font-bold tabular-nums text-yellow-500 mt-1">{jobsByStatus.Waiting || 0}</div>
+        </div>
+        <div className="rounded-lg border bg-card p-3">
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Paused</div>
+          <div className="text-xl font-bold tabular-nums text-orange-500 mt-1">{jobsByStatus.Paused || 0}</div>
         </div>
         <div className="rounded-lg border bg-card p-3">
           <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Orphan</div>
@@ -196,7 +201,9 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
           <option value="Running">Running</option>
           <option value="Waiting">Waiting</option>
           <option value="Scheduled">Scheduled</option>
+          <option value="Paused">Paused</option>
           <option value="Failed">Failed</option>
+          <option value="Orphan">Orphan</option>
         </select>
       </div>
 

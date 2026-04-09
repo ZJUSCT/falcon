@@ -40,7 +40,7 @@ export interface Repo {
 
 export interface Job {
   id: string;
-  status: 'Waiting' | 'Scheduled' | 'Running' | 'Orphan';
+  status: 'Waiting' | 'Scheduled' | 'Running' | 'Paused' | 'Orphan';
   updated_at: string;
   last_success_at: string;
   last_failure_at: string;
