@@ -187,3 +187,62 @@ const (
 	WorkerStatusOnline  = "Online"
 	WorkerStatusOffline = "Offline"
 )
+
+// ---------------------------------------------------------------------------
+// ZFS types
+// ---------------------------------------------------------------------------
+
+// ZFSDatasetInfo holds per-dataset ZFS properties.
+type ZFSDatasetInfo struct {
+	Name              string `json:"name"`
+	MountPoint        string `json:"mountpoint"`
+	Used              int64  `json:"used"`
+	Available         int64  `json:"available"`
+	Referenced        int64  `json:"referenced"`
+	LogicalUsed       int64  `json:"logicalused"`
+	LogicalReferenced int64  `json:"logicalreferenced"`
+	CompressRatio     string `json:"compressratio"`
+	UsedBySnapshots   int64  `json:"usedbysnapshots"`
+	UsedByDataset     int64  `json:"usedbydataset"`
+	UsedByChildren    int64  `json:"usedbychildren"`
+	Written           int64  `json:"written"`
+	Creation          int64  `json:"creation"`
+	Quota             int64  `json:"quota"`
+	RefQuota          int64  `json:"refquota"`
+	Reservation       int64  `json:"reservation"`
+	RecordSize        int64  `json:"recordsize"`
+	Compression       string `json:"compression"`
+	RepoID            string `json:"repo_id,omitempty"`
+}
+
+// ZFSSnapshotInfo holds ZFS snapshot metadata.
+type ZFSSnapshotInfo struct {
+	Name       string `json:"name"`
+	Dataset    string `json:"dataset"`
+	SnapName   string `json:"snap_name"`
+	Used       int64  `json:"used"`
+	Referenced int64  `json:"referenced"`
+	Creation   int64  `json:"creation"`
+}
+
+// ZFSPoolInfo holds zpool-level information.
+type ZFSPoolInfo struct {
+	Name          string `json:"name"`
+	Size          int64  `json:"size"`
+	Allocated     int64  `json:"allocated"`
+	Free          int64  `json:"free"`
+	Fragmentation string `json:"fragmentation"`
+	CapacityPct   string `json:"capacity_pct"`
+	Dedup         string `json:"dedup"`
+	Health        string `json:"health"`
+	AltRoot       string `json:"altroot"`
+}
+
+// ZFSWorkerReport is the periodic push from worker with all dataset info.
+type ZFSWorkerReport struct {
+	WorkerName string            `json:"worker_name"`
+	Pools      []ZFSPoolInfo     `json:"pools"`
+	Datasets   []ZFSDatasetInfo  `json:"datasets"`
+	Snapshots  []ZFSSnapshotInfo `json:"snapshots"`
+	Timestamp  int64             `json:"timestamp"`
+}

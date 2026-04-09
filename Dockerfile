@@ -18,16 +18,23 @@ RUN sed -i 's/deb.debian.org/mirrors.zju.edu.cn/g' /etc/apt/sources.list.d/debia
 RUN apt update && apt install -y git build-essential
 
 COPY go.mod go.sum ./
-RUN go env -w GOPROXY=https://goproxy.cn,direct && go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go env -w GOPROXY=https://goproxy.cn,direct && go mod download
 
 COPY . .
 
 COPY --from=ui-build /app/ui/dist ./ui/dist
 
-RUN go build -o /out/mirrorgo ./
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    go build -o /out/mirrorgo ./
 
 FROM mirror.star-home.top:4430/library/debian:trixie-slim AS runtime
 WORKDIR /
+
+RUN sed -i 's/deb.debian.org/mirrors.zju.edu.cn/g' /etc/apt/sources.list.d/debian.sources && \
+    sed -i 's/Components: main/Components: main contrib/' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && apt-get install -y --no-install-recommends zfsutils-linux && \
+    rm -rf /var/lib/apt/lists/*
 
 USER 0:0
 

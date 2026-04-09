@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -154,6 +155,83 @@ type MirrorStatus struct {
 	LastFailure   int64             `json:"lastFailure"`
 }
 
+func formatSizeForMirrorZ(bytes int64) string {
+	const (
+		GiB = 1024 * 1024 * 1024
+		TiB = 1024 * GiB
+	)
+	if bytes >= TiB {
+		return fmt.Sprintf("%.1f TiB", float64(bytes)/float64(TiB))
+	}
+	return fmt.Sprintf("%.1f GiB", float64(bytes)/float64(GiB))
+}
+
+// buildRepoSizes resolves each repo to its authoritative worker and returns
+// a map of repo ID -> referenced bytes from that worker's ZFS report.
+//
+// Worker resolution order:
+//  1. repo.sync.node (explicit pinning — deterministic)
+//  2. last action's worker_name (actual execution history — most accurate)
+//  3. nodeSelector match (affinity-based — fallback when no action history)
+//
+// Caller must hold ReposMu and JobsMu (at least RLock).
+func (s *State) buildRepoSizes() map[string]int64 {
+	// Build per-worker, per-repoID lookup: worker -> repoID -> referenced
+	s.ZFSReportsMu.RLock()
+	workerDS := make(map[string]map[string]int64) // worker -> repoID -> referenced
+	for wName, report := range s.ZFSReports {
+		m := make(map[string]int64)
+		for _, ds := range report.Datasets {
+			if ds.RepoID != "" {
+				m[ds.RepoID] = ds.Referenced
+			}
+		}
+		workerDS[wName] = m
+	}
+	s.ZFSReportsMu.RUnlock()
+
+	repoSizes := make(map[string]int64)
+	for repoID, repo := range s.Repos {
+		worker := ""
+
+		// 1. Explicit node pinning
+		if repo.SyncParams.Node != "" {
+			worker = repo.SyncParams.Node
+		}
+
+		// 2. Last action's worker (most accurate — where data actually lives)
+		if worker == "" {
+			if job, ok := s.Jobs[repoID]; ok && len(job.Actions) > 0 {
+				lastActionID := job.Actions[len(job.Actions)-1]
+				if a := s.GetActionByIDFromActiveOrDB(lastActionID); a != nil && a.WorkerName != "" {
+					worker = a.WorkerName
+				}
+			}
+		}
+
+		// 3. nodeSelector — fallback when no action history yet
+		if worker == "" && len(repo.SyncParams.NodeSelector) > 0 {
+			for wName := range workerDS {
+				if w, ok := s.WorkerMgr.GetWorker(wName); ok && MatchWorker(w, &repo) {
+					worker = wName
+					break
+				}
+			}
+		}
+
+		if worker == "" {
+			continue
+		}
+
+		if wm, ok := workerDS[worker]; ok {
+			if sz, ok := wm[repoID]; ok {
+				repoSizes[repoID] = sz
+			}
+		}
+	}
+	return repoSizes
+}
+
 func isSyncingActionStatus(status string) bool {
 	return status == shared.ActionStatusRunning || status == shared.ActionStatusReconciling
 }
@@ -185,6 +263,8 @@ func (s *State) GenerateMirrorZ() MirrorZ {
 	s.JobsMu.RLock()
 	defer s.ReposMu.RUnlock()
 	defer s.JobsMu.RUnlock()
+
+	repoSizes := s.buildRepoSizes()
 
 	mirrors := make([]MirrorZMirror, 0, len(s.Repos))
 	for repoID, repo := range s.Repos {
@@ -271,6 +351,11 @@ func (s *State) GenerateMirrorZ() MirrorZ {
 			}
 		}
 
+		sizeStr := ""
+		if sz, ok := repoSizes[repoID]; ok && sz > 0 {
+			sizeStr = formatSizeForMirrorZ(sz)
+		}
+
 		mirrors = append(mirrors, MirrorZMirror{
 			CName:    repoID,
 			Desc:     desc,
@@ -278,7 +363,7 @@ func (s *State) GenerateMirrorZ() MirrorZ {
 			Status:   status,
 			Help:     "/docs/" + repoID + "/",
 			Upstream: repo.Info.Upstream,
-			Size:     "",
+			Size:     sizeStr,
 			Disable:  false,
 		})
 	}
@@ -317,6 +402,8 @@ func (s *State) getMirrorStatus() ([]MirrorStatus, error) {
 	defer s.ReposMu.RUnlock()
 	defer s.JobsMu.RUnlock()
 
+	repoSizes := s.buildRepoSizes()
+
 	var mirrors []MirrorStatus
 
 	for repoID, repo := range s.Repos {
@@ -328,7 +415,7 @@ func (s *State) getMirrorStatus() ([]MirrorStatus, error) {
 			Name:     repo.Info.Name,
 			Desc:     repo.Info.Description,
 			Upstream: repo.Info.Upstream,
-			Size:     0,
+			Size:     repoSizes[repoID],
 		}
 
 		if !exists {

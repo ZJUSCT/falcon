@@ -839,6 +839,17 @@ func (s *State) StartWebServer(addr, authToken string) {
 	mux.HandleFunc("/api/workers", s.handleWorkers)
 	mux.HandleFunc("/api/workers/remove", s.handleWorkersRemove)
 
+	// ZFS API routes.
+	mux.HandleFunc("/api/zfs/refresh", s.handleZFSRefresh)
+	mux.HandleFunc("/api/zfs/report", s.handleZFSReport)
+	mux.HandleFunc("/api/zfs/pools", s.handleZFSPools)
+	mux.HandleFunc("/api/zfs/datasets", s.handleZFSDatasets)
+	mux.HandleFunc("/api/zfs/snapshots", s.handleZFSSnapshots)
+	mux.HandleFunc("/api/zfs/snapshots/create", s.handleZFSCreateSnapshot)
+	mux.HandleFunc("/api/zfs/snapshots/destroy", s.handleZFSDestroySnapshot)
+	mux.HandleFunc("/api/zfs/datasets/create", s.handleZFSCreateDataset)
+	mux.HandleFunc("/api/zfs/datasets/set_property", s.handleZFSSetProperty)
+
 	// MirrorZ JSON endpoint.
 	mux.HandleFunc("/mirrorz.json", s.handleMirrorZ)
 

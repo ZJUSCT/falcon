@@ -9,6 +9,7 @@ import { WorkersView } from '@/components/workers-view';
 import { ActionsView } from '@/components/actions-view';
 import { QueueView } from '@/components/queue-view';
 import { ConfigsView } from '@/components/configs-view';
+import { StorageView } from '@/components/storage-view';
 import { ActionDetail } from '@/components/action-detail';
 
 type RouteType =
@@ -30,7 +31,7 @@ export default function Dashboard() {
       const id = hash.substring(8);
       if (id) return { type: 'action-detail', actionId: id };
     }
-    const pages: PageId[] = ['overview', 'mirrors', 'workers', 'queue', 'actions', 'configs'];
+    const pages: PageId[] = ['overview', 'mirrors', 'workers', 'storage', 'queue', 'actions', 'configs'];
     return pages.includes(hash as PageId) ? (hash as PageId) : 'overview';
   };
 
@@ -78,6 +79,8 @@ export default function Dashboard() {
         return <MirrorsView onMirrorClick={(id) => navigate({ type: 'mirror-detail', mirrorId: id })} />;
       case 'workers':
         return <WorkersView />;
+      case 'storage':
+        return <StorageView />;
       case 'queue':
         return <QueueView />;
       case 'actions':

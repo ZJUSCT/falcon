@@ -6,9 +6,9 @@ import { StatusBadge } from '@/components/status-badge';
 import { RelativeTime } from '@/components/relative-time';
 import { TriggerButton } from '@/components/trigger-button';
 import { apiClient } from '@/lib/api';
-import { Job, Repo, Action } from '@/types';
+import { Job, Repo, Action, ZFSDatasetInfo } from '@/types';
 import { ArrowLeft } from 'lucide-react';
-import { formatDuration2 } from '@/lib/utils';
+import { formatDuration2, formatBytes } from '@/lib/utils';
 
 interface MirrorDetailProps {
   mirrorId: string;
@@ -20,6 +20,7 @@ export function MirrorDetail({ mirrorId, onBack, onActionClick }: MirrorDetailPr
   const [repo, setRepo] = useState<Repo | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [actions, setActions] = useState<Action[]>([]);
+  const [datasetInfo, setDatasetInfo] = useState<ZFSDatasetInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -41,6 +42,13 @@ export function MirrorDetail({ mirrorId, onBack, onActionClick }: MirrorDetailPr
     } catch (err) {
       console.warn('Background mirror detail refresh failed:', err);
     }
+    try {
+      const reports = await apiClient.getZFSReports();
+      for (const report of reports) {
+        const ds = report.datasets.find(d => d.repo_id === mirrorId);
+        if (ds) { setDatasetInfo(ds); break; }
+      }
+    } catch { /* ZFS data is optional */ }
   };
 
   const forceRefresh = () => {
@@ -51,10 +59,11 @@ export function MirrorDetail({ mirrorId, onBack, onActionClick }: MirrorDetailPr
     const fetchInitial = async () => {
       try {
         setLoading(true);
-        const [repos, jobs, actionsData] = await Promise.all([
+        const [repos, jobs, actionsData, zfsReports] = await Promise.all([
           apiClient.getRepos(),
           apiClient.getJobs(),
           apiClient.getActionsByRepo(mirrorId, 50),
+          apiClient.getZFSReports().catch(() => []),
         ]);
         setRepo(repos.find(r => r.id === mirrorId) || null);
         setJob(jobs.find(j => j.id === mirrorId) || null);
@@ -64,6 +73,10 @@ export function MirrorDetail({ mirrorId, onBack, onActionClick }: MirrorDetailPr
           return bT - aT;
         });
         setActions(sorted);
+        for (const report of zfsReports) {
+          const ds = report.datasets.find((d: { repo_id?: string }) => d.repo_id === mirrorId);
+          if (ds) { setDatasetInfo(ds); break; }
+        }
         setError(null);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to fetch mirror details');
@@ -195,6 +208,57 @@ export function MirrorDetail({ mirrorId, onBack, onActionClick }: MirrorDetailPr
             <div>
               <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Next Attempt</div>
               <RelativeTime date={job.next_attempt_at} variant="compact" />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Storage Info (from ZFS) */}
+      {datasetInfo && (
+        <div className="rounded-lg border border-border bg-card p-4 space-y-3">
+          <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Storage (ZFS)</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 text-sm">
+            <div>
+              <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Dataset</div>
+              <div className="font-mono text-xs">{datasetInfo.name}</div>
+            </div>
+            <div>
+              <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Used</div>
+              <div className="font-mono">{formatBytes(datasetInfo.used)}</div>
+            </div>
+            <div>
+              <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Referenced</div>
+              <div className="font-mono">{formatBytes(datasetInfo.referenced)}</div>
+            </div>
+            <div>
+              <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Available</div>
+              <div className="font-mono">{formatBytes(datasetInfo.available)}</div>
+            </div>
+            <div>
+              <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Compression</div>
+              <div className="font-mono">{datasetInfo.compression} ({datasetInfo.compressratio})</div>
+            </div>
+            <div>
+              <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Logical Used</div>
+              <div className="font-mono">{formatBytes(datasetInfo.logicalused)}</div>
+            </div>
+            <div>
+              <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Snapshots</div>
+              <div className="font-mono">{formatBytes(datasetInfo.usedbysnapshots)}</div>
+            </div>
+            <div>
+              <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Written</div>
+              <div className="font-mono">{formatBytes(datasetInfo.written)}</div>
+            </div>
+            {datasetInfo.quota > 0 && (
+              <div>
+                <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Quota</div>
+                <div className="font-mono">{formatBytes(datasetInfo.quota)}</div>
+              </div>
+            )}
+            <div>
+              <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Record Size</div>
+              <div className="font-mono">{formatBytes(datasetInfo.recordsize)}</div>
             </div>
           </div>
         </div>

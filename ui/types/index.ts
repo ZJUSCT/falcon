@@ -103,3 +103,55 @@ export interface LogListResponse {
   action_id: string;
   entries: LogEntry[];
 }
+
+// ZFS types
+export interface ZFSDatasetInfo {
+  name: string;
+  mountpoint: string;
+  used: number;
+  available: number;
+  referenced: number;
+  logicalused: number;
+  logicalreferenced: number;
+  compressratio: string;
+  usedbysnapshots: number;
+  usedbydataset: number;
+  usedbychildren: number;
+  written: number;
+  creation: number;
+  quota: number;
+  refquota: number;
+  reservation: number;
+  recordsize: number;
+  compression: string;
+  repo_id?: string;
+}
+
+export interface ZFSSnapshotInfo {
+  name: string;
+  dataset: string;
+  snap_name: string;
+  used: number;
+  referenced: number;
+  creation: number;
+}
+
+export interface ZFSPoolInfo {
+  name: string;
+  size: number;
+  allocated: number;
+  free: number;
+  fragmentation: string;
+  capacity_pct: string;
+  dedup: string;
+  health: string;
+  altroot: string;
+}
+
+export interface ZFSWorkerReport {
+  worker_name: string;
+  pools: ZFSPoolInfo[];
+  datasets: ZFSDatasetInfo[];
+  snapshots: ZFSSnapshotInfo[];
+  timestamp: number;
+}

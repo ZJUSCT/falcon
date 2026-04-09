@@ -1,4 +1,4 @@
-import { Repo, Job, Action, QueueItem, QueueResponse, LogListResponse, Worker } from '@/types';
+import { Repo, Job, Action, QueueItem, QueueResponse, LogListResponse, Worker, ZFSWorkerReport, ZFSPoolInfo, ZFSDatasetInfo, ZFSSnapshotInfo } from '@/types';
 
 const API_BASE = '/api';
 
@@ -234,6 +234,85 @@ class ApiClient {
 
   getLogStreamUrl(actionId: string, fileName: string, from: 'start' | 'end' = 'end'): string {
     return `${API_BASE}/logs/stream?action_id=${encodeURIComponent(actionId)}&file=${encodeURIComponent(fileName)}&from=${from}`;
+  }
+
+  // ZFS Management APIs
+  async refreshZFS(): Promise<void> {
+    const response = await fetch(`${API_BASE}/zfs/refresh`, { method: 'POST' });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: response.statusText }));
+      throw new Error(errorData.error || response.statusText);
+    }
+  }
+
+  async getZFSReports(): Promise<ZFSWorkerReport[]> {
+    return this.fetch<ZFSWorkerReport[]>('/zfs/report');
+  }
+
+  async getZFSReport(worker: string): Promise<ZFSWorkerReport> {
+    return this.fetch<ZFSWorkerReport>(`/zfs/report?worker=${encodeURIComponent(worker)}`);
+  }
+
+  async getZFSPools(worker: string): Promise<ZFSPoolInfo[]> {
+    return this.fetch<ZFSPoolInfo[]>(`/zfs/pools?worker=${encodeURIComponent(worker)}`);
+  }
+
+  async getZFSDatasets(worker: string): Promise<ZFSDatasetInfo[]> {
+    return this.fetch<ZFSDatasetInfo[]>(`/zfs/datasets?worker=${encodeURIComponent(worker)}`);
+  }
+
+  async getZFSSnapshots(worker: string, dataset?: string): Promise<ZFSSnapshotInfo[]> {
+    let url = `/zfs/snapshots?worker=${encodeURIComponent(worker)}`;
+    if (dataset) url += `&dataset=${encodeURIComponent(dataset)}`;
+    return this.fetch<ZFSSnapshotInfo[]>(url);
+  }
+
+  async createZFSSnapshot(worker: string, dataset: string, snapName: string, recursive: boolean = false): Promise<void> {
+    const response = await fetch(`${API_BASE}/zfs/snapshots/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ worker, dataset, snap_name: snapName, recursive }),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: response.statusText }));
+      throw new Error(errorData.error || response.statusText);
+    }
+  }
+
+  async destroyZFSSnapshot(worker: string, snapshot: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/zfs/snapshots/destroy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ worker, snapshot }),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: response.statusText }));
+      throw new Error(errorData.error || response.statusText);
+    }
+  }
+
+  async createZFSDataset(worker: string, name: string, properties?: Record<string, string>): Promise<void> {
+    const response = await fetch(`${API_BASE}/zfs/datasets/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ worker, name, properties }),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: response.statusText }));
+      throw new Error(errorData.error || response.statusText);
+    }
+  }
+
+  async setZFSProperty(worker: string, dataset: string, property: string, value: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/zfs/datasets/set_property`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ worker, dataset, property, value }),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: response.statusText }));
+      throw new Error(errorData.error || response.statusText);
+    }
   }
 }
 

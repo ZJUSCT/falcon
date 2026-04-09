@@ -167,3 +167,125 @@ type ActionStatusResponse struct {
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at"`
 }
+
+// ---------------------------------------------------------------------------
+// ZFS WebSocket message types
+// ---------------------------------------------------------------------------
+
+// Master -> Worker: request full ZFS report
+type WSZFSGetReport struct {
+	Type  string `json:"type"` // "zfs_get_report"
+	ReqID string `json:"req_id"`
+}
+
+type WSZFSGetReportResult struct {
+	Type   string          `json:"type"` // "zfs_get_report_result"
+	ReqID  string          `json:"req_id"`
+	OK     bool            `json:"ok"`
+	Error  string          `json:"error,omitempty"`
+	Report ZFSWorkerReport `json:"report,omitempty"`
+}
+
+// Master -> Worker: request ZFS datasets
+type WSZFSGetDatasets struct {
+	Type  string `json:"type"` // "zfs_get_datasets"
+	ReqID string `json:"req_id"`
+}
+
+type WSZFSGetDatasetsResult struct {
+	Type     string           `json:"type"` // "zfs_get_datasets_result"
+	ReqID    string           `json:"req_id"`
+	OK       bool             `json:"ok"`
+	Error    string           `json:"error,omitempty"`
+	Datasets []ZFSDatasetInfo `json:"datasets,omitempty"`
+}
+
+// Master -> Worker: request ZFS pools
+type WSZFSGetPools struct {
+	Type  string `json:"type"` // "zfs_get_pools"
+	ReqID string `json:"req_id"`
+}
+
+type WSZFSGetPoolsResult struct {
+	Type  string        `json:"type"` // "zfs_get_pools_result"
+	ReqID string        `json:"req_id"`
+	OK    bool          `json:"ok"`
+	Error string        `json:"error,omitempty"`
+	Pools []ZFSPoolInfo `json:"pools,omitempty"`
+}
+
+// Master -> Worker: request ZFS snapshots
+type WSZFSGetSnapshots struct {
+	Type    string `json:"type"` // "zfs_get_snapshots"
+	ReqID   string `json:"req_id"`
+	Dataset string `json:"dataset"`
+}
+
+type WSZFSGetSnapshotsResult struct {
+	Type      string            `json:"type"` // "zfs_get_snapshots_result"
+	ReqID     string            `json:"req_id"`
+	OK        bool              `json:"ok"`
+	Error     string            `json:"error,omitempty"`
+	Snapshots []ZFSSnapshotInfo `json:"snapshots,omitempty"`
+}
+
+// Master -> Worker: create ZFS snapshot
+type WSZFSCreateSnapshot struct {
+	Type      string `json:"type"` // "zfs_create_snapshot"
+	ReqID     string `json:"req_id"`
+	Dataset   string `json:"dataset"`
+	SnapName  string `json:"snap_name"`
+	Recursive bool   `json:"recursive"`
+}
+
+type WSZFSCreateSnapshotResult struct {
+	Type  string `json:"type"` // "zfs_create_snapshot_result"
+	ReqID string `json:"req_id"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// Master -> Worker: destroy ZFS snapshot
+type WSZFSDestroySnapshot struct {
+	Type     string `json:"type"` // "zfs_destroy_snapshot"
+	ReqID    string `json:"req_id"`
+	Snapshot string `json:"snapshot"`
+}
+
+type WSZFSDestroySnapshotResult struct {
+	Type  string `json:"type"` // "zfs_destroy_snapshot_result"
+	ReqID string `json:"req_id"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// Master -> Worker: create ZFS dataset
+type WSZFSCreateDataset struct {
+	Type       string            `json:"type"` // "zfs_create_dataset"
+	ReqID      string            `json:"req_id"`
+	Name       string            `json:"name"`
+	Properties map[string]string `json:"properties,omitempty"`
+}
+
+type WSZFSCreateDatasetResult struct {
+	Type  string `json:"type"` // "zfs_create_dataset_result"
+	ReqID string `json:"req_id"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// Master -> Worker: set ZFS dataset property
+type WSZFSSetProperty struct {
+	Type     string `json:"type"` // "zfs_set_property"
+	ReqID    string `json:"req_id"`
+	Dataset  string `json:"dataset"`
+	Property string `json:"property"`
+	Value    string `json:"value"`
+}
+
+type WSZFSSetPropertyResult struct {
+	Type  string `json:"type"` // "zfs_set_property_result"
+	ReqID string `json:"req_id"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}

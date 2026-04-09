@@ -134,6 +134,13 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		case "log_stream_data":
 			h.routeResponse(data, false)
 
+		case "zfs_get_report_result",
+			"zfs_get_datasets_result", "zfs_get_pools_result", "zfs_get_snapshots_result",
+			"zfs_create_snapshot_result", "zfs_destroy_snapshot_result",
+			"zfs_create_dataset_result",
+			"zfs_set_property_result":
+			h.routeResponse(data, true)
+
 		default:
 			log.Warn().Str("type", env.Type).Str("worker", name).Msg("unknown websocket message type")
 		}
@@ -432,4 +439,146 @@ func (h *WSHub) IsConnected(workerName string) bool {
 	defer h.mu.RUnlock()
 	_, ok := h.conns[workerName]
 	return ok
+}
+
+// ---------------------------------------------------------------------------
+// ZFS proxy methods
+// ---------------------------------------------------------------------------
+
+func (h *WSHub) ZFSGetReport(workerName string) (*shared.ZFSWorkerReport, error) {
+	reqID := genReqID()
+	data, err := h.request(workerName, shared.WSZFSGetReport{Type: "zfs_get_report", ReqID: reqID}, reqID, 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	var result shared.WSZFSGetReportResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("%s", result.Error)
+	}
+	return &result.Report, nil
+}
+
+func (h *WSHub) ZFSGetDatasets(workerName string) ([]shared.ZFSDatasetInfo, error) {
+	reqID := genReqID()
+	data, err := h.request(workerName, shared.WSZFSGetDatasets{Type: "zfs_get_datasets", ReqID: reqID}, reqID, 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	var result shared.WSZFSGetDatasetsResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("%s", result.Error)
+	}
+	return result.Datasets, nil
+}
+
+func (h *WSHub) ZFSGetPools(workerName string) ([]shared.ZFSPoolInfo, error) {
+	reqID := genReqID()
+	data, err := h.request(workerName, shared.WSZFSGetPools{Type: "zfs_get_pools", ReqID: reqID}, reqID, 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	var result shared.WSZFSGetPoolsResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("%s", result.Error)
+	}
+	return result.Pools, nil
+}
+
+func (h *WSHub) ZFSGetSnapshots(workerName, dataset string) ([]shared.ZFSSnapshotInfo, error) {
+	reqID := genReqID()
+	data, err := h.request(workerName, shared.WSZFSGetSnapshots{Type: "zfs_get_snapshots", ReqID: reqID, Dataset: dataset}, reqID, 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	var result shared.WSZFSGetSnapshotsResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("%s", result.Error)
+	}
+	return result.Snapshots, nil
+}
+
+func (h *WSHub) ZFSCreateSnapshot(workerName, dataset, snapName string, recursive bool) error {
+	reqID := genReqID()
+	data, err := h.request(workerName, shared.WSZFSCreateSnapshot{
+		Type: "zfs_create_snapshot", ReqID: reqID,
+		Dataset: dataset, SnapName: snapName, Recursive: recursive,
+	}, reqID, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	var result shared.WSZFSCreateSnapshotResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("%s", result.Error)
+	}
+	return nil
+}
+
+func (h *WSHub) ZFSDestroySnapshot(workerName, snapshot string) error {
+	reqID := genReqID()
+	data, err := h.request(workerName, shared.WSZFSDestroySnapshot{
+		Type: "zfs_destroy_snapshot", ReqID: reqID, Snapshot: snapshot,
+	}, reqID, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	var result shared.WSZFSDestroySnapshotResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("%s", result.Error)
+	}
+	return nil
+}
+
+func (h *WSHub) ZFSCreateDataset(workerName, name string, properties map[string]string) error {
+	reqID := genReqID()
+	data, err := h.request(workerName, shared.WSZFSCreateDataset{
+		Type: "zfs_create_dataset", ReqID: reqID, Name: name, Properties: properties,
+	}, reqID, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	var result shared.WSZFSCreateDatasetResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("%s", result.Error)
+	}
+	return nil
+}
+
+func (h *WSHub) ZFSSetProperty(workerName, dataset, property, value string) error {
+	reqID := genReqID()
+	data, err := h.request(workerName, shared.WSZFSSetProperty{
+		Type: "zfs_set_property", ReqID: reqID,
+		Dataset: dataset, Property: property, Value: value,
+	}, reqID, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	var result shared.WSZFSSetPropertyResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("%s", result.Error)
+	}
+	return nil
 }

@@ -118,6 +118,7 @@ func Run(cfg WorkerConfig) {
 	go wsClient.ConnectLoop()
 	go heartbeatLoop(ctx, cfg.MasterURL, cfg.AuthToken, cfg.Name, tracker)
 	go cleanupLoop(ctx, tracker)
+	// ZFS report is now pulled by master on demand; no push loop needed.
 
 	// 10. Wait for SIGINT/SIGTERM
 	sigCh := make(chan os.Signal, 1)

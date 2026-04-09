@@ -6,8 +6,20 @@ import { StatusBadge } from '@/components/status-badge';
 import { RelativeTime } from '@/components/relative-time';
 import { TriggerButton } from '@/components/trigger-button';
 import { apiClient } from '@/lib/api';
-import { Job, Repo, Action } from '@/types';
+import { Job, Repo, Action, Worker, ZFSWorkerReport } from '@/types';
+import { formatBytes } from '@/lib/utils';
 import { Search, Trash2 } from 'lucide-react';
+
+function matchWorker(worker: Worker, repo: Repo): boolean {
+  if (repo.sync.node && worker.name !== repo.sync.node) return false;
+  const sel = repo.sync.nodeSelector;
+  if (sel) {
+    for (const [k, v] of Object.entries(sel)) {
+      if (!worker.labels || worker.labels[k] !== v) return false;
+    }
+  }
+  return true;
+}
 
 interface MirrorsViewProps {
   onMirrorClick: (id: string) => void;
@@ -21,6 +33,8 @@ interface MirrorRow {
 
 export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
   const [mirrors, setMirrors] = useState<MirrorRow[]>([]);
+  const [workers, setWorkers] = useState<Worker[]>([]);
+  const [zfsReports, setZfsReports] = useState<ZFSWorkerReport[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -61,11 +75,15 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
 
   const fetchUpdates = async () => {
     try {
-      const [repos, jobs] = await Promise.all([
+      const [repos, jobs, workersData, reportsData] = await Promise.all([
         apiClient.getRepos(),
         apiClient.getJobs(),
+        apiClient.getWorkers(),
+        apiClient.getZFSReports().catch(() => []),
       ]);
       setMirrors(buildMirrors(repos, jobs));
+      setWorkers(workersData);
+      setZfsReports(reportsData);
       setError(null);
     } catch (err) {
       console.warn('Background mirrors refresh failed:', err);
@@ -91,11 +109,15 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
     const fetchInitial = async () => {
       try {
         setLoading(true);
-        const [repos, jobs] = await Promise.all([
+        const [repos, jobs, workersData, reportsData] = await Promise.all([
           apiClient.getRepos(),
           apiClient.getJobs(),
+          apiClient.getWorkers(),
+          apiClient.getZFSReports().catch(() => []),
         ]);
         setMirrors(buildMirrors(repos, jobs));
+        setWorkers(workersData);
+        setZfsReports(reportsData);
         setError(null);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to fetch mirrors');
@@ -220,10 +242,11 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                   <th className="px-3 py-2 text-center">Job</th>
                   <th className="px-3 py-2 text-center">Status</th>
                   <th className="hidden md:table-cell px-3 py-2 text-center">Last Action</th>
-                  <th className="hidden lg:table-cell px-3 py-2 text-left">Worker</th>
+                  <th className="hidden lg:table-cell px-2 py-2 text-left">Worker</th>
+                  <th className="hidden lg:table-cell px-2 py-2 text-right">Size</th>
                   <th className="hidden md:table-cell px-3 py-2 text-left">Next Attempt</th>
                   <th className="hidden md:table-cell px-3 py-2 text-left">Last Attempt</th>
-                  <th className="hidden lg:table-cell px-3 py-2 text-left">Last Success</th>
+                  <th className="hidden xl:table-cell px-3 py-2 text-left">Last Success</th>
                   <th className="hidden xl:table-cell px-3 py-2 text-left">Last Failure</th>
                 </tr>
               </thead>
@@ -231,7 +254,13 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                 {filtered.map(m => {
                   const job = m.job;
                   const lastActionStatus = (job?.last_action_status || '').trim();
-                  const workerLabel = m.repo?.sync.node || '';
+                  const matched = m.repo ? workers.filter(w => matchWorker(w, m.repo!)) : [];
+                  // Find size from ZFS reports
+                  let repoSize = 0;
+                  for (const report of zfsReports) {
+                    const ds = report.datasets?.find(d => d.repo_id === m.id);
+                    if (ds) { repoSize = ds.referenced; break; }
+                  }
 
                   return (
                     <tr
@@ -296,8 +325,23 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                           <StatusBadge status="Unknown" />
                         )}
                       </td>
-                      <td className="hidden lg:table-cell px-3 py-2 align-top">
-                        <span className="font-mono text-xs text-muted-foreground">{workerLabel || '--'}</span>
+                      <td className="hidden lg:table-cell px-2 py-2 align-top whitespace-nowrap">
+                        {matched.length > 0 ? (
+                          <div className="flex flex-wrap gap-0.5">
+                            {matched.map(w => (
+                              <span key={w.name} className={`px-1 py-0 text-[10px] rounded font-mono leading-tight ${w.status === 'Online' ? 'bg-green-500/15 text-green-400' : 'bg-muted text-muted-foreground'}`}>
+                                {w.name}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="font-mono text-xs text-muted-foreground">--</span>
+                        )}
+                      </td>
+                      <td className="hidden lg:table-cell px-2 py-2 align-top text-right whitespace-nowrap">
+                        <span className="font-mono text-xs text-muted-foreground">
+                          {repoSize > 0 ? formatBytes(repoSize) : '--'}
+                        </span>
                       </td>
                       <td className="hidden md:table-cell px-3 py-2 align-top">
                         {job ? (

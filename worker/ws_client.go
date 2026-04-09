@@ -162,6 +162,47 @@ func (ws *WSClient) readLoop() {
 			// Handled by cancellation in handleLogStream via streamMu.
 			ws.stopStream(data)
 
+		case "zfs_get_report":
+			var msg shared.WSZFSGetReport
+			if err := json.Unmarshal(data, &msg); err == nil {
+				go ws.handleZFSGetReport(msg)
+			}
+		case "zfs_get_datasets":
+			var msg shared.WSZFSGetDatasets
+			if err := json.Unmarshal(data, &msg); err == nil {
+				go ws.handleZFSGetDatasets(msg)
+			}
+		case "zfs_get_pools":
+			var msg shared.WSZFSGetPools
+			if err := json.Unmarshal(data, &msg); err == nil {
+				go ws.handleZFSGetPools(msg)
+			}
+		case "zfs_get_snapshots":
+			var msg shared.WSZFSGetSnapshots
+			if err := json.Unmarshal(data, &msg); err == nil {
+				go ws.handleZFSGetSnapshots(msg)
+			}
+		case "zfs_create_snapshot":
+			var msg shared.WSZFSCreateSnapshot
+			if err := json.Unmarshal(data, &msg); err == nil {
+				go ws.handleZFSCreateSnapshot(msg)
+			}
+		case "zfs_destroy_snapshot":
+			var msg shared.WSZFSDestroySnapshot
+			if err := json.Unmarshal(data, &msg); err == nil {
+				go ws.handleZFSDestroySnapshot(msg)
+			}
+		case "zfs_create_dataset":
+			var msg shared.WSZFSCreateDataset
+			if err := json.Unmarshal(data, &msg); err == nil {
+				go ws.handleZFSCreateDataset(msg)
+			}
+		case "zfs_set_property":
+			var msg shared.WSZFSSetProperty
+			if err := json.Unmarshal(data, &msg); err == nil {
+				go ws.handleZFSSetProperty(msg)
+			}
+
 		default:
 			log.Warn().Str("type", env.Type).Msg("WebSocket: unknown message type from master")
 		}
@@ -318,6 +359,100 @@ func stopAllStreams() {
 		delete(activeStreams, reqID)
 	}
 	streamMu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// ZFS request handlers
+// ---------------------------------------------------------------------------
+
+func (ws *WSClient) handleZFSGetReport(msg shared.WSZFSGetReport) {
+	report := BuildZFSReport(ws.name)
+	_ = ws.sendJSON(shared.WSZFSGetReportResult{
+		Type: "zfs_get_report_result", ReqID: msg.ReqID, OK: true, Report: report,
+	})
+}
+
+func (ws *WSClient) handleZFSGetDatasets(msg shared.WSZFSGetDatasets) {
+	datasets, err := ListDatasets("")
+	if err != nil {
+		_ = ws.sendJSON(shared.WSZFSGetDatasetsResult{
+			Type: "zfs_get_datasets_result", ReqID: msg.ReqID, OK: false, Error: err.Error(),
+		})
+		return
+	}
+	_ = ws.sendJSON(shared.WSZFSGetDatasetsResult{
+		Type: "zfs_get_datasets_result", ReqID: msg.ReqID, OK: true, Datasets: datasets,
+	})
+}
+
+func (ws *WSClient) handleZFSGetPools(msg shared.WSZFSGetPools) {
+	pools, err := ListPools()
+	if err != nil {
+		_ = ws.sendJSON(shared.WSZFSGetPoolsResult{
+			Type: "zfs_get_pools_result", ReqID: msg.ReqID, OK: false, Error: err.Error(),
+		})
+		return
+	}
+	_ = ws.sendJSON(shared.WSZFSGetPoolsResult{
+		Type: "zfs_get_pools_result", ReqID: msg.ReqID, OK: true, Pools: pools,
+	})
+}
+
+func (ws *WSClient) handleZFSGetSnapshots(msg shared.WSZFSGetSnapshots) {
+	snaps, err := ListSnapshots(msg.Dataset)
+	if err != nil {
+		_ = ws.sendJSON(shared.WSZFSGetSnapshotsResult{
+			Type: "zfs_get_snapshots_result", ReqID: msg.ReqID, OK: false, Error: err.Error(),
+		})
+		return
+	}
+	_ = ws.sendJSON(shared.WSZFSGetSnapshotsResult{
+		Type: "zfs_get_snapshots_result", ReqID: msg.ReqID, OK: true, Snapshots: snaps,
+	})
+}
+
+func (ws *WSClient) handleZFSCreateSnapshot(msg shared.WSZFSCreateSnapshot) {
+	err := CreateSnapshot(msg.Dataset, msg.SnapName, msg.Recursive)
+	resp := shared.WSZFSCreateSnapshotResult{
+		Type: "zfs_create_snapshot_result", ReqID: msg.ReqID, OK: err == nil,
+	}
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	_ = ws.sendJSON(resp)
+}
+
+func (ws *WSClient) handleZFSDestroySnapshot(msg shared.WSZFSDestroySnapshot) {
+	err := DestroySnapshot(msg.Snapshot)
+	resp := shared.WSZFSDestroySnapshotResult{
+		Type: "zfs_destroy_snapshot_result", ReqID: msg.ReqID, OK: err == nil,
+	}
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	_ = ws.sendJSON(resp)
+}
+
+func (ws *WSClient) handleZFSCreateDataset(msg shared.WSZFSCreateDataset) {
+	err := CreateDataset(msg.Name, msg.Properties)
+	resp := shared.WSZFSCreateDatasetResult{
+		Type: "zfs_create_dataset_result", ReqID: msg.ReqID, OK: err == nil,
+	}
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	_ = ws.sendJSON(resp)
+}
+
+func (ws *WSClient) handleZFSSetProperty(msg shared.WSZFSSetProperty) {
+	err := SetProperty(msg.Dataset, msg.Property, msg.Value)
+	resp := shared.WSZFSSetPropertyResult{
+		Type: "zfs_set_property_result", ReqID: msg.ReqID, OK: err == nil,
+	}
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	_ = ws.sendJSON(resp)
 }
 
 func (ws *WSClient) handleLogStream(msg shared.WSLogStreamStart) {

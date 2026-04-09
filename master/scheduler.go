@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"math/rand"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,10 @@ type State struct {
 	BaseDir   string // for mirrorgo.json path
 	ConfigDir string // directory containing repo JSON config files
 	UIFS      fs.FS  // embedded UI filesystem (set from main.go)
+
+	// ZFS report cache (per worker, updated by periodic push).
+	ZFSReports   map[string]*shared.ZFSWorkerReport
+	ZFSReportsMu sync.RWMutex
 }
 
 func (s *State) refreshMirrorJSONAsync() {
@@ -460,6 +465,91 @@ func (s *State) StaleReconcilingCheckLoop(ctx context.Context) {
 			s.WarnStaleReconcilingActions(10 * time.Minute)
 		}
 	}
+}
+
+// ZFSPullLoop periodically pulls ZFS reports from all online workers.
+func (s *State) ZFSPullLoop(ctx context.Context) {
+	// Initial pull after 10s (let workers connect first).
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(10 * time.Second):
+	}
+
+	s.pullZFSReports()
+
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.pullZFSReports()
+		}
+	}
+}
+
+func (s *State) pullZFSReports() {
+	online := s.WorkerMgr.GetOnlineWorkers()
+	for _, w := range online {
+		if !s.WSHub.IsConnected(w.Name) {
+			continue
+		}
+		report, err := s.WSHub.ZFSGetReport(w.Name)
+		if err != nil {
+			log.Warn().Err(err).Str("worker", w.Name).Msg("ZFS pull failed")
+			continue
+		}
+		report.WorkerName = w.Name
+		s.mapDatasetsToRepos(report, w)
+		s.ZFSReportsMu.Lock()
+		s.ZFSReports[w.Name] = report
+		s.ZFSReportsMu.Unlock()
+		log.Debug().Str("worker", w.Name).Int("datasets", len(report.Datasets)).Int("pools", len(report.Pools)).Msg("ZFS report pulled")
+	}
+	s.refreshMirrorJSONAsync()
+}
+
+// mapDatasetsToRepos sets RepoID on each dataset by matching mountpoints
+// against repo config volume sources expanded with the worker's vars.
+func (s *State) mapDatasetsToRepos(report *shared.ZFSWorkerReport, worker *shared.Worker) {
+	// Build mountpoint -> dataset index for fast lookup.
+	mpIndex := make(map[string]int, len(report.Datasets))
+	for i := range report.Datasets {
+		mp := filepath.Clean(report.Datasets[i].MountPoint)
+		if mp != "" {
+			mpIndex[mp] = i
+		}
+	}
+
+	// For each repo, expand its first volume source with the worker's vars
+	// and check if any dataset mountpoint matches.
+	s.ReposMu.RLock()
+	defer s.ReposMu.RUnlock()
+	for repoID, repo := range s.Repos {
+		for _, vol := range repo.SyncParams.Volumes {
+			expanded := expandWorkerVars(vol.Source, worker.Vars)
+			expanded = filepath.Clean(expanded)
+			if idx, ok := mpIndex[expanded]; ok {
+				report.Datasets[idx].RepoID = repoID
+				break
+			}
+		}
+	}
+}
+
+// expandWorkerVars replaces $KEY placeholders in s using the worker's vars.
+func expandWorkerVars(s string, vars map[string]string) string {
+	for k, v := range vars {
+		s = strings.ReplaceAll(s, "$"+k, v)
+	}
+	return s
+}
+
+// RefreshZFSReports allows API handlers to trigger an immediate pull.
+func (s *State) RefreshZFSReports() {
+	go s.pullZFSReports()
 }
 
 // ParseInterval parses an IntervalConfig into a time.Duration.

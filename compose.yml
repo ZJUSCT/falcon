@@ -47,4 +47,6 @@ services:
       - /var/lib/docker:/var/lib/docker
       - /test1/mirrors:/test1/mirrors
       - /home/zjusct/mirrorgo/logs:/home/zjusct/mirrorgo/logs
+      - /dev/zfs:/dev/zfs
+    privileged: true
     restart: unless-stopped

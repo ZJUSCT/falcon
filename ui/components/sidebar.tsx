@@ -3,11 +3,11 @@
 import { useState, useEffect } from 'react';
 import { cn } from '@/lib/utils';
 import {
-  BarChart3, Disc3, Monitor, ListOrdered, Zap, Settings, PanelLeftClose, PanelLeft, Menu, X,
+  BarChart3, Disc3, Monitor, HardDrive, ListOrdered, Zap, Settings, PanelLeftClose, PanelLeft, Menu, X,
   Sun, Moon, MonitorSmartphone,
 } from 'lucide-react';
 
-export type PageId = 'overview' | 'mirrors' | 'workers' | 'queue' | 'actions' | 'configs';
+export type PageId = 'overview' | 'mirrors' | 'workers' | 'storage' | 'queue' | 'actions' | 'configs';
 
 interface SidebarProps {
   activePage: PageId;
@@ -18,6 +18,7 @@ const navItems: { id: PageId; label: string; icon: typeof BarChart3 }[] = [
   { id: 'overview', label: 'Overview', icon: BarChart3 },
   { id: 'mirrors', label: 'Mirrors', icon: Disc3 },
   { id: 'workers', label: 'Workers', icon: Monitor },
+  { id: 'storage', label: 'Storage', icon: HardDrive },
   { id: 'queue', label: 'Queue', icon: ListOrdered },
   { id: 'actions', label: 'Actions', icon: Zap },
   { id: 'configs', label: 'Configs', icon: Settings },

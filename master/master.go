@@ -50,6 +50,7 @@ func Run(cfg MasterConfig) {
 		BaseDir:       cfg.BaseDir,
 		ConfigDir:     cfg.ConfigDir,
 		UIFS:          cfg.UIFS,
+		ZFSReports:    make(map[string]*shared.ZFSWorkerReport),
 	}
 
 	// 4. Wire callbacks.
@@ -188,6 +189,7 @@ func Run(cfg MasterConfig) {
 	go state.ScheduleLoop(ctx)
 	go state.DispatchLoop(ctx)
 	go state.StaleReconcilingCheckLoop(ctx)
+	go state.ZFSPullLoop(ctx)
 	go state.StartWebServer(cfg.Addr, cfg.AuthToken)
 
 	// 10. Update mirrorgo.json.
