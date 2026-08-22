@@ -37,7 +37,7 @@ if [ -z "$RSYNC_UPSTREAM" ]; then
   exit 1
 fi
 
-RSYNC_EXTRA_OPTS="${RSYNC_EXTRA_OPTS:-"-4"}"
+RSYNC_EXTRA_OPTS="${RSYNC_EXTRA_OPTS:-"-6"}"
 
 echo "rsync job started for $RSYNC_UPSTREAM"
 exec 443>/srv/mirrors/storage/MIRROR_IS_SYNCING || exit 1
