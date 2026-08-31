@@ -1,0 +1,23 @@
+{{- /* Prometheus ServiceMonitor scraping the controller metrics Service. */ -}}
+{{- if and .Values.controller.enabled .Values.controller.metrics.enabled .Values.controller.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "falcon.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "falcon.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+    {{- with .Values.controller.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "falcon.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.controller.metrics.serviceMonitor.interval }}
+      path: /metrics
+{{- end }}

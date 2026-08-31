@@ -1,0 +1,12 @@
+{{- /*
+Namespace of the release. All chart resources are rendered into
+.Release.Namespace; this object only creates it when asked to.
+*/ -}}
+{{- if .Values.namespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace.name | default .Release.Namespace }}
+  labels:
+    {{- include "falcon.labels" . | nindent 4 }}
+{{- end }}

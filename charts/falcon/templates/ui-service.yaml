@@ -1,0 +1,20 @@
+{{- if .Values.webui.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "falcon.fullname" . }}-ui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "falcon.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webui
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "falcon.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: webui
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+{{- end }}

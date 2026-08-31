@@ -1,0 +1,19 @@
+{{- /*
+The controller's single config file (see internal/config). Rendered from
+controller.config via the falcon.config helper, which is also hashed into
+the Deployment's checksum/config annotation — any config change rolls the pod.
+The ConfigMap name is fixed (falcon-config): one release owns one namespace.
+*/ -}}
+{{- if .Values.controller.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falcon-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "falcon.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+data:
+  config.yaml: |
+{{ include "falcon.config" . | indent 4 }}
+{{- end }}

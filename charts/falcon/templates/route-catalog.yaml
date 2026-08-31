@@ -1,0 +1,40 @@
+{{- /*
+Catalog route: GET /mirrorz.json on catalog.hosts. Convention: use the same
+hosts as controller.config.serving.hostnames — the mirrorz document reflects
+the request Host, so every serving domain can serve its own catalog.
+*/ -}}
+{{- if .Values.catalog.enabled }}
+{{- if not .Values.catalog.hosts }}
+{{- fail "catalog.hosts must not be empty when catalog.enabled=true" }}
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "falcon.fullname" . }}-catalog
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "falcon.labels" . | nindent 4 }}
+    app.kubernetes.io/component: catalog
+    {{- with .Values.catalog.route.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.catalog.route.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- include "falcon.parentRefs" (dict "ctx" $ "section" .Values.catalog.route.gatewayRef "parentRefs" .Values.catalog.route.parentRefs) | nindent 4 }}
+  hostnames:
+    {{- range .Values.catalog.hosts }}
+    - {{ . | quote }}
+    {{- end }}
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: /mirrorz.json
+      backendRefs:
+        - name: {{ include "falcon.fullname" . }}-webapi
+          port: 80
+{{- end }}

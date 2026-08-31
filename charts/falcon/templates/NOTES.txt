@@ -1,0 +1,40 @@
+{{ .Chart.Name }} {{ .Chart.Version }} (app {{ .Chart.AppVersion }}) has been deployed to namespace "{{ .Release.Namespace }}".
+
+{{- if .Values.controller.enabled }}
+
+  Controller: {{ include "falcon.fullname" . }} (image {{ include "falcon.image" (dict "image" .Values.controller.image "defaultTag" .Chart.AppVersion "ctx" $) }})
+    - Full runtime config lives in ConfigMap "falcon-config" (config.yaml);
+      any config change rolls the pods via the checksum/config annotation.
+    - Serves {{ .Values.controller.config.serving.hostnames | default list | join ", " | default "(serving routes disabled: no hostnames)" | quote }} —
+      for each published Mirror/ProxyMirror the controller creates an HTTPRoute
+      "<name>-publish" -> Service "<name>-publish-http:80" in this namespace.
+{{- if and .Values.controller.metrics.enabled .Values.controller.metrics.serviceMonitor.enabled }}
+    - Metrics scraped by ServiceMonitor "{{ include "falcon.fullname" . }}" ({{ .Values.controller.metrics.serviceMonitor.interval }}).
+{{- else if .Values.controller.metrics.enabled }}
+    - Metrics Service: {{ include "falcon.fullname" . }}-metrics:8080 (ServiceMonitor disabled).
+{{- end }}
+{{- end }}
+
+{{- if .Values.admin.enabled }}
+
+  Admin UI/API (Gateway: {{ .Values.global.gatewayRef.name }}):
+    https://{{ .Values.admin.hosts | join "," }}/
+      UI at /, read-only API at /api/jobs and /api/repos/<name>.
+{{- end }}
+
+{{- if .Values.catalog.enabled }}
+
+  MirrorZ catalog ({{ .Values.controller.config.catalog.enabled | ternary "endpoint enabled" "WARNING: controller.config.catalog.enabled=false, the endpoint answers 404" }}):
+    {{- range .Values.catalog.hosts }}
+    https://{{ . }}/mirrorz.json
+    {{- end }}
+{{- end }}
+
+NOTES:
+  - Mirror/ProxyMirror CR instances are NOT managed by this chart (manage them
+    in your GitOps repo). The CRDs are installed from the chart's crds/ directory
+    on `helm install` only — `helm upgrade` never updates CRDs. After a CRD
+    change, apply them manually:
+      kubectl apply -f charts/falcon/crds/
+  - Everything is namespaced to "{{ .Release.Namespace }}"; the controller only
+    watches/manages resources there (POD_NAMESPACE).

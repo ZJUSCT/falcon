@@ -1,0 +1,14 @@
+Configs/
+.cursor
+
+node_modules
+.next
+
+state.db*
+
+falcon
+
+logs
+
+dist
+falcon.json

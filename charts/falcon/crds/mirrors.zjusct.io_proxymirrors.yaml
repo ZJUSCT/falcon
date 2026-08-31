@@ -1,0 +1,380 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: proxymirrors.mirrors.zjusct.io
+spec:
+  group: mirrors.zjusct.io
+  names:
+    kind: ProxyMirror
+    listKind: ProxyMirrorList
+    plural: proxymirrors
+    singular: proxymirror
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.cachePVC
+      name: Cache PVC
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ProxyMirrorSpec groups the proxy mirror configuration. ProxyMirror has no
+              paused concept (unlike Mirror): to take a proxy mirror offline, delete the CR.
+            properties:
+              info:
+                description: |-
+                  ProxyMirrorInfo carries the catalog metadata of a publish-only mirror.
+                  Unlike MirrorInfo, it has no `type` field: the CRD kind itself is the type
+                  ("proxy"). `upstream` deliberately lives here instead of under spec.proxy,
+                  mirroring Mirror.info where the upstream origin already resides; spec.proxy
+                  then only holds the proxy-specific knobs (caching).
+                properties:
+                  description:
+                    additionalProperties:
+                      type: string
+                    minProperties: 1
+                    type: object
+                  name:
+                    additionalProperties:
+                      type: string
+                    minProperties: 1
+                    type: object
+                  upstream:
+                    description: |-
+                      Upstream is the backend origin the proxy forwards cache misses to,
+                      e.g. https://pypi.org/simple/. The public path is the CR name
+                      (publish route PathPrefix /<name>), so there is no URL field.
+                    type: string
+                required:
+                - description
+                - name
+                - upstream
+                type: object
+              proxy:
+                description: |-
+                  ProxyMirrorProxySpec groups proxy-specific behaviour. Cache bypass lists and
+                  other fine-tuning are intentionally not modelled yet: the controller does
+                  not generate nginx configuration, so a bypass field would be dead schema.
+                properties:
+                  cache:
+                    description: |-
+                      ProxyMirrorCacheSpec configures the nginx proxy_cache-shaped disk cache in
+                      front of the upstream. The controller provisions and mounts the cache PVC;
+                      the container image is responsible for pointing proxy_cache at the mounted
+                      directory (CacheMountPath).
+                    properties:
+                      enabled:
+                        default: false
+                        type: boolean
+                      size:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: Size is the requested cache PVC capacity. Required
+                          when Enabled is true.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      storageClassName:
+                        description: |-
+                          StorageClassName provisions the cache PVC via a standard StorageClass.
+                          Required when Enabled is true; validated by the controller (Degraded).
+                        type: string
+                    type: object
+                type: object
+              services:
+                description: |-
+                  Services uses the same shape as Mirror's spec.services: each entry gets
+                  Deployment/Service `<name>-publish-<service name>`, and only an "http"
+                  entry additionally gets the publish HTTPRoute (typically the single
+                  "http" proxy service). Absent or empty services = the proxy is not
+                  publishing (nothing is deployed). There is no data volume to mount: the
+                  optional cache PVC is mounted at ProxyCacheMountPath instead. Service
+                  names must be unique.
+                items:
+                  description: |-
+                    MirrorServingService describes one publish service of a Mirror: a
+                    Deployment serving the read-only snapshot clone plus a Service in front of
+                    it. The service name is the protocol identifier and drives the generated
+                    children: every entry gets Deployment/Service `<mirror>-publish-<name>`, but
+                    only the "http" entry additionally gets the publish HTTPRoute.
+                  properties:
+                    args:
+                      description: Args are appended to the command (or image entrypoint).
+                      items:
+                        type: string
+                      type: array
+                    command:
+                      description: Command runs the container; omitted, the image
+                        entrypoint is used.
+                      items:
+                        type: string
+                      type: array
+                    image:
+                      minLength: 1
+                      type: string
+                    imagePullPolicy:
+                      description: PullPolicy describes a policy for if/when to pull
+                        a container image
+                      enum:
+                      - Always
+                      - IfNotPresent
+                      - Never
+                      type: string
+                    mountPath:
+                      default: /srv/mirror
+                      description: |-
+                        MountPath is where the data PVC is mounted: the controller mounts it
+                        read-only at <MountPath>/<mirror name> (no trailing slash). For
+                        "http" services this yields web-root semantics — PVC-root content is
+                        served under the /<mirror name> route prefix. rsyncd module paths and
+                        git http-backend roots must point at the same directory.
+                      type: string
+                    name:
+                      description: |-
+                        Name is the protocol identifier of this service. Only "http" services
+                        are routed through the Gateway API; "rsync" and "git" services are
+                        exposed through their Service only (no route, no TCPRoute).
+                      enum:
+                      - http
+                      - rsync
+                      - git
+                      type: string
+                    ports:
+                      description: |-
+                        Ports are the container ports declared on the publish container. At
+                        least one port is required; the first port is the Service target and is
+                        (re)named after the service ("http", "rsync" or "git") so the Service
+                        can reference it as a named port.
+                      items:
+                        description: ContainerPort represents a network port in a
+                          single container.
+                        properties:
+                          containerPort:
+                            description: |-
+                              Number of port to expose on the pod's IP address.
+                              This must be a valid port number, 0 < x < 65536.
+                            format: int32
+                            type: integer
+                          hostIP:
+                            description: What host IP to bind the external port to.
+                            type: string
+                          hostPort:
+                            description: |-
+                              Number of port to expose on the host.
+                              If specified, this must be a valid port number, 0 < x < 65536.
+                              If HostNetwork is specified, this must match ContainerPort.
+                              Most containers do not need this.
+                            format: int32
+                            type: integer
+                          name:
+                            description: |-
+                              If specified, this must be an IANA_SVC_NAME and unique within the pod. Each
+                              named port in a pod must have a unique name. Name for the port that can be
+                              referred to by services.
+                            type: string
+                          protocol:
+                            default: TCP
+                            description: |-
+                              Protocol for port. Must be UDP, TCP, or SCTP.
+                              Defaults to "TCP".
+                            type: string
+                        required:
+                        - containerPort
+                        type: object
+                      minItems: 1
+                      type: array
+                    readinessPath:
+                      default: /
+                      type: string
+                    replicas:
+                      default: 1
+                      format: int32
+                      maximum: 3
+                      minimum: 1
+                      type: integer
+                    resources:
+                      description: ResourceRequirements describes the compute resource
+                        requirements.
+                      properties:
+                        claims:
+                          description: |-
+                            Claims lists the names of resources, defined in spec.resourceClaims,
+                            that are used by this container.
+
+                            This field depends on the
+                            DynamicResourceAllocation feature gate.
+
+                            This field is immutable. It can only be set for containers.
+                          items:
+                            description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                            properties:
+                              name:
+                                description: |-
+                                  Name must match the name of one entry in pod.spec.resourceClaims of
+                                  the Pod where this field is used. It makes that resource available
+                                  inside a container.
+                                type: string
+                              request:
+                                description: |-
+                                  Request is the name chosen for a request in the referenced claim.
+                                  If empty, everything from the claim is made available, otherwise
+                                  only the result of this request.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - name
+                          x-kubernetes-list-type: map
+                        limits:
+                          additionalProperties:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          description: |-
+                            Limits describes the maximum amount of compute resources allowed.
+                            More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                          type: object
+                        requests:
+                          additionalProperties:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          description: |-
+                            Requests describes the minimum amount of compute resources required.
+                            If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                            otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                            More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                          type: object
+                      type: object
+                  required:
+                  - image
+                  - name
+                  - ports
+                  type: object
+                type: array
+                x-kubernetes-validations:
+                - message: service names must be unique
+                  rule: self.all(s, self.exists_one(e, e.name == s.name))
+            required:
+            - info
+            type: object
+          status:
+            properties:
+              cachePVC:
+                description: CachePVC is the cache backing PVC when spec.proxy.cache.enabled
+                  is true.
+                type: string
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                type: integer
+              phase:
+                enum:
+                - Pending
+                - Ready
+                - Degraded
+                type: string
+              publishedServiceName:
+                description: |-
+                  PublishedServiceName is the Service fronting the http-type proxy
+                  service (<name>-publish-http); empty when no "http" service is declared
+                  (such a proxy is reachable only through its raw Services).
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

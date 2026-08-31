@@ -1,0 +1,24 @@
+{{- /*
+Read-only webapi listener of the controller (GET /mirrorz.json, /api/jobs,
+/api/repos/...). Exposed on port 80 for the admin and catalog HTTPRoutes.
+*/ -}}
+{{- if .Values.controller.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "falcon.fullname" . }}-webapi
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "falcon.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "falcon.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+  ports:
+    - name: http
+      port: 80
+      targetPort: webapi
+      protocol: TCP
+{{- end }}

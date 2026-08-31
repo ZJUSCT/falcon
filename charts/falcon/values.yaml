@@ -1,0 +1,161 @@
+# Falcon Helm Chart 默认值。
+#
+# 本 chart 的全部资源都渲染到 Release 的 namespace（helm install -n <ns>）；
+# production / staging 各占一个 namespace（mirror-production / mirror-staging），
+# 每个 ns 内含完整栈：控制器 + webui + mirrorz 目录 + 管理域名路由 + 所有
+# sync/publish 资源。控制器只 watch/管理自己所在 namespace（POD_NAMESPACE）。
+
+namespace:
+  # 由 chart 创建 Release ns（已存在则跳过）。
+  create: true
+  # 省略时 = helm -n 指定的 Release namespace。
+  name: ""
+
+global:
+  # 全局镜像仓库前缀；各组件可覆盖 repository。默认指向 GitHub 发布的正式
+  # 镜像 ghcr.io/zjusct/falcon / ghcr.io/zjusct/falcon-ui（tag 由 CI 按 git
+  # short sha 推送，见 .github/workflows/docker.yml）；测试集群可整体覆写为
+  # ZJUSCT harbor（如 harbor.s.zjusct.io/library）。
+  imageRegistry: ghcr.io/zjusct
+  imagePullSecrets: []
+  # 默认 parentRef / serving 指向的 Gateway。
+  # 注意：测试集群的 nginx-gateway 是【跨 ns 共享】的（不在 Release ns 内），
+  # 因此默认值显式携带 namespace；自建每实例 gateway 时改成 namespace: ""（= 同 ns）。
+  gatewayRef:
+    name: nginx-gateway
+    namespace: nginx-gateway
+    sectionName: https
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 控制器（manager）。全部运行配置集中在 config（渲染为 falcon-config
+# ConfigMap 的 config.yaml，含原 flags 项），Deployment 只剩镜像/资源/调度字段；
+# 任意 config key 变化 → checksum 注解变化 → Pod 滚动重启。
+# ─────────────────────────────────────────────────────────────────────────────
+controller:
+  enabled: true
+  image:
+    repository: falcon
+    tag: ""            # 空 = Chart.AppVersion（v0.3.1）
+    digest: ""         # 可选，优先于 tag
+    pullPolicy: IfNotPresent
+  replicaCount: 1      # leader election 开启时 >1 仅为平滑滚动（单活不变）
+  revisionHistoryLimit: 10
+
+  # 字段名与 internal/config 的 Go 结构体一一对应；控制器启动时强校验
+  # （site.url 必须带 scheme、serving.hostnames 非空时 gatewayRef.name 必填等），
+  # 非法配置会拒绝启动。chart 模板做了同样的前置校验，渲染期即报错。
+  config:
+    log:
+      level: info                      # debug | info | warn | error
+    leaderElection:
+      enabled: true                    # Lease 落在本 ns（跟随 Release ns）
+    api:                               # 监听地址（探针/Service 端口依赖默认值，见 deployment 注释）
+      metricsBindAddress: ":8080"
+      healthProbeBindAddress: ":8081"
+      webapiBindAddress: ":8082"
+    # 站点身份：mirrorz site 段兜底值；url 是请求 Host 不在 serving.hostnames
+    # 时的回落基准（必须带 scheme）。
+    site:
+      url: https://mirrors.zjusct.io
+      abbr: ZJU
+      name: Zhejiang University Mirror
+    catalog:
+      enabled: true                    # 开关 GET /mirrorz.json
+    sync:
+      maxConcurrent: 4                 # 全局并发同步上限；<= 0 = 不限
+    # serving 发布拓扑（config serving.* 总开关，字段名沿用）：控制器为每个已发布
+    # Mirror/ProxyMirror 的 http 服务项在本 ns 生成 HTTPRoute <name>-publish
+    # （PathPrefix /<name> → Service <name>-publish-http:80）；rsync/git 服务项只有
+    # Service，不产生路由。
+    serving:
+      gatewayRef: {}                   # 缺省回落 global.gatewayRef（可覆盖 name/namespace/sectionName）
+      hostnames:                       # serving 域名，可多个；mirrorz 按请求 Host 动态回显
+        - mirrors.zjusct.io
+        - mirror.zju.edu.cn
+      labels: {}                       # 盖到每条发布 HTTPRoute 上
+      annotations: {}
+
+  metrics:
+    enabled: true                      # 暴露 metrics Service（:8080）
+    serviceMonitor:
+      enabled: true
+      interval: 30s
+      labels: {}                       # 附加到 ServiceMonitor（如 prometheus release 选择标签）
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits: {}
+
+  # 全部受管资源都在本 ns → Role + RoleBinding（不再是 ClusterRole）。
+  # 规则与 config/rbac/role.yaml（v0.3.0）逐条一致；CRD 仍由 chart crds/ 安装。
+  rbac:
+    create: true
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 管理前端（静态导出的 Next.js，nginx 监听 8080）。
+# ─────────────────────────────────────────────────────────────────────────────
+webui:
+  enabled: true
+  image:
+    repository: falcon-ui
+    tag: "v0.1.1"
+    digest: ""
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits: {}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 管理域路由（UI + 只读 API，与内容域名解耦）：
+#   Exact /api/jobs      → 控制器 webapi Service
+#   PathPrefix /api/repos/ → 控制器 webapi Service
+#   PathPrefix /         → webui Service
+# ─────────────────────────────────────────────────────────────────────────────
+admin:
+  enabled: true
+  hosts:
+    - go-staging.mirrors.zjusct.io
+  route:
+    gatewayRef: {}       # 缺省回落 global.gatewayRef
+    parentRefs: []       # 非空时整段原样渲染，覆盖 gatewayRef 推导
+    labels: {}
+    annotations: {}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 镜像目录（/mirrorz.json）暴露的 host 列表。惯例与 serving.hostnames 一致
+# （mirrorz 内容按请求 Host 动态回显对应域名）。
+# ─────────────────────────────────────────────────────────────────────────────
+catalog:
+  enabled: true
+  hosts:
+    - mirrors.zjusct.io
+    - mirror.zju.edu.cn
+  route:
+    gatewayRef: {}
+    parentRefs: []
+    labels: {}
+    annotations: {}
+
+# 说明：
+# 1. Mirror / ProxyMirror CR 实例不属于本 chart（GitOps 仓库管理）；CRD 由 crds/
+#    目录安装。helm 只在 install 时套用 crds/、upgrade 时不更新——CRD 变更需
+#    手动 kubectl apply（见 chart README）。
+# 2. Mirror 的发布路径前缀 = /<Mirror 名>，不可配置（spec.info.url 已从 CRD 移除）。
+# 3. 不提供 HPA：控制器 leader-elected 单活。

@@ -1,0 +1,23 @@
+# Keep Docker context small and stable for cache
+.git
+.gitignore
+.env*
+**/.DS_Store
+**/node_modules
+**/.next
+**/dist
+**/.cache
+**/coverage
+**/build
+
+# Local data/state/logs
+logs/
+state.db*
+
+# Docker artifacts
+**/.docker
+**/compose.override.yml
+
+# UI lockfiles other than npm
+ui/yarn.lock
+ui/pnpm-lock.yaml

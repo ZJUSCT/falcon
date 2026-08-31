@@ -1,0 +1,18 @@
+{{- if and .Values.controller.enabled .Values.controller.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "falcon.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "falcon.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "falcon.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "falcon.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
