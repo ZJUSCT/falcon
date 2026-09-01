@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode"
 
+	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -20,6 +21,7 @@ import (
 
 	mirrorv1alpha1 "github.com/ZJUSCT/falcon/api/v1alpha1"
 	"github.com/ZJUSCT/falcon/internal/zfsagent"
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 )
 
 // The zfs-agent contract is deliberately not configurable: the port and the
@@ -154,9 +156,14 @@ type usageAggregate struct {
 	complete  bool
 	errors    []string
 	// byPVC indexes datasets carrying an openebs PVC reference, keyed by
-	// "<namespace>/<pvc name>". Datasets without a reference (pool roots,
-	// foreign datasets) are not indexed — they belong to no Mirror.
+	// "<namespace>/<pvc name>".
 	byPVC map[string]*zfsagent.Dataset
+	// byVolumeName indexes every dataset by the final component of its ZFS
+	// name. OpenEBS <= 2.11 does not write the openebs.io:pvc-* user
+	// properties, but its dataset's final component is the CSI volume name,
+	// which is also PVC.spec.volumeName. This fallback needs no cluster-scoped
+	// PV or VolumeSnapshotContent permissions.
+	byVolumeName map[string]*zfsagent.Dataset
 }
 
 // UsageAggregator merges the per-node ZFS reports of all zfs-agents and joins
@@ -232,8 +239,8 @@ func (a *UsageAggregator) agentURL(ep AgentEndpoint) string {
 
 // Usage returns the /api/usage payload: the (cached) aggregation of all
 // agents joined against the Mirrors visible to reader. An error is returned
-// only when the aggregation cannot be computed at all (EndpointSlice listing
-// failed, Mirror listing failed); per-agent failures degrade the result
+// only when the aggregation cannot be computed at all (EndpointSlice or
+// Kubernetes object listing failed); per-agent failures degrade the result
 // instead.
 func (a *UsageAggregator) Usage(ctx context.Context, reader client.Reader) (*UsageResponse, error) {
 	agg, err := a.aggregate(ctx)
@@ -244,7 +251,15 @@ func (a *UsageAggregator) Usage(ctx context.Context, reader client.Reader) (*Usa
 	if err := reader.List(ctx, &mirrors); err != nil {
 		return nil, err
 	}
-	return joinUsage(&mirrors, agg), nil
+	var claims corev1.PersistentVolumeClaimList
+	if err := reader.List(ctx, &claims); err != nil {
+		return nil, err
+	}
+	var snapshots snapshotv1.VolumeSnapshotList
+	if err := reader.List(ctx, &snapshots); err != nil {
+		return nil, err
+	}
+	return joinUsageWithStorageObjects(&mirrors, &claims, &snapshots, agg), nil
 }
 
 // aggregate returns the cached aggregation while fresh, recomputing it after
@@ -272,11 +287,12 @@ func (a *UsageAggregator) collect(ctx context.Context) (*usageAggregate, error) 
 		return nil, err
 	}
 	agg := &usageAggregate{
-		generatedAt: a.now(),
-		fetchedAt:   a.now(),
-		complete:    true,
-		errors:      []string{},
-		byPVC:       map[string]*zfsagent.Dataset{},
+		generatedAt:  a.now(),
+		fetchedAt:    a.now(),
+		complete:     true,
+		errors:       []string{},
+		byPVC:        map[string]*zfsagent.Dataset{},
+		byVolumeName: map[string]*zfsagent.Dataset{},
 	}
 	if len(endpoints) == 0 {
 		// No ready agent (DaemonSet not rolled out yet, no storage nodes
@@ -327,21 +343,46 @@ func (a *UsageAggregator) collect(ctx context.Context) (*usageAggregate, error) 
 		for _, pool := range result.report.Pools {
 			for i := range pool.Datasets {
 				ds := &pool.Datasets[i]
-				if ds.PVC == nil {
-					continue
+				volumeName := zfsDatasetLeaf(ds.Name)
+				if volumeName != "" {
+					if _, exists := agg.byVolumeName[volumeName]; !exists {
+						agg.byVolumeName[volumeName] = ds
+					}
 				}
-				key := ds.PVC.Namespace + "/" + ds.PVC.Name
-				// A dataset lives on exactly one node; should a key ever
-				// collide (stale agent, duplicated address), the first
-				// report wins deterministically (endpoints are sorted).
-				if _, exists := agg.byPVC[key]; !exists {
-					agg.byPVC[key] = ds
+				if ds.PVC != nil {
+					key := ds.PVC.Namespace + "/" + ds.PVC.Name
+					// A dataset lives on exactly one node; should a key ever
+					// collide (stale agent, duplicated address), the first
+					// report wins deterministically (endpoints are sorted).
+					if _, exists := agg.byPVC[key]; !exists {
+						agg.byPVC[key] = ds
+					}
 				}
 			}
 		}
 	}
 	sort.Strings(agg.errors)
 	return agg, nil
+}
+
+// zfsDatasetLeaf returns the CSI volume-name component of a ZFS dataset.
+// OpenEBS lays volumes out as <pool>/<optional parent>/<volume name>.
+func zfsDatasetLeaf(name string) string {
+	if dataset, _, found := strings.Cut(name, "@"); found {
+		name = dataset
+	}
+	if i := strings.LastIndexByte(name, '/'); i >= 0 {
+		return name[i+1:]
+	}
+	return name
+}
+
+// zfsSnapshotLeaf returns the snapshot component after the final '@'.
+func zfsSnapshotLeaf(name string) string {
+	if i := strings.LastIndexByte(name, '@'); i >= 0 {
+		return name[i+1:]
+	}
+	return ""
 }
 
 // agentLabel names a failing agent in the usage errors list: the Kubernetes
@@ -356,6 +397,32 @@ func agentLabel(ep AgentEndpoint) string {
 // joinUsage maps every Mirror onto the aggregated agent data. Every Mirror is
 // reported — including Mirrors that never synced (sync null, no snapshots).
 func joinUsage(mirrors *mirrorv1alpha1.MirrorList, agg *usageAggregate) *UsageResponse {
+	return joinUsageWithStorageObjects(mirrors, nil, nil, agg)
+}
+
+// joinUsageWithStorageObjects additionally supports OpenEBS <= 2.11, which
+// exposes the CSI volume and snapshot names in the ZFS object names but does
+// not attach Kubernetes object references as ZFS user properties.
+func joinUsageWithStorageObjects(mirrors *mirrorv1alpha1.MirrorList, claims *corev1.PersistentVolumeClaimList, snapshots *snapshotv1.VolumeSnapshotList, agg *usageAggregate) *UsageResponse {
+	volumeByPVC := map[string]string{}
+	if claims != nil {
+		for i := range claims.Items {
+			claim := &claims.Items[i]
+			if claim.Spec.VolumeName != "" {
+				volumeByPVC[claim.Namespace+"/"+claim.Name] = claim.Spec.VolumeName
+			}
+		}
+	}
+	snapshotByStorageName := map[string]string{}
+	if snapshots != nil {
+		for i := range snapshots.Items {
+			snapshot := &snapshots.Items[i]
+			if snapshot.UID != "" {
+				snapshotByStorageName["snapshot-"+string(snapshot.UID)] = snapshot.Name
+			}
+		}
+	}
+
 	resp := &UsageResponse{GeneratedAt: agg.generatedAt, Mirrors: make([]UsageMirror, 0, len(mirrors.Items))}
 	for i := range mirrors.Items {
 		mirror := &mirrors.Items[i]
@@ -370,7 +437,12 @@ func joinUsage(mirrors *mirrorv1alpha1.MirrorList, agg *usageAggregate) *UsageRe
 		if pvcName == "" {
 			pvcName = deriveSyncPVCName(mirror.Name)
 		}
-		if ds := agg.byPVC[mirror.Namespace+"/"+pvcName]; ds != nil {
+		pvcKey := mirror.Namespace + "/" + pvcName
+		ds := agg.byPVC[pvcKey]
+		if ds == nil {
+			ds = agg.byVolumeName[volumeByPVC[pvcKey]]
+		}
+		if ds != nil {
 			entry.Sync = &UsageSync{PVC: pvcName, ReferencedBytes: ds.ReferencedBytes}
 			for _, snap := range ds.Snapshots {
 				// Prefer the VolumeSnapshot object name (userprop
@@ -380,6 +452,8 @@ func joinUsage(mirrors *mirrorv1alpha1.MirrorList, agg *usageAggregate) *UsageRe
 				name := snap.Name
 				if snap.VolumeSnapshot != nil {
 					name = snap.VolumeSnapshot.Name
+				} else if objectName := snapshotByStorageName[zfsSnapshotLeaf(snap.Name)]; objectName != "" {
+					name = objectName
 				}
 				entry.Snapshots = append(entry.Snapshots, UsageSnapshot{
 					Name:         name,

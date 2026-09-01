@@ -14,11 +14,14 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	mirrorv1alpha1 "github.com/ZJUSCT/falcon/api/v1alpha1"
 	"github.com/ZJUSCT/falcon/internal/zfsagent"
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 )
 
 // fakeAgents is an AgentAddresser over a canned endpoint list.
@@ -373,6 +376,54 @@ func TestJoinUsage(t *testing.T) {
 		if len(m.Errors) != 1 || !strings.HasPrefix(m.Errors[0], "storage-2: ") {
 			t.Errorf("mirror %s: errors = %v", m.Name, m.Errors)
 		}
+	}
+}
+
+// TestJoinUsageFallsBackToOpenEBSStorageNames covers OpenEBS ZFS LocalPV
+// <= 2.11. Those releases do not write the openebs.io:pvc-* and
+// openebs.io:vs-* ZFS user properties, but the dataset and snapshot names
+// still contain the CSI external-provisioner object identifiers.
+func TestJoinUsageFallsBackToOpenEBSStorageNames(t *testing.T) {
+	mirrors := &mirrorv1alpha1.MirrorList{Items: []mirrorv1alpha1.Mirror{{
+		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirror"},
+		Status:     mirrorv1alpha1.MirrorStatus{WorkPVC: "debian-sync"},
+	}}}
+	claims := &corev1.PersistentVolumeClaimList{Items: []corev1.PersistentVolumeClaim{{
+		ObjectMeta: metav1.ObjectMeta{Name: "debian-sync", Namespace: "mirror"},
+		Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pvc-abc"},
+	}}}
+	snapshots := &snapshotv1.VolumeSnapshotList{Items: []snapshotv1.VolumeSnapshot{{
+		ObjectMeta: metav1.ObjectMeta{Name: "debian-snap-1000", Namespace: "mirror", UID: types.UID("snap-uid")},
+	}}}
+	agg := &usageAggregate{
+		complete: true,
+		byPVC:    map[string]*zfsagent.Dataset{},
+		byVolumeName: map[string]*zfsagent.Dataset{
+			"pvc-abc": {
+				Name:            "tank/openebs/pvc-abc",
+				ReferencedBytes: 90,
+				Snapshots: []zfsagent.Snapshot{{
+					Name:         "tank/openebs/pvc-abc@snapshot-snap-uid",
+					WrittenBytes: 5,
+					CreatedAt:    1000,
+				}},
+			},
+		},
+	}
+
+	resp := joinUsageWithStorageObjects(mirrors, claims, snapshots, agg)
+	if len(resp.Mirrors) != 1 {
+		t.Fatalf("mirrors = %d, want 1", len(resp.Mirrors))
+	}
+	got := resp.Mirrors[0]
+	if got.Sync == nil || got.Sync.PVC != "debian-sync" || got.Sync.ReferencedBytes != 90 {
+		t.Errorf("sync = %+v", got.Sync)
+	}
+	if diff := cmp.Diff([]UsageSnapshot{{Name: "debian-snap-1000", WrittenBytes: 5, CreatedAt: 1000}}, got.Snapshots); diff != "" {
+		t.Errorf("snapshots (-want +got):\n%s", diff)
+	}
+	if got.TotalBytes != 95 {
+		t.Errorf("totalBytes = %d, want 95", got.TotalBytes)
 	}
 }
 

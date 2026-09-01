@@ -1,6 +1,7 @@
 {{- /*
 Admin domain route: admin UI + read-only API on admin.hosts.
   Exact /api/jobs        -> controller webapi Service
+  Exact /api/usage       -> controller webapi Service
   PathPrefix /api/repos/ -> controller webapi Service
   PathPrefix /           -> admin web UI Service
 parentRefs come from admin.route.parentRefs verbatim, or are derived from
@@ -40,6 +41,13 @@ spec:
         - path:
             type: Exact
             value: /api/jobs
+      backendRefs:
+        - name: {{ include "falcon.fullname" . }}-webapi
+          port: 80
+    - matches:
+        - path:
+            type: Exact
+            value: /api/usage
       backendRefs:
         - name: {{ include "falcon.fullname" . }}-webapi
           port: 80

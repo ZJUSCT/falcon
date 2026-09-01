@@ -165,8 +165,9 @@ CRD 是集群级资源，不进 RBAC；由 `crds/` 目录安装（见 §8）。
 - hostnames：`admin.hosts`（默认空；`admin.enabled=true` 时必填非空）。
 - 三条规则按序：
   1. `Exact /api/jobs` → Service `<fullname>-webapi` 端口 80
-  2. `PathPrefix /api/repos/` → Service `<fullname>-webapi` 端口 80
-  3. `PathPrefix /` → Service `<fullname>-ui` 端口 80
+  2. `Exact /api/usage` → Service `<fullname>-webapi` 端口 80
+  3. `PathPrefix /api/repos/` → Service `<fullname>-webapi` 端口 80
+  4. `PathPrefix /` → Service `<fullname>-ui` 端口 80
 - parentRefs/labels/annotations 按 §5.2 与 values 透传。
 
 **无内置鉴权（部署前提）**：admin host 上的 UI 与 `/api/*` 端点没有任何应用层认证——webapi 是只读的（GET-only、spec-only），但 `/api/jobs` 暴露全部 Mirror 的状态与调度信息，spec 视图暴露同步命令/卷配置等内部细节。**操作者必须在网关（NGF / NGINX Gateway Fabric）层为 admin host 强制 BasicAuth**（例如 NGF 的 BasicAuth Policy 绑定到该 host/route）；chart 与控制器都不做、也不计划内置认证。

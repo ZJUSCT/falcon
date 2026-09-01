@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	mirrorv1alpha1 "github.com/ZJUSCT/falcon/api/v1alpha1"
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -21,6 +23,12 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	sch := runtime.NewScheme()
 	if err := mirrorv1alpha1.AddToScheme(sch); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
+	}
+	if err := corev1.AddToScheme(sch); err != nil {
+		t.Fatalf("corev1.AddToScheme: %v", err)
+	}
+	if err := snapshotv1.AddToScheme(sch); err != nil {
+		t.Fatalf("snapshotv1.AddToScheme: %v", err)
 	}
 	return sch
 }
