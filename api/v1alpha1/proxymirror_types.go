@@ -55,6 +55,9 @@ type ProxyMirrorSpec struct {
 	// optional cache PVC is mounted at ProxyCacheMountPath instead. Service
 	// names must be unique.
 	// +optional
+	// Same MaxItems rationale as Mirror.spec.services: bounds the uniqueness
+	// CEL rule's estimated cost below the API server's CRD schema budget.
+	// +kubebuilder:validation:MaxItems=3
 	// +kubebuilder:validation:XValidation:rule="self.all(s, self.exists_one(e, e.name == s.name))",message="service names must be unique"
 	Services []MirrorServingService `json:"services,omitempty"`
 }

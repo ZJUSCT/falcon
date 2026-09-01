@@ -119,6 +119,8 @@ spec:
                   publishing (nothing is deployed). There is no data volume to mount: the
                   optional cache PVC is mounted at ProxyCacheMountPath instead. Service
                   names must be unique.
+                  Same MaxItems rationale as Mirror.spec.services: bounds the uniqueness
+                  CEL rule's estimated cost below the API server's CRD schema budget.
                 items:
                   description: |-
                     MirrorServingService describes one publish service of a Mirror: a
@@ -163,10 +165,14 @@ spec:
                         Name is the protocol identifier of this service. Only "http" services
                         are routed through the Gateway API; "rsync" and "git" services are
                         exposed through their Service only (no route, no TCPRoute).
+                        MaxLength is no semantic bound (the enum fixes the allowed values); it
+                        keeps the string comparisons of the uniqueness CEL rule cheap enough
+                        for the API server's CRD schema cost budget.
                       enum:
                       - http
                       - rsync
                       - git
+                      maxLength: 63
                       type: string
                     ports:
                       description: |-
@@ -286,6 +292,7 @@ spec:
                   - name
                   - ports
                   type: object
+                maxItems: 3
                 type: array
                 x-kubernetes-validations:
                 - message: service names must be unique

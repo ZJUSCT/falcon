@@ -133,6 +133,10 @@ type MirrorServingService struct {
 	// are routed through the Gateway API; "rsync" and "git" services are
 	// exposed through their Service only (no route, no TCPRoute).
 	// +kubebuilder:validation:Enum=http;rsync;git
+	// MaxLength is no semantic bound (the enum fixes the allowed values); it
+	// keeps the string comparisons of the uniqueness CEL rule cheap enough
+	// for the API server's CRD schema cost budget.
+	// +kubebuilder:validation:MaxLength=63
 	Name string `json:"name"`
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image"`
@@ -176,6 +180,12 @@ type MirrorSpec struct {
 	// (so there can be at most one "http" entry, which owns the publish
 	// HTTPRoute).
 	// +optional
+	// MaxItems is not just hygiene: the uniqueness CEL rule below iterates the
+	// array with nested exists_one, and an unbounded array makes its estimated
+	// cost exceed the API server's CRD schema budget, so the CRD is rejected
+	// outright on newer K8s (observed on 1.36). The bound is exact: with the
+	// enum-restricted Name and unique names, >3 entries can never validate.
+	// +kubebuilder:validation:MaxItems=3
 	// +kubebuilder:validation:XValidation:rule="self.all(s, self.exists_one(e, e.name == s.name))",message="service names must be unique"
 	Services []MirrorServingService `json:"services,omitempty"`
 }
