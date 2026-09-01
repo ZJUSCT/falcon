@@ -1,0 +1,87 @@
+{{- /*
+zfs-agent: one privileged DaemonSet pod per storage node. The agent chroots
+into the host root (hostPath /) and executes the host's zfs/zpool to build a
+read-only usage report, so the container must stay root, keep every
+capability, and must NOT set runAsNonRoot / allowPrivilegeEscalation: false.
+It talks to no Kubernetes API and therefore mounts no service account token.
+*/ -}}
+{{- if .Values.zfsAgent.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "falcon.fullname" . }}-zfs-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "falcon.labels" . | nindent 4 }}
+    app.kubernetes.io/component: zfs-agent
+spec:
+  selector:
+    matchLabels:
+      {{- include "falcon.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: zfs-agent
+  template:
+    metadata:
+      labels:
+        {{- include "falcon.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: zfs-agent
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      {{- with .Values.zfsAgent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.zfsAgent.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: zfs-agent
+          image: {{ include "falcon.image" (dict "image" .Values.zfsAgent.image "defaultTag" .Chart.AppVersion "ctx" $) }}
+          imagePullPolicy: {{ .Values.zfsAgent.image.pullPolicy }}
+          {{- with .Values.zfsAgent.extraArgs }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # The listen port is part of the aggregation contract (the
+          # controller's webapi and this chart hardcode 9474) — not a value.
+          ports:
+            - name: zfs-agent
+              containerPort: 9474
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: zfs-agent
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: zfs-agent
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            # The host root, chroot target of every zfs/zpool exec.
+            - name: host
+              mountPath: /host
+              readOnly: true
+              # Host mounts (new pools, /dev changes) propagate into the
+              # agent's view of the host.
+              mountPropagation: HostToContainer
+          resources:
+            {{- toYaml .Values.zfsAgent.resources | nindent 12 }}
+          securityContext:
+            privileged: true
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: host
+          hostPath:
+            path: /
+            type: Directory
+{{- end }}

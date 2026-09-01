@@ -1,6 +1,6 @@
 # 控制器与 CRD 规范
 
-本文覆盖 Falcon 控制器及其两个 CRD 的全部行为：Mirror / ProxyMirror 的 schema、生命周期、调度与并发、快照保留、发布负载与 HTTPRoute、webapi、可观测性与恢复。依据 `api/v1alpha1/`、`internal/controller/`、`internal/config/`、`internal/webapi/`、`cmd/controller/main.go`。数字、默认值、名字均引自代码；打包部署（chart、values、CI）见 [`chart.md`](chart.md)，管理前端见 [`ui.md`](ui.md)。时间戳术语遵循 README「概念与术语」：时间戳是**同步开始时**的 UNIX 时间戳，控制器创建同步任务时生成一次，并传播到同步 Job、快照、发布 PVC 的名字与标签。
+本文覆盖 Falcon 控制器及其两个 CRD 的全部行为：Mirror / ProxyMirror 的 schema、生命周期、调度与并发、快照保留、发布负载与 HTTPRoute、webapi、可观测性与恢复。依据 `api/v1alpha1/`、`internal/controller/`、`internal/config/`、`internal/webapi/`、`cmd/controller/main.go`。数字、默认值、名字均引自代码；打包部署（chart、values、CI）见 [`chart.md`](chart.md)，管理前端见 [`ui.md`](ui.md)。时间戳术语遵循 README「概念」：时间戳是**同步开始时**的 UNIX 时间戳，控制器创建同步任务时生成一次，并传播到同步 Job、快照、发布 PVC 的名字与标签。
 
 ---
 
@@ -90,7 +90,7 @@ CEL/schema 级约束：`name` 唯一性 CEL（`self.all(s, self.exists_one(e, e.
 | `consecutiveFailures` | 自上次成功发布起连续失败的同步次数：失败路径上低于 `failureRetryLimit` 时 +1（快速重试），达到后冻结；发布激活清零。驱动 §6.2 的重试节奏 |
 | `lastPublishedAt` | 仅发布激活写 |
 | `lastHandledSyncRequest` | 仅发布激活与失败路径写 |
-| `sizeBytes` | 声明但从未填充，恒为空（见 discrepancies） |
+| `sizeBytes` | 活跃发布 PVC 的 kubelet 上报占用（该节点 stats summary 中此 PVC 卷的 usedBytes，字节）。发布激活时 best-effort 随激活 Patch 写入；未取到则由空闲路径回填（`activePVC` 非空且 `sizeBytes` 为 0 时）。发布 PVC 内容不可变，该值一次计算即永久准确，无需周期刷新；取不到时（纯同步镜像无发布 Pod、发布 Pod 尚未运行、节点 summary 未报该卷等）保持为空，失败只记日志 |
 | `lastSync` | `{jobName, phase(Running/Succeeded/Failed), startedAt, finishedAt, message}`；startSync 整体替换，发布/失败时只改 phase/finishedAt/message（jobName、startedAt 保留） |
 | `conditions` | Ready / Progressing / Degraded 三条，见 §8.2 |
 
@@ -212,6 +212,8 @@ pending 流水线阶段（`pendingJob/pendingPVC/pendingSnapshot/pendingSyncTime
 
 **失败 Job 保留**（keepFailedJobs）：每次同步到达终态（发布激活与失败路径均会执行）后，控制器按创建时间保留最新的 `spec.sync.keepFailedJobs` 个失败 Job（Background 传播删除其余及其 Pod）；成功 Job 不由该路径触及（带 sync-timestamp 标签，随快照代次由 pruneOldSnapshots 清理，见 §7）。
 
+发布激活的 Patch 同时 best-effort 携带 `sizeBytes`（见 §1.2）：控制器按标签定位任一 Running 发布 Pod 取其节点，再读该节点 kubelet stats summary 中此 PVC 的 usedBytes。计算不成功不影响激活的任何语义。
+
 失败代谢物：同步 PVC 里的半成品数据不被清理；极端时序下可能留下孤儿快照（见 discrepancies）。
 
 ### 4.7 paused 语义
@@ -229,7 +231,7 @@ pending 流水线阶段（`pendingJob/pendingPVC/pendingSnapshot/pendingSyncTime
 3. 两者清空后移除 finalizer 放行 API 删除。
 4. Job/Service/Deployment/HTTPRoute 不由该流程删除——owner-reference GC 回收。PVC 底层 PV 回收由 StorageClass reclaimPolicy 决定（Retain 下数据保留）。
 
-`spec.services` 为空（纯同步镜像）的 Mirror：存储侧流水线照常（快照、克隆发布 PVC 照常产生），跳过发布负载与 HTTPRoute，直接发布激活；webapi 目录照常收录。
+`spec.services` 为空（纯同步镜像）的 Mirror：存储侧流水线照常（快照、克隆发布 PVC 照常产生），跳过发布负载与 HTTPRoute，直接发布激活；webapi 目录不收录——没有发布服务就无从访问（见 §8.2）。
 
 ## 5. 发布 Service / Deployment / HTTPRoute
 
@@ -326,7 +328,7 @@ startSync：Normal 事件 `SynchronizationStarted`（"Starting synchronization r
 
 - 开关：`catalog.enabled`（Go 侧默认 false，chart 默认 true）；关闭时 404 `{"error": "mirrorz catalog is disabled"}`。
 - 文档骨架：`{version: 1.7, site: {url, abbr, name}, info: [], mirrors: [...]}`；abbr/name 空则省略；info 恒为空数组；Mirror 与 ProxyMirror 条目合并后按 `cname` 升序。
-- 条目映射：`cname = metadata.name`；`url = <baseURL>/<CR名>`（无末尾斜杠）；`upstream = spec.info.upstream`（空省略）；`desc` 取 `description` 的 `zh`（非空），否则 `en`（皆缺省略）；不输出 `size`（sizeBytes 从未填充）与 `help`。
+- 条目映射：`cname = metadata.name`；`url = <baseURL>/<CR名>`（无末尾斜杠）；`upstream = spec.info.upstream`（空省略）；`desc` 取 `description` 的 `zh`（非空），否则 `en`（皆缺省略）；`size` 为 `status.sizeBytes` 格式化的人类可读字符串（MirrorZ 的 size 是字符串而非字节数：1024 进位、两位小数，如 `596.18G`），未知（0）时省略；不输出 `help`。
 - 状态字母（`status.phase` → 单字母）：
 
 | Mirror | 字母 | ProxyMirror | 字母 |
@@ -336,7 +338,7 @@ startSync：Normal 事件 `SynchronizationStarted`（"Starting synchronization r
 | Paused | P | — | |
 | Degraded / Pending / "" | D | Degraded | D |
 
-- 未发布 Mirror（`activePVC` 空，即从未产生过发布 PVC）不出现；ProxyMirror 无此概念，全部列出。
+- 未发布（`activePVC` 空，即从未产生过发布 PVC）或未声明发布服务（`spec.services` 空——没有发布服务就无从访问，不该进公开目录）的 Mirror 不出现；ProxyMirror 无此概念，全部列出。
 - **Host 回显算法**：请求 Host 去端口（`net.SplitHostPort` 成功取 host）→ 转小写 → 与 `serving.hostnames` 逐项（小写化）比较；命中时 `baseURL = <site.url 的 scheme>://<回显host>`（端口不保留，scheme 缺省 https）；Host 空或未命中回落 `site.url`（去末尾 `/`）。site.url 与全部条目 url 用同一 baseURL。
 
 ### 8.3 GET /api/jobs（legacy 兼容任务列表）
@@ -360,6 +362,18 @@ ProxyMirror 条目：`id/namespace/kind/phase` 照常；`status` 直接取原始
 - 格式协商：`.json` → JSON；`.yaml`/`.yml` → YAML；无后缀默认 YAML（Content-Type `application/x-yaml`）。名字先 TrimSpace 再去后缀。
 - 恰一个 Mirror 或 ProxyMirror 匹配（跨 namespace、跨 kind）→ 200，body 为其 `spec` 序列化；**status、metadata 永不出现**。
 - 无匹配 → 404 `{"error": "repo not found: <name>"}`；多于一个（不同 namespace 或 Mirror 与 ProxyMirror 重名——不同资源类型 API 层允许）→ 409 `{"error": "ambiguous repo name: <name>"}`；名字为空（`/api/repos`、`/api/repos/`）→ 404 `{"error": "missing repo name: use /api/repos/<name>"}`（旧版整表 JSON 列表端点不再存在）。
+
+### 8.5 GET /api/usage（ZFS 用量聚合）
+
+- 开关：仅环境变量 `ZFS_AGENT_SERVICE`（非空 = 启用，值为 zfs-agent headless Service 名）；没有 config 字段。未启用时 404 `{"error": "usage aggregation is disabled"}`。
+- 数据源：chart 部署的 zfs-agent DaemonSet（每存储节点一个，chroot 进宿主机只读执行 zfs/zpool，见 chart spec §7.5）。控制器用 client-go clientset 列出本 ns 的 `discovery.k8s.io` EndpointSlices（label `kubernetes.io/service-name=<service>`），取 ready 端点地址并去重（Ready 条件缺省按 API 语义视为 ready），并发 `GET http://<ip>:9474/v1/zfs` 拉取各节点的 ZFS 用量报告。agent 端口 9474、单请求超时 5s、聚合缓存 TTL 30s 均为代码常量，不可配置。
+- 聚合与降级：单节点失败（网络错误/超时/非 200/解码失败）不阻塞其余节点；错误记为 `<节点名>: <错误>`（节点名取 EndpointSlice 的 nodeName，缺失时用地址），并使本次聚合 `complete=false`。失败/降级结果与成功结果同样进缓存，TTL 到期重算；无 ready 端点同样 `complete=false`（错误 "no ready zfs-agent endpoints ..."）。EndpointSlices 列取失败则整体 500，且不缓存（下次请求重试）。
+- 响应形状：`{"generatedAt": <聚合时刻>, "mirrors": [...]}`；mirrors 按名升序，**收录本 ns 全部 Mirror**（含从未同步的）。每项 `{name, sync, snapshots, totalBytes, complete, errors}`：
+  - join：同步 PVC 名优先取 `status.workPVC`，为空时按 childBase 规则派生 `<base>-sync`；在聚合数据中按 `pvc.name` 匹配（namespace 须为本 ns）→ `sync: {pvc, referencedBytes}`（ZFS `referenced` 口径）。
+  - `snapshots` = 该 dataset 的全部快照按 `createdAt` 升序 `{name, writtenBytes, createdAt}`；`name` 优先用 userprop `openebs.io:vs-name`（即 VolumeSnapshot 对象名），缺失时回退 ZFS 快照名；`writtenBytes` 是相对上一快照的增量。
+  - `totalBytes = sync.referencedBytes + Σ snapshots[].writtenBytes`（sync 为 null 时按 0 计）。
+  - 无 agent 数据匹配的 Mirror：`sync: null`、`snapshots: []`、`totalBytes: 0`；`complete`/`errors` 为全局聚合结果（任一 agent 失败，所有 Mirror 同值）。
+- agent 报告中匹配不到任何 Mirror 的 dataset（其他系统的卷、无 openebs userprop 的残留 dataset）被忽略；`mirrorz.json` 的 `size` 与 `status.sizeBytes`（kubelet 口径）不受影响。
 
 ## 9. 可观测性
 
@@ -432,6 +446,8 @@ fail-fast 校验（启动时，非法拒绝启动）：归一化（site.url Trim
 - leader election ID 固定 `falcon-controller.mirrors.zjusct.io`，`ReleaseOnCancel: true`。
 - 注册 scheme：client-go 全量、snapshot.storage.k8s.io v1、gateway.networking.k8s.io v1、mirrors.zjusct.io v1alpha1。
 - Mirror 控制器 watch：For Mirror + Owns PVC/VolumeSnapshot/Job/Service/Deployment/HTTPRoute；ProxyMirror 控制器：For ProxyMirror + Owns PVC/Service/Deployment/HTTPRoute。
+- 控制器另持一个 kubelet stats summary 读取器（经 API server 节点代理 `GET /api/v1/nodes/<node>/proxy/stats/summary`，client-go v0.36.1 无类型化方法；按节点 60s TTL 内存缓存，请求 10s 超时），支撑 `status.sizeBytes` 的 best-effort 统计；需要 `nodes/proxy` get（chart 的 node-stats ClusterRole，见 chart spec §6）。
+- `ZFS_AGENT_SERVICE` 环境变量非空时，webapi 另构造 zfs-agent 聚合器（`/api/usage` 的数据源；agent 地址经本 ns EndpointSlices 发现，需 `discovery.k8s.io` endpointslices get/list——chart 仅在 `zfsAgent.enabled` 时渲染该规则，见 chart spec §6）；为空则不构造，`/api/usage` 404（见 §8.5）。
 - 健康检查 healthz/readyz 均为 ping；serving.hostnames 为空时启动记一次禁用日志。
 
 ## 11. 重启与中间态恢复

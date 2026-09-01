@@ -6,14 +6,15 @@
 
 - 页面只有两个：**Overview**（统计卡 + 24h 时钟轮盘 + Currently Running + Recent Failures）与 **Mirrors**（列表），外加一个 **Mirror 详情**视图。
 - 侧栏仅含：两项导航（Overview/Mirrors）、一个外链 `https://mirrors.zjusct.io/mirrorz.json`（硬编码，新窗口）、主题循环按钮、折叠按钮；品牌块显示 "Falcon"。
-- 全部只读：旧版的暂停/恢复/手动触发按钮、仓库编辑表单、Worker/Queue/Actions/Configs 视图全部不存在——后端没有写端点，UI 无从发起。侧栏 logo 块的 "MG" 字样是 legacy 残留。
+- 全部只读：旧版的暂停/恢复/手动触发按钮、仓库编辑表单、Worker/Queue/Actions/Configs 视图全部不存在——后端没有写端点，UI 无从发起。侧栏品牌块显示 `falcon.svg` 图标（静态资源 `/falcon.svg`）与 "Falcon" 字样。
 
 ## 2. 数据来源与刷新
 
 - API 客户端同源（`fetch('/api/...')`）：网关把 `Exact /api/jobs` 与 `PathPrefix /api/repos/` 指到控制器 webapi Service、`/` 指到 UI Service；UI 容器内 nginx 不做任何代理。
   - `GET /api/jobs` → 任务列表（字段见 mirror spec §8.3）。
   - `GET /api/repos/<name>` → spec 文本（默认 YAML；传 `ext: 'json'` 得 JSON）。
-- 刷新节奏：Overview 与 Mirrors 挂载时拉一次 `/api/jobs`，之后每 **5000 ms** 后台轮询（失败仅 `console.warn`，不打断界面）；详情视图同样每 5 秒重拉 `/api/jobs` 按 `id` 找本行。
+  - `GET /api/usage` → 全集群存储占用聚合（`generatedAt` + `mirrors[]`：`name` 对应任务 `id`、`sync`（PVC 名 + 引用字节；null 表示暂无 ZFS 数据）、`snapshots[]`（按 `createdAt` 升序）、`totalBytes`（后端已算好）、`complete`/`errors`）。功能未部署时返回 404，UI 静默降级为无数据（仅 `console.warn`，不打断界面）；ProxyMirror 不会出现。
+- 刷新节奏：Overview 与 Mirrors 挂载时拉一次 `/api/jobs`，之后每 **5000 ms** 后台轮询（失败仅 `console.warn`，不打断界面）；详情视图同样每 5 秒重拉 `/api/jobs` 按 `id` 找本行。Mirrors 列表与详情视图另经 `useUsage` 每 **30000 ms** 轮询 `/api/usage`（聚合开销大，节奏放缓；404/网络失败同样静默——成功前为无数据，成功后失败保留上次结果）。
 - spec 只在 SpecViewer 挂载/换名时拉取一次，不轮询（spec 只随 CR 编辑变化，页面重载即更新）。
 - 错误消息：响应非 2xx 时优先取 JSON body 的 `error` 字段，否则 `API request failed: <statusText>`。
 - 当前时间每 **1000 ms** 更新一次（驱动轮盘指针、相对时间、"LIVE" 页面）。
@@ -61,13 +62,14 @@
 - 排序：状态优先级 Running=0、Waiting=2、Paused=3、其余（含 ProxyMirror 原始 phase）=4；同优先级按 `next_attempt_at` 升序，零值时间排最后。
 - 过滤：搜索按 `id` 不区分大小写子串匹配；状态下拉 All/Running/Waiting/Paused/Failed——`Failed` 匹配 `last_action_status === 'Failed'`，其余按 `status` 精确匹配。
 - 顶部统计卡四个：Running / Waiting / Paused / Last Sync Failed。
-- 表格列：Job（id + namespace + 移动端紧凑信息）、Kind（`ProxyMirror` 紫徽标 / `Mirror` 主色徽标）、Status（徽标；`phase` 与 `status` 不同时附注原始 phase）、Last Action、Next Attempt、Last Attempt、Last Success、Last Failure（后四列按 md/lg 断点渐进显示）。
+- 表格列：Job（id + namespace + 移动端紧凑信息）、Kind（`ProxyMirror` 紫徽标 / `Mirror` 主色徽标）、Status（徽标；`phase` 与 `status` 不同时附注原始 phase）、Size（`/api/usage` 按 `name` join 后的 `totalBytes` 经 `formatBytes` 格式化；无数据显示 `—`；`complete: false` 时数值后附 `~` 并以 title 提示部分数据；md 以下隐藏）、Last Action、Next Attempt、Last Attempt、Last Success、Last Failure（Last Action 起按 md/lg 断点渐进显示）。
 - 行点击或 Enter/Space 键进入详情；行可聚焦（tabIndex 0）。
 
 ## 5. Mirror 详情
 
 - 头部：返回按钮（"Back to Mirrors"）、镜像 id（等宽）、Kind 徽标、Status 徽标。
 - Sync Status 卡（每 5 秒从 `/api/jobs` 按 id 找该行）：Status、Phase、Last Action、Namespace、Active PVC、Last Success、Last Failure、Last Attempt、Next Attempt、Last Finished 十格；找不到对应任务时显示提示（无同步历史的 ProxyMirror 属正常情形）。
+- Storage Usage 卡（`/api/usage` 按 `name` 取该镜像记录，30 秒轮询）：首行 Sync PVC（PVC 名 + `referencedBytes` 格式化；`sync` 为 null 显示 "No ZFS data yet"）、每快照一行（快照名 + `writtenBytes` 格式化 + 相对时间）、末行 Total（`totalBytes`）。ProxyMirror 显示 "Not applicable"；无记录或端点未部署显示 "Usage data unavailable"；`complete: false` 时卡顶轻提示 "Some storage nodes did not respond; data may be partial"。字节格式化用 `formatBytes`（1024 进制 B/KB/…/PB；<1 KB 整数不加小数；否则一位小数，整数值或 ≥100 时省小数；非法输入返回 null，由调用方显示 `—`）。
 - Resource Spec 卡（read-only）：SpecViewer 拉取 `/api/repos/<id>`（无后缀 → YAML），等宽 `<pre>` 只读渲染；Copy 按钮优先 `navigator.clipboard`，不可用时回退临时 textarea + `execCommand('copy')`；复制成功显示 "Copied" 2 秒。
 
 ## 6. hash 路由
@@ -95,6 +97,7 @@
 - `next.config.js`：`output: 'export'`、`distDir: 'dist'`、`compress: false`——`npm run build` 产出全静态站点。
 - 镜像两阶段：`node:22-alpine` 执行 `npm ci`（锁文件安装）+ `next build` → `nginx:alpine` 拷贝 `dist/` 到 `/usr/share/nginx/html`；`EXPOSE 8080`；chart 部署时以 uid/gid 101 非 root 运行。
 - 本地构建：`cd ui && npm ci && npm run build`（见仓库 README 开发节）。
+- favicon：仓库根 `falcon.svg` 复制为 `ui/app/icon.svg`，走 Next.js App Router 图标文件约定——构建时自动在页面 `<head>` 注入 `<link rel="icon" href="/icon.svg?<hash>" type="image/svg+xml" sizes="any">` 并在产物根生成 `icon.svg`；nginx 的标准 `mime.types` include 使 `.svg` 以 `image/svg+xml` 正确返回。
 
 ### 9.2 nginx 行为（ui/nginx.conf）
 

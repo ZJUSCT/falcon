@@ -4,7 +4,7 @@
 
 ## 已知限制
 
-1. **`sizeBytes` 未实现**：status 里声明了字段，但控制器没有任何统计逻辑，永远为空。
+1. **`sizeBytes` 覆盖不完整**：活跃发布 PVC 的占用已实现——kubelet stats summary 的 usedBytes，发布激活时 best-effort 计算、空闲路径在取值为 0 时回填（见 mirror spec §1.2）；但纯同步镜像（`spec.services` 空）没有发布 Pod，控制器无从定位 PVC 所在节点，拿不到 kubelet 用量，其 `sizeBytes` 保持为空。
 2. **全局并发上限是内存态**：`sync.maxConcurrent` 配额不持久化，控制器重启后从零计数（正在运行的 Job 在被 Reconcile 时重新计入）。重启瞬间可能出现短暂超限。
 3. **调度链路脆弱**：定时完全依赖 `status.nextSyncAt` + 单次 `RequeueAfter`，没有周期性 resync 兜底。某次重排丢失且无其他事件触发时，该 Mirror 的调度可能停摆。
 4. **失败残留物部分保留**：失败同步的 Job 对象已按 `spec.sync.keepFailedJobs` 限量清理（默认保留最近 1 个，超出的随每次同步终态删除）；但仍不清理同步 PVC 里的半成品数据；从未成功过的 Mirror 反复失败时，保留窗口内的失败 Job/日志仍会占位；极端时序下可能留下不被回收的孤儿快照。快照克隆发布 PVC 侧的"失败产物"（如快照已建但克隆从未发生的中间态）也没有专门清理路径。
@@ -12,9 +12,16 @@
 6. **同步 PVC 只扩不缩**：声明容量调小不会生效（也不会报错）。
 7. **无 admission webhook**：除 CRD schema/CEL 校验和 Reconcile 时的字段校验（写入 Degraded condition）外，没有前置校验组件。
 8. **发布 PVC 被外部删除不重建**：控制器不检测已发布 PVC 的存在性，状态保持 Ready 直到人工介入（见 mirror spec §11）。
-9. **版本策略 TODO**：开发期不切版本——镜像 tag 为 7 位 short sha，chart 版本为 `0.0.0-sha-<hash>`（SemVer prerelease，OCI tag 即该字符串）；chart/镜像 pinning 与正式 semver 发布流程是后续工作。
+9. **`/api/usage` 仅覆盖 openebs zfs-localpv 后端**：agent 依赖 zfs-localpv 落在 dataset/快照上的 userprop（`openebs.io:pvc-name`/`pvc-namespace`、`vs-name`/`vs-namespace`）做归属；存量手工创建或迁移进来的 dataset 缺这些属性时无法归属到任何 Mirror，直接被聚合忽略（不报错）。其他 CSI 驱动（无同名 userprop）的存储不会出现在用量里。
+10. **两套用量口径不可互换**：`/api/usage` 的字节数是 ZFS 属性口径——同步 PVC 用 `referenced`（dataset 自身引用量，不含快照增量重复计入）、快照用 `written`（相对上一快照的增量）；`status.sizeBytes` 是 kubelet stats summary 的 `usedBytes`（文件系统已用口径，且只统计活跃发布 PVC）。两者数值不同属正常，前端不应混用。
 
 ## 决策记录
+
+### SemVer + git tag 发版（2026-08-31）
+
+- **决策**：发布流程从开发期 sha 版本切换为 SemVer + git tag。两个 workflow 的触发统一改为且仅改为 push `v*` tag（不再由 main 分支推送或手动触发）；一个 tag = 一次完整发版，controller / UI / zfs-agent 三个镜像与 chart 锁步。镜像 tag 为 git tag 原样（`v0.0.0`）；chart 版本为剥离 `v` 前缀的 tag（`0.0.0`），appVersion 为 tag 原样——CI 打包前 sed 盖写 Chart.yaml 的两个 checked-in 占位字段，发布以 tag 为唯一事实来源。不打 latest；OCI tag 不可变，发错版 = 修复后打新 tag，不重推。
+- **背景**：原流程由 main 分支推送即发布，镜像 tag 为 7 位提交哈希、chart 版本为带 sha 后缀的 `0.0.0` prerelease，无法表达各组件间的版本对应，chart/镜像 pinning 一直是悬置的 TODO。values 中 webui 镜像曾单独 pin 在 `v0.1.1`，锁步发版后 pin 失去意义，随之移除（`tag: ""` = Chart.AppVersion，与控制器 / zfs-agent 一致）。
+- **影响**：安装发布版 chart 应携带 `--version <semver>`（如 `--version 0.0.0` 对应 tag `v0.0.0`）；任一组件出问题需修复后打新 tag 重发，无法替换已发布的 OCI tag。
 
 ### 统一同步时间戳 + 同步 PVC 定名 + serving 块扁平化（2026-08-31，BREAKING）
 

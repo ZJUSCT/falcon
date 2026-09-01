@@ -3,15 +3,20 @@
 // Mirror list — read-only port of the legacy Mirrors view.
 //
 // Dropped relative to the legacy component: TriggerButton (manual sync),
-// orphan-job deletion, worker matching, ZFS size column. None of these have
-// a backend anymore — the controller serves a strictly read-only API.
-// Data source: GET /api/jobs.
+// orphan-job deletion, worker matching. None of these have a backend
+// anymore — the controller serves a strictly read-only API. The legacy ZFS
+// size column returns as "Size", backed by the usage aggregation.
+// Data sources: GET /api/jobs (5s poll) and GET /api/usage (30s poll;
+// silently absent — the Size column shows `—` — when the usage feature is
+// not deployed on the backend).
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import type { KeyboardEvent } from 'react';
 import { StatusBadge } from '@/components/status-badge';
 import { RelativeTime } from '@/components/relative-time';
 import { apiClient } from '@/lib/api';
+import { useUsage } from '@/lib/hooks';
+import { formatBytes } from '@/lib/utils';
 import { Job } from '@/types';
 import { Search } from 'lucide-react';
 
@@ -46,6 +51,13 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('All');
+  const usage = useUsage();
+
+  // Join usage rows onto jobs by id (usage `name` === job `id`).
+  const usageByName = useMemo(
+    () => new Map((usage?.mirrors ?? []).map(entry => [entry.name, entry])),
+    [usage]
+  );
 
   useEffect(() => {
     const fetchInitial = async () => {
@@ -177,6 +189,7 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                   <th className="px-3 py-2 text-center">Job</th>
                   <th className="px-3 py-2 text-center">Kind</th>
                   <th className="px-3 py-2 text-center">Status</th>
+                  <th className="hidden md:table-cell px-3 py-2 text-center">Size</th>
                   <th className="hidden md:table-cell px-3 py-2 text-center">Last Action</th>
                   <th className="hidden md:table-cell px-3 py-2 text-left">Next Attempt</th>
                   <th className="hidden md:table-cell px-3 py-2 text-left">Last Attempt</th>
@@ -187,6 +200,8 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
               <tbody className="divide-y divide-border">
                 {filtered.map(job => {
                   const lastActionStatus = (job.last_action_status || '').trim();
+                  const mirrorUsage = usageByName.get(job.id);
+                  const sizeText = mirrorUsage ? formatBytes(mirrorUsage.totalBytes) : null;
                   return (
                     <tr
                       key={`${job.namespace}/${job.id}`}
@@ -228,6 +243,23 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                         <StatusBadge status={job.status} />
                         {job.phase && job.phase !== job.status && (
                           <div className="mt-1 text-[10px] font-mono text-muted-foreground">{job.phase}</div>
+                        )}
+                      </td>
+                      <td className="hidden md:table-cell px-3 py-2 text-center align-top whitespace-nowrap">
+                        {sizeText ? (
+                          <span className="font-mono tabular-nums">
+                            {sizeText}
+                            {mirrorUsage && !mirrorUsage.complete && (
+                              <span
+                                className="ml-1 text-amber-500"
+                                title="Partial data: some storage nodes did not respond"
+                              >
+                                ~
+                              </span>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="font-mono text-muted-foreground">—</span>
                         )}
                       </td>
                       <td className="hidden md:table-cell px-3 py-2 text-center align-top">

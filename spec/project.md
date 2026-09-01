@@ -31,8 +31,8 @@ Falcon（原项目名 MirrorGo，发布为 `github.com/ZJUSCT/falcon`）是一�
 | `internal/webapi/` | 只读 HTTP 端点（mirrorz.json、/api/jobs、/api/repos/<name>） |
 | `charts/falcon/` | Helm chart（控制器 + UI + RBAC + 管理域/目录 HTTPRoute + crds/） |
 | `ui/` | 管理后台前端：Next.js 14 静态导出 + nginx 静态服务（`ui/Dockerfile`、`ui/nginx.conf`） |
-| `.github/workflows/docker.yml` | 后端/前端镜像构建发布（push 到 main，tag = 7 位 git short sha） |
-| `.github/workflows/release-chart.yml` | Helm chart OCI 发布流程（push main / 手动触发，版本 `0.0.0-sha-<hash>`） |
+| `.github/workflows/docker.yml` | 三个镜像（控制器 / UI / zfs-agent）构建发布（push `v*` tag，镜像 tag = git tag 原样） |
+| `.github/workflows/release-chart.yml` | Helm chart OCI 发布流程（push `v*` tag，chart 版本 = 剥离 `v` 的 tag，appVersion = tag 原样） |
 
 ## 部署环境事实（来自代码与 chart 默认值）
 
@@ -55,7 +55,7 @@ Falcon（原项目名 MirrorGo，发布为 `github.com/ZJUSCT/falcon`）是一�
 
 ## 约定（conventions）
 
-- **确定性子对象命名**：子对象名由 `childBase(CR 名)`（小写化、`.`/`_`→`-`、去首尾 `-`、空则 `mirror`）加角色后缀派生（`<base>-sync`（同步 PVC，固定名）、`<base>-sync-<ts>`（同步 Job）、`<base>-snap-<ts>`（VolumeSnapshot 与其同名发布 PVC）、`<base>-publish-<协议>`、`<base>-publish`（HTTPRoute）、`<base>-cache`）。派生名超过 63 字符是**错误**（InvalidSpec），不再截断。快照代次标识是 Unix 秒时间戳标签 `mirrors.zjusct.io/sync-timestamp`——时间戳在控制器创建同步任务时分配一次，并传播到同步 Job 名、快照名、发布 PVC 名与标签（README「概念与术语」）。
+- **确定性子对象命名**：子对象名由 `childBase(CR 名)`（小写化、`.`/`_`→`-`、去首尾 `-`、空则 `mirror`）加角色后缀派生（`<base>-sync`（同步 PVC，固定名）、`<base>-sync-<ts>`（同步 Job）、`<base>-snap-<ts>`（VolumeSnapshot 与其同名发布 PVC）、`<base>-publish-<协议>`、`<base>-publish`（HTTPRoute）、`<base>-cache`）。派生名超过 63 字符是**错误**（InvalidSpec），不再截断。快照代次标识是 Unix 秒时间戳标签 `mirrors.zjusct.io/sync-timestamp`——时间戳在控制器创建同步任务时分配一次，并传播到同步 Job 名、快照名、发布 PVC 名与标签（README「概念」）。
 - **统一子对象标签**：`app.kubernetes.io/name: falcon`、`app.kubernetes.io/managed-by: falcon-controller`、`mirrors.zjusct.io/mirror: <base>`、`mirrors.zjusct.io/role: <sync|snapshot|publish-data|publish-http|publish-rsync|publish-git|proxy-cache|publish（HTTPRoute）>`（同步 PVC 与同步 Job 共用 role `sync`）。
 - **不改名的稳定接口**：CR label key / finalizer / annotation / API 组 `mirrors.zjusct.io`（站点域名，非项目名）；Event reason 与 condition reason 词汇表。
 - **同步容器无隐式环境变量**：控制器不注入任何隐式 env（2026-08 决策，见 discrepancies.md）；数据位置由 `spec.sync.dataMountPath` 配置，其余由 `spec.sync.env` 显式传入。
@@ -85,12 +85,11 @@ UI 构建（Next.js 静态导出 + nginx，见 `ui/Dockerfile`）：
 cd ui && npm ci && npm run build   # 产出 dist/；镜像构建用 docker build ./ui
 ```
 
-本地推送 chart 测试（helm 复用 `~/.docker/config.json` 的 docker login）：
+本地验证 chart（lint 与打包）：
 
 ```sh
 helm lint charts/falcon --strict
 helm package charts/falcon
-helm push falcon-<version>.tgz oci://harbor.s.zjusct.io/library/charts
 ```
 
-版本策略：开发期不切版本——镜像 tag 为 7 位 short sha，chart 版本为 `0.0.0-sha-<hash>`（SemVer prerelease），push main 即发布；chart/镜像的 pinning 与正式 semver 发布流程是后续 TODO。
+版本策略：SemVer + git tag 发版。推送 `v<semver>` tag（如 `v0.0.0`）触发一次完整发版，三个镜像与 chart 锁步——镜像 tag 为 git tag 原样，chart 版本为剥离 `v` 前缀的 tag、appVersion 为 tag 原样（CI 发布时盖写 Chart.yaml 的占位字段）。不打 latest；OCI tag 不可变——发错版 = 修复后打新 tag，不重推。

@@ -3,6 +3,7 @@
 //   - GET /mirrorz.json      MirrorZ 1.7 catalog (Mirror + ProxyMirror)
 //   - GET /api/jobs          legacy-compatible job list (legacy Docker-era UI)
 //   - GET /api/repos/<name>  spec-only view of a single Mirror/ProxyMirror
+//   - GET /api/usage         ZFS usage aggregation over the zfs-agents
 //
 // Everything is served from one listener (default :8082) and is strictly
 // read-only: only GET is allowed, anything else gets 405.
@@ -43,6 +44,10 @@ type Server struct {
 	ServingHostnames []string
 	// CatalogEnabled gates GET /mirrorz.json (config catalog.enabled).
 	CatalogEnabled bool
+	// Usage aggregates zfs-agent reports for GET /api/usage. It is nil when
+	// the ZFS_AGENT_SERVICE environment variable is unset, which disables
+	// the endpoint (404) — there is no config field for it.
+	Usage *UsageAggregator
 }
 
 // Handler builds the http.Handler for the read-only API. All routes are
@@ -53,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/jobs", s.handleJobs)
 	mux.HandleFunc("/api/repos", s.handleRepoRoot)
 	mux.HandleFunc("/api/repos/", s.handleRepo)
+	mux.HandleFunc("/api/usage", s.handleUsage)
 	// No UI is embedded; everything else is a 404 JSON error.
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "not found")

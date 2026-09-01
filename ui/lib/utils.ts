@@ -4,6 +4,33 @@ export function cn(...inputs: ClassValue[]) {
   return clsx(inputs);
 }
 
+// Human-readable byte sizes (Mirrors "Size" column, detail "Storage Usage"
+// card). 1024-based with units B/KB/MB/GB/TB/PB. Rules:
+//   - null/undefined/NaN/infinite/negative input → null (callers render `—`).
+//   - Under 1 KB the value is an exact count: integer bytes, no decimals
+//     (e.g. "512 B"). 1024 B therefore renders as "1 KB".
+//   - Otherwise the largest fitting unit is picked; the value gets one
+//     decimal, dropped when the rounded value is a whole number or >= 100
+//     (e.g. "1.5 KB", "128 GB", "999.9 KB" — never "128.0 GB").
+export function formatBytes(bytes: number | null | undefined): string | null {
+  if (bytes === null || bytes === undefined) return null;
+  if (!Number.isFinite(bytes) || bytes < 0) return null;
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+
+  if (unit === 0) return `${bytes} B`;
+
+  const rounded = Math.round(value * 10) / 10;
+  const text = Number.isInteger(rounded) || rounded >= 100 ? rounded.toFixed(0) : rounded.toFixed(1);
+  return `${text} ${units[unit]}`;
+}
+
 export function formatRelativeTime(dateString: string): string {
   if (!dateString || dateString === '0001-01-01T00:00:00Z') {
     return 'Never';

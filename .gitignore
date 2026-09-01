@@ -6,7 +6,7 @@ node_modules
 
 state.db*
 
-falcon
+/falcon
 
 logs
 

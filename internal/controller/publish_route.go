@@ -32,6 +32,11 @@ const (
 	// which is named after the service protocol), and the port publish
 	// HTTPRoute backendRefs point at.
 	publishServicePort = 80
+
+	// publishRolePrefix is the shared prefix of every service entry's role
+	// label value ("publish-http", "publish-rsync", "publish-git") — publish
+	// pods are told apart from other children by this prefix.
+	publishRolePrefix = "publish-"
 )
 
 // publishChildName is the deterministic name of one service entry's publish
@@ -44,7 +49,7 @@ func publishChildName(base, protocol string) (string, error) {
 // Deployment, Service and pods ("publish-http", "publish-rsync",
 // "publish-git") so each Service selects only its own pods.
 func publishRole(protocol string) string {
-	return "publish-" + protocol
+	return publishRolePrefix + protocol
 }
 
 // publishAppProtocol is the appProtocol of the publish Service port: "http"

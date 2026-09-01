@@ -14,7 +14,7 @@ Falcon 目前处于开发早期阶段，在[浙江大学镜像站（ZJU Mirror�
 
 ```sh
 helm install falcon oci://ghcr.io/zjusct/charts/falcon \
-  -n mirror --create-namespace -f my-values.yaml
+  --version 0.0.0 -n mirror --create-namespace -f my-values.yaml
 ```
 
 - 镜像由 `Mirror` CR 描述；字段与示例见 [`spec/mirror.md`](spec/mirror.md)。
@@ -27,11 +27,12 @@ helm install falcon oci://ghcr.io/zjusct/charts/falcon \
 | --- | --- |
 | 控制器镜像 | `ghcr.io/zjusct/falcon` |
 | 管理前端镜像 | `ghcr.io/zjusct/falcon-ui` |
+| zfs-agent 镜像 | `ghcr.io/zjusct/zfs-agent` |
 | Helm Chart（OCI） | `oci://ghcr.io/zjusct/charts/falcon` |
 
-开发阶段镜像 tag 为 7 位 git short sha，chart 版本为 `0.0.0-sha-<hash>`，暂不使用版本 tag。
+发版由推送 `v<semver>` git tag（如 `v0.0.0`）触发，一个 tag = 一次完整发版：三个镜像的 tag 即 git tag 原样；chart 版本为剥离 `v` 前缀的 tag，`appVersion` 为 git tag 本身（CI 打包时盖写 Chart.yaml）。不再发布 latest。
 
-## 概念与术语
+## 概念
 
 在本项目的文档中，**同步 = 可变，发布 = 不变**。
 
@@ -46,6 +47,10 @@ helm install falcon oci://ghcr.io/zjusct/charts/falcon \
 | 发布 PVC | `PersistentVolumeClaim`（`<镜像名>-snap-<时间戳>`） | 从某个快照克隆出的只读数据卷，是实例实际挂载的内容 |
 | 活跃发布 PVC | `status.activePVC` | 当前正在对外提供内容的发布 PVC；除它之外的历史发布 PVC 按保留策略随各自快照一起清理 |
 | 服务 | `spec.services[]` 的一项 | 一种对外提供内容的方式（`http` / `rsync` / `git`），声明镜像、端口、资源等 |
+
+## 开发
+
+Falcon 由 Spec 驱动开发，`spec` 下的内容由人工主导编写和维护。目前 Spec 仍主要是 AI 生成内容，正在缓慢整理中。
 
 ## 许可证
 

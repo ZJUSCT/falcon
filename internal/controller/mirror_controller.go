@@ -56,6 +56,11 @@ type MirrorReconciler struct {
 	// SyncLimiter enforces the global cap of concurrently running sync Jobs
 	// (config sync.maxConcurrent). Required.
 	SyncLimiter *SyncLimiter
+	// UsageReader optionally reports the on-disk usage of a publish PVC as
+	// seen by the kubelet running its publish pod; it backs
+	// status.sizeBytes (best-effort accounting, see publishPVCUsage). When
+	// nil, size accounting is skipped entirely.
+	UsageReader PVCUsageReader
 }
 
 // RBAC (rendered into the namespaced Role in config/rbac; the controller only
@@ -79,6 +84,13 @@ type MirrorReconciler struct {
 // +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;patch;update;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;patch;update;delete
+//
+// nodes/proxy is cluster-scoped and cannot live in the namespaced Role: the
+// chart grants it through the controller.rbac.nodeStats ClusterRole
+// (kubelet stats summary via the API server node proxy — the source of
+// status.sizeBytes; the apiserver only registers a nodes/proxy subresource,
+// there is no nodes/stats route).
+// +kubebuilder:rbac:groups="",resources=nodes/proxy,verbs=get
 
 func (r *MirrorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -177,6 +189,15 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 	}
 
+	// Publish PVC content is immutable, so the kubelet-reported usage recorded
+	// once stays accurate forever: backfill only while sizeBytes is still
+	// unset, best-effort as everywhere else.
+	var pvcUsage int64
+	pvcUsageOK := false
+	if mirror.Status.ActivePVC != "" && mirror.Status.SizeBytes == 0 {
+		pvcUsage, pvcUsageOK = r.publishPVCUsage(ctx, mirror, mirror.Status.ActivePVC)
+	}
+
 	result := ctrl.Result{}
 	if mirror.Status.NextSyncAt != nil {
 		result.RequeueAfter = time.Until(mirror.Status.NextSyncAt.Time)
@@ -186,6 +207,9 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 	return r.patchStatusWithResult(ctx, mirror, result, func() {
 		mirror.Status.ObservedGeneration = mirror.Generation
+		if pvcUsageOK {
+			mirror.Status.SizeBytes = pvcUsage
+		}
 		if mirror.Status.ActivePVC != "" {
 			mirror.Status.Phase = mirrorv1alpha1.PhaseReady
 			setCondition(mirror, conditionReady, metav1.ConditionTrue, "Published", fmt.Sprintf("PVC %s is published", mirror.Status.ActivePVC))
@@ -359,6 +383,11 @@ func (r *MirrorReconciler) publishPendingSnapshot(ctx context.Context, mirror *m
 	if r.Recorder != nil {
 		r.Recorder.Eventf(mirror, corev1.EventTypeNormal, "SnapshotPublished", "Published PVC %s", mirror.Status.PendingPVC)
 	}
+	// Best-effort usage accounting of the freshly published PVC, folded into
+	// the activation patch. It must never disturb publication: a miss (the
+	// rollout not having mounted the new PVC yet) just leaves sizeBytes empty
+	// for the idle path to backfill.
+	pvcUsage, pvcUsageOK := r.publishPVCUsage(ctx, mirror, mirror.Status.PendingPVC)
 	return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: interval}, func() {
 		pvc := mirror.Status.PendingPVC
 		snapshot := mirror.Status.PendingSnapshot
@@ -374,6 +403,9 @@ func (r *MirrorReconciler) publishPendingSnapshot(ctx context.Context, mirror *m
 		mirror.Status.LastPublishedAt = timePtr(now)
 		mirror.Status.NextSyncAt = timePtr(now.Add(interval))
 		mirror.Status.ConsecutiveFailures = 0
+		if pvcUsageOK {
+			mirror.Status.SizeBytes = pvcUsage
+		}
 		if mirror.Status.LastSync != nil {
 			mirror.Status.LastSync.Phase = mirrorv1alpha1.SyncPhaseSucceeded
 			mirror.Status.LastSync.FinishedAt = timePtr(now)

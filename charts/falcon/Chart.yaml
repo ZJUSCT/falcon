@@ -6,8 +6,8 @@ description: |-
   API routes for Mirror/ProxyMirror CRs), the admin web UI, and the admin /
   catalog HTTPRoutes.
 type: application
-version: 0.1.4
-appVersion: "v0.3.1"
+version: 0.0.0
+appVersion: "v0.0.0"
 home: https://github.com/ZJUSCT/falcon
 sources:
   - https://github.com/ZJUSCT/falcon

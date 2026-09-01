@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap/zapcore"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -91,12 +92,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Node kubelet stats summary reader backing status.sizeBytes (best-effort
+	// usage accounting of the active publish PVC, through the API server node
+	// proxy — needs the chart's node-stats ClusterRole for nodes/proxy).
+	// Summaries are cached per node for a minute so backfills across Mirrors
+	// sharing a node do not hammer the proxy.
+	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		logger.Error(err, "unable to create client-go client for node stats")
+		os.Exit(1)
+	}
 	reconciler := &controller.MirrorReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
 		Recorder:    mgr.GetEventRecorderFor("falcon-controller"), //nolint:staticcheck // migrate when typed Events support is ubiquitous
 		Config:      cfg,
 		SyncLimiter: controller.NewSyncLimiter(cfg.Sync.MaxConcurrent),
+		UsageReader: controller.NewKubeletUsageReader(clientset, time.Minute),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to register Mirror controller")
@@ -122,6 +134,13 @@ func main() {
 			Site:             webapi.SiteConfig{URL: cfg.Site.URL, Abbr: cfg.Site.Abbr, Name: cfg.Site.Name},
 			ServingHostnames: cfg.Serving.Hostnames,
 			CatalogEnabled:   cfg.Catalog.Enabled,
+		}
+		// ZFS usage aggregation behind GET /api/usage: enabled purely by the
+		// ZFS_AGENT_SERVICE environment variable (the chart injects it when
+		// zfsAgent.enabled); unset leaves the endpoint a 404.
+		if agentService := os.Getenv("ZFS_AGENT_SERVICE"); agentService != "" {
+			apiServer.Usage = webapi.NewUsageAggregator(clientset, podNamespace, agentService)
+			logger.Info("zfs-agent usage aggregation enabled", "service", agentService, "namespace", podNamespace)
 		}
 		httpSrv := &http.Server{
 			Addr:              cfg.API.WebapiBindAddress,

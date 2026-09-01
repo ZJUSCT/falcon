@@ -106,9 +106,7 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
         style={{ width: collapsed ? 52 : 180 }}
       >
         <div className="flex items-center gap-2 px-3 py-4 border-b">
-          <div className="w-7 h-7 rounded-md bg-primary flex items-center justify-center text-primary-foreground text-xs font-bold flex-shrink-0">
-            MG
-          </div>
+          <img src="/falcon.svg" alt="Falcon logo" className="w-7 h-7 rounded-md flex-shrink-0" />
           {!collapsed && <span className="font-bold text-sm">Falcon</span>}
         </div>
         {nav}
@@ -136,9 +134,7 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
       {/* Mobile top bar */}
       <div className="sm:hidden fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-4 py-3 border-b bg-card">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-md bg-primary flex items-center justify-center text-primary-foreground text-xs font-bold">
-            MG
-          </div>
+          <img src="/falcon.svg" alt="Falcon logo" className="w-7 h-7 rounded-md flex-shrink-0" />
           <span className="font-bold text-sm">Falcon</span>
         </div>
         <button onClick={() => setMobileOpen(!mobileOpen)} className="text-muted-foreground">

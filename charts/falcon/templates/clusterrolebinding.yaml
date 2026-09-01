@@ -1,0 +1,19 @@
+{{- /* Binding of the node-stats ClusterRole to the controller ServiceAccount
+(see clusterrole.yaml); rendered under the same conditions. */ -}}
+{{- if and .Values.controller.enabled .Values.controller.rbac.create .Values.controller.rbac.nodeStats }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "falcon.fullname" . }}-node-stats
+  labels:
+    {{- include "falcon.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "falcon.fullname" . }}-node-stats
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "falcon.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -92,10 +93,21 @@ func TestHostOnlyStripsPort(t *testing.T) {
 	}
 }
 
+// httpService is the single http spec.services[] entry the catalog fixtures
+// declare (a Mirror without services is sync-only and must be omitted).
+func httpService() []mirrorv1alpha1.MirrorServingService {
+	return []mirrorv1alpha1.MirrorServingService{{
+		Name:  "http",
+		Image: "nginxinc/nginx-unprivileged:1.31.0-alpine",
+		Ports: []corev1.ContainerPort{{Name: "web", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
+	}}
+}
+
 // mirrorzTestServer builds a Server over the standard fixtures with the
 // given serving hostname whitelist.
 func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 	t.Helper()
+	// Published and served, with a known on-disk usage.
 	published := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors"},
 		Spec: mirrorv1alpha1.MirrorSpec{
@@ -103,19 +115,28 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 				Description: localized("Debian 发行版软件包镜像", "Debian archive mirror"),
 				Upstream:    "rsync://ftp.debian.org/debian/",
 			},
+			Services: httpService(),
 		},
-		Status: mirrorv1alpha1.MirrorStatus{Phase: mirrorv1alpha1.PhaseReady, ActivePVC: "debian-sync-1"},
+		Status: mirrorv1alpha1.MirrorStatus{Phase: mirrorv1alpha1.PhaseReady, ActivePVC: "debian-sync-1", SizeBytes: 640141257728},
 	}
 	// Never published (no activePVC): must be omitted even though Ready.
 	neverPublished := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "ubuntu", Namespace: "mirrors"},
 		Spec: mirrorv1alpha1.MirrorSpec{
-			Info: mirrorv1alpha1.MirrorInfo{Upstream: "rsync://archive.ubuntu.com/ubuntu/"},
+			Info:     mirrorv1alpha1.MirrorInfo{Upstream: "rsync://archive.ubuntu.com/ubuntu/"},
+			Services: httpService(),
 		},
 		Status: mirrorv1alpha1.MirrorStatus{Phase: mirrorv1alpha1.PhaseSyncing},
 	}
+	// Sync-only (activePVC set but no services): published content exists,
+	// but there is no publish service to access it with — omitted.
+	syncOnly := &mirrorv1alpha1.Mirror{
+		ObjectMeta: metav1.ObjectMeta{Name: "alpine", Namespace: "mirrors"},
+		Status:     mirrorv1alpha1.MirrorStatus{Phase: mirrorv1alpha1.PhaseReady, ActivePVC: "alpine-sync-3"},
+	}
 	syncing := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "arch", Namespace: "mirrors"},
+		Spec:       mirrorv1alpha1.MirrorSpec{Services: httpService()},
 		Status:     mirrorv1alpha1.MirrorStatus{Phase: mirrorv1alpha1.PhaseSyncing, ActivePVC: "arch-sync-2"},
 	}
 	proxy := &mirrorv1alpha1.ProxyMirror{
@@ -130,7 +151,7 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(published, neverPublished, syncing, proxy).Build()
+		WithObjects(published, neverPublished, syncOnly, syncing, proxy).Build()
 	return &Server{
 		Client:           c,
 		Site:             SiteConfig{URL: "https://mirrors.zjusct.io", Abbr: "ZJU", Name: "Zhejiang University Mirror"},
@@ -153,10 +174,14 @@ func TestBuildMirrorZDocument(t *testing.T) {
 		t.Errorf("unexpected site: %+v", doc.Site)
 	}
 	if doc.Mirrors == nil || len(doc.Mirrors) != 3 {
-		t.Fatalf("got %d mirrors (%v), want 3 (never-published ubuntu omitted)", len(doc.Mirrors), doc.Mirrors)
+		t.Fatalf("got %d mirrors (%v), want 3 (never-published ubuntu and sync-only alpine omitted)", len(doc.Mirrors), doc.Mirrors)
 	}
 	if doc.Mirrors[0].CName != "arch" || doc.Mirrors[0].Status != "S" {
 		t.Errorf("arch entry wrong: %+v", doc.Mirrors[0])
+	}
+	// Unknown usage (sizeBytes unset) omits the size field.
+	if doc.Mirrors[0].Size != "" {
+		t.Errorf("arch size = %q, want omitted", doc.Mirrors[0].Size)
 	}
 	// Entry URL = <site url>/<CR name> — no trailing slash, no per-CR url field.
 	if doc.Mirrors[0].URL != "https://mirrors.zjusct.io/arch" {
@@ -164,6 +189,11 @@ func TestBuildMirrorZDocument(t *testing.T) {
 	}
 	if doc.Mirrors[1].CName != "debian" || doc.Mirrors[1].Status != "U" {
 		t.Errorf("debian entry wrong: %+v", doc.Mirrors[1])
+	}
+	// sizeBytes is rendered as the human-readable string the MirrorZ format
+	// defines for mirrors[].size (binary units, two decimals).
+	if doc.Mirrors[1].Size != "596.18G" {
+		t.Errorf("debian size = %q, want \"596.18G\"", doc.Mirrors[1].Size)
 	}
 	if doc.Mirrors[1].URL != "https://mirrors.zjusct.io/debian" {
 		t.Errorf("debian url = %q", doc.Mirrors[1].URL)
@@ -230,6 +260,7 @@ func singleMirrorServer(t *testing.T, hostnames []string) *Server {
 	t.Helper()
 	m := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors"},
+		Spec:       mirrorv1alpha1.MirrorSpec{Services: httpService()},
 		Status:     mirrorv1alpha1.MirrorStatus{Phase: mirrorv1alpha1.PhaseReady, ActivePVC: "debian-sync-1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()
@@ -282,9 +313,32 @@ func TestHandleMirrorZ(t *testing.T) {
 	if entry["cname"] != "debian" || entry["status"] != "U" || entry["url"] != "https://mirrors.zjusct.io/debian" {
 		t.Errorf("mirror entry wrong: %v", entry)
 	}
-	// size is deliberately omitted from the entry.
+	// sizeBytes is unknown (zero): the size field is omitted.
 	if _, has := entry["size"]; has {
 		t.Errorf("mirror entry must not carry a size field: %v", entry)
+	}
+}
+
+// TestMirrorzSize pins the rendering of sizeBytes into the string the
+// MirrorZ format expects (its frontend schema types size as string): binary
+// (1024-based) units with two decimals, "" for unknown sizes.
+func TestMirrorzSize(t *testing.T) {
+	cases := []struct {
+		bytes int64
+		want  string
+	}{
+		{bytes: 0, want: ""},  // unknown: omitted
+		{bytes: -5, want: ""}, // defensive
+		{bytes: 512, want: "512.00B"},
+		{bytes: 1024, want: "1.00K"},
+		{bytes: 640141257728, want: "596.18G"},
+		{bytes: 2990078838784, want: "2.72T"},       // "2.72T" as seen in real catalogs
+		{bytes: 9223372036854775807, want: "8.00E"}, // int64 max
+	}
+	for _, tc := range cases {
+		if got := mirrorzSize(tc.bytes); got != tc.want {
+			t.Errorf("mirrorzSize(%d) = %q, want %q", tc.bytes, got, tc.want)
+		}
 	}
 }
 

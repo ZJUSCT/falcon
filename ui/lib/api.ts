@@ -7,7 +7,7 @@
 // fetch('/api/...') just works. All old mutation endpoints (queue/worker/
 // action/job management) are gone and are not modeled.
 
-import { Job } from '@/types';
+import { Job, UsageResponse } from '@/types';
 
 const API_BASE = '/api';
 
@@ -23,6 +23,13 @@ class ApiClient {
   // GET /api/jobs — legacy-compatible list of Mirror/ProxyMirror jobs.
   async getJobs(): Promise<Job[]> {
     return this.fetchJson<Job[]>('/jobs');
+  }
+
+  // GET /api/usage — cluster-wide storage usage aggregation. Replies 404
+  // when the usage feature is disabled; callers treat any failure as "no
+  // usage data" and degrade silently (column `—` / card hint).
+  async getUsage(): Promise<UsageResponse> {
+    return this.fetchJson<UsageResponse>('/usage');
   }
 
   // GET /api/repos/<name> — spec-only view of one Mirror/ProxyMirror.

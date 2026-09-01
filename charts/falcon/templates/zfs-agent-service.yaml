@@ -1,0 +1,24 @@
+{{- /* Headless Service selecting the zfs-agent DaemonSet pods: the
+controller's webapi discovers the agents through the Service's
+EndpointSlices (ZFS_AGENT_SERVICE) and fetches every agent's report on
+its fixed port. */ -}}
+{{- if .Values.zfsAgent.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "falcon.fullname" . }}-zfs-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "falcon.labels" . | nindent 4 }}
+    app.kubernetes.io/component: zfs-agent
+spec:
+  clusterIP: None
+  selector:
+    {{- include "falcon.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: zfs-agent
+  ports:
+    - name: zfs-agent
+      port: 9474
+      targetPort: zfs-agent
+      protocol: TCP
+{{- end }}

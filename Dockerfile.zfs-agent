@@ -1,0 +1,21 @@
+FROM golang:1.26.5 AS go-build
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+COPY . .
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/zfs-agent ./cmd/zfs-agent
+
+# The agent execs the host's zfs/zpool (chrooted into the /host hostPath
+# mount), so the image ships nothing but the static binary and stays root
+# (chroot + host device access) — unlike the controller image, which drops
+# privileges.
+FROM scratch AS runtime
+COPY --from=go-build /out/zfs-agent /zfs-agent
+
+EXPOSE 9474
+ENTRYPOINT ["/zfs-agent"]

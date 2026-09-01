@@ -31,3 +31,33 @@ export const zeroTime = '0001-01-01T00:00:00Z';
 export function isZeroTime(value: string | undefined): boolean {
   return !value || value === zeroTime || new Date(value).getTime() <= 0;
 }
+
+// GET /api/usage — cluster-wide storage usage aggregation. The endpoint
+// replies 404 ({"error": "usage aggregation is disabled"}) when the usage
+// feature is not deployed; the UI degrades silently to "no data".
+// `MirrorUsage.name` matches the `id` of a /api/jobs entry (Mirror CR name).
+// ProxyMirror resources never appear (no sync/snapshot concept).
+export interface MirrorUsageSync {
+  pvc: string; // ZFS dataset backing PVC
+  referencedBytes: number;
+}
+
+export interface MirrorUsageSnapshot {
+  name: string;
+  writtenBytes: number;
+  createdAt: number; // epoch seconds; snapshots are ordered ascending
+}
+
+export interface MirrorUsage {
+  name: string;
+  sync: MirrorUsageSync | null; // null: no ZFS data yet (never synced or agent does not cover it)
+  snapshots: MirrorUsageSnapshot[];
+  totalBytes: number; // sync.referencedBytes + Σ snapshots[].writtenBytes (computed server-side)
+  complete: boolean; // false: some agent nodes did not respond (see errors) — data is advisory
+  errors: string[];
+}
+
+export interface UsageResponse {
+  generatedAt: string;
+  mirrors: MirrorUsage[];
+}

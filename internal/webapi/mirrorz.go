@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	mirrorv1alpha1 "github.com/ZJUSCT/falcon/api/v1alpha1"
@@ -34,8 +35,11 @@ type mirrorzMirror struct {
 	Status   string `json:"status"`
 	Desc     string `json:"desc,omitempty"`
 	Upstream string `json:"upstream,omitempty"`
-	// size is deliberately omitted: Mirror.status.sizeBytes is declared but
-	// never populated by the controller, so there is no data to serve.
+	// Size renders Mirror.status.sizeBytes the way the MirrorZ format defines
+	// mirrors[].size: a human-readable string ("596.00G") — the spec (and its
+	// frontend schema, src/schema/index.ts) types the field as string, not a
+	// byte count. Empty (sizeBytes unknown) omits the field.
+	Size string `json:"size,omitempty"`
 }
 
 type mirrorzDocument struct {
@@ -147,6 +151,25 @@ func entryURL(baseURL, name string) string {
 	return strings.TrimRight(baseURL, "/") + "/" + name
 }
 
+// mirrorzSize renders a byte count as the human-readable string the MirrorZ
+// format expects for mirrors[].size (the spec shows "size": "596G" and its
+// frontend schema types the field as string — it is not a byte integer).
+// Units are binary (1024-based) with two decimals; a zero (unknown) size
+// renders as "" so the field is omitted from the JSON entry.
+func mirrorzSize(sizeBytes int64) string {
+	if sizeBytes <= 0 {
+		return ""
+	}
+	units := []string{"B", "K", "M", "G", "T", "P", "E"}
+	value := float64(sizeBytes)
+	unit := 0
+	for value >= 1024 && unit < len(units)-1 {
+		value /= 1024
+		unit++
+	}
+	return strconv.FormatFloat(value, 'f', 2, 64) + units[unit]
+}
+
 func (s *Server) handleMirrorZ(w http.ResponseWriter, r *http.Request) {
 	if !s.CatalogEnabled {
 		writeJSONError(w, http.StatusNotFound, "mirrorz catalog is disabled")
@@ -187,9 +210,10 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 	entries := make([]mirrorzMirror, 0, len(mirrors.Items)+len(proxies.Items))
 	for i := range mirrors.Items {
 		m := &mirrors.Items[i]
-		// Mirrors that never published anything (no publish PVC derived from
-		// a successful snapshot) have no data behind them — omit them.
-		if m.Status.ActivePVC == "" {
+		// Mirrors with nothing reachable are omitted: never-published ones
+		// (no publish PVC derived from a successful snapshot) and sync-only
+		// ones (no spec.services entry, so no way to access the content).
+		if m.Status.ActivePVC == "" || len(m.Spec.Services) == 0 {
 			continue
 		}
 		entries = append(entries, mirrorzMirror{
@@ -198,6 +222,7 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 			Status:   mirrorzStatusForMirrorPhase(m.Status.Phase),
 			Desc:     pickDescription(m.Spec.Info.Description),
 			Upstream: m.Spec.Info.Upstream,
+			Size:     mirrorzSize(m.Status.SizeBytes),
 		})
 	}
 	for i := range proxies.Items {
