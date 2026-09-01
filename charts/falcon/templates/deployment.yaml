@@ -93,7 +93,9 @@ spec:
                   fieldPath: metadata.namespace
             {{- if .Values.webui.enabled }}
             - name: FALCON_UI_UPSTREAM
-              value: http://{{ include "falcon.fullname" . }}-ui
+              # Use the Service FQDN so the controller's optional outbound
+              # HTTP proxy never handles this in-cluster reverse-proxy hop.
+              value: http://{{ include "falcon.fullname" . }}-ui.{{ .Release.Namespace }}.svc.cluster.local
             {{- end }}
             {{- if .Values.zfsAgent.enabled }}
             # Wires webapi GET /api/usage: the controller aggregates the

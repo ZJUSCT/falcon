@@ -162,7 +162,7 @@ CRD 是集群级资源，不进 RBAC；由 `crds/` 目录安装（见 §8）。
 
 ### 7.2 管理域 HTTPRoute（admin）
 
-`admin.enabled=true` renders `<fullname>-admin` (disabled by default). Exactly one scalar `admin.host` is required and must be a bare hostname; `webui.enabled` must also be true. The route has one `PathPrefix /` rule to the controller webapi Service. Falcon authenticates admin requests and reverse-proxies UI paths to `<fullname>-ui` via `FALCON_UI_UPSTREAM`; catalog routes remain public.
+`admin.enabled=true` renders `<fullname>-admin` (disabled by default). Exactly one scalar `admin.host` is required and must be a bare hostname; `webui.enabled` must also be true. The route has one `PathPrefix /` rule to the controller webapi Service. Falcon authenticates admin requests and reverse-proxies UI paths to `<fullname>-ui.<namespace>.svc.cluster.local` via `FALCON_UI_UPSTREAM`; catalog routes remain public. The FQDN keeps this in-cluster hop out of any configured outbound HTTP proxy.
 
 GitHub OAuth is configured under `controller.config.auth.github` (`clientID`, `clientSecret`, and numeric `allowedUserIDs`). The callback URI is `https://<admin.host>/oauth/callback`; `/oauth/login`, `/oauth/callback`, `/oauth/session`, and `/oauth/logout` are handled by webapi. Sessions are secure, HTTP-only, signed with the client secret, and checked against the allowlist on every request. Empty credentials fail closed.
 
