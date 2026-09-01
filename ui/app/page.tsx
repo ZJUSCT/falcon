@@ -14,6 +14,7 @@ type RouteType =
   | { type: 'mirror-detail'; mirrorId: string };
 
 export default function Dashboard() {
+  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [currentRoute, setCurrentRoute] = useState<RouteType>('overview');
 
   const getRouteFromHash = (): RouteType => {
@@ -40,11 +41,17 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
+    fetch('/oauth/session').then((r) => { if (r.ok) setAuthenticated(true); else { window.location.href = '/oauth/login'; } }).catch(() => { window.location.href = '/oauth/login'; });
+  }, []);
+
+  useEffect(() => {
     setCurrentRoute(getRouteFromHash());
     const onHash = () => setCurrentRoute(getRouteFromHash());
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
+
+  if (authenticated !== true) return <div className="p-8">Authenticating…</div>;
 
   const getActivePage = (): PageId => {
     if (typeof currentRoute === 'object') {

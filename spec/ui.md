@@ -2,9 +2,18 @@
 
 本文覆盖 `ui/` 下 Next.js 静态导出管理后台的页面集、数据来源、时钟轮盘、hash 路由、主题、时间显示与构建/静态服务。依据 `ui/` 全部源码、`ui/Dockerfile`、`ui/nginx.conf`。技术栈：Next.js 14（`output: 'export'`）+ React 18 + Tailwind + TypeScript，构建产物由 nginx 提供纯静态服务。
 
+## Authentication
+
+The static UI is served behind Falcon's webapi authentication gateway. On
+startup it requests `/oauth/session`; unauthenticated users are redirected to
+`/oauth/login` and complete GitHub OAuth at `/oauth/callback`. The controller
+accepts only numeric GitHub IDs listed in `controller.config.auth.github` and
+sets a secure, HTTP-only session cookie. The sidebar's **Log out** action calls
+`GET /oauth/logout`. OAuth credentials are not embedded in the UI image.
+
 ## 1. 只读页面集
 
-- 页面只有两个：**Overview**（统计卡 + 24h 时钟轮盘 + Currently Running + Recent Failures）与 **Mirrors**（列表），外加一个 **Mirror 详情**视图。
+- 页面只有两个：**Overview**（24h 同步活动时钟轮盘）与 **Mirrors**（列表），外加一个 **Mirror 详情**视图。
 - 侧栏仅含：两项导航（Overview/Mirrors）、一个外链 `https://mirrors.zjusct.io/mirrorz.json`（硬编码，新窗口）、主题循环按钮、折叠按钮；品牌块显示 "Falcon"。
 - 全部只读：旧版的暂停/恢复/手动触发按钮、仓库编辑表单、Worker/Queue/Actions/Configs 视图全部不存在——后端没有写端点，UI 无从发起。侧栏品牌块显示 `falcon.svg` 图标（静态资源 `/falcon.svg`）与 "Falcon" 字样。
 
@@ -22,11 +31,7 @@
 
 ## 3. Overview 页
 
-### 3.1 统计卡
-
-五个横排卡片：Mirrors（总数）、Running（`status === 'Running'`）、Waiting、Paused、Last Sync Failed（`last_action_status === 'Failed'`）。
-
-### 3.2 时钟轮盘（Schedule Timeline）
+### 3.1 时钟轮盘（24-Hour Sync Activity）
 
 24 小时圆盘，是 legacy 后台的视觉签名。数据源：`/api/jobs`。
 
@@ -34,7 +39,7 @@
 
 | 事件 | 选取条件 | 窗口 |
 |---|---|---|
-| nextAttempt | `next_attempt_at` 非零且任务非 Running | 当前时刻 ±12 小时（`Scheduled` 状态有无条件分支，但后端永不产出该状态，实际不生效） |
+| nextAttempt | `next_attempt_at` 非零且任务非 Running | 当前时刻 ±12 小时 |
 | lastSuccess | `last_success_at` 非零 | ±12 小时 |
 | lastFailure | `last_failure_at` 非零 | ±12 小时 |
 | lastAttempt | 任务 `status === 'Running'` | 无窗口限制 |
@@ -46,16 +51,11 @@
 - 角度 = `小时 × 15 + 分钟 × 0.25`（15°/小时、0.25°/分钟；0 点在顶部，秒不计入）。指针每秒跟随当前时间，中心圆盘显示当前时间（HH:MM，24 小时制）与日期（Mon D）。
 - 刻度：0/6/12/18 粗刻度加大号数字；3/9/15/21 中等刻度加小号数字（仅表盘 size > 500px 时显示）；其余小时细刻度。
 
-颜色（事件圆点与连线）：nextAttempt 黄 `#eab308`（`Scheduled` 紫 `#8b5cf6`，实际不出现）、lastSuccess 绿 `#22c55e`、lastFailure 红 `#ef4444`、lastAttempt 蓝 `#3b82f6`。nextAttempt 连线为虚线（`strokeDasharray 6,3`）。
+颜色（事件圆点与连线）：nextAttempt 黄 `#eab308`、lastSuccess 绿 `#22c55e`、lastFailure 红 `#ef4444`、lastAttempt 蓝 `#3b82f6`。nextAttempt 连线为虚线（`strokeDasharray 6,3`）。
 
 标签防碰撞：事件按时间排序后逐个放置；基础半径 = `eventRadius + 45` 像素，碰撞时半径逐层外推，每层 12 像素（`stepping_radius`）；碰撞检测把标签矩形登记进 360 个角度桶（矩形角度覆盖范围内逐桶比对）。标签为 job id（等宽字体），hover 时圆点半径 9→12、连线宽 3→4、字号 12→16，并弹出固定定位 tooltip（色点 + job id + 事件名 + 相对时间 + 状态徽标）；点击事件跳转该任务详情。
 
-画布交互：Zoom In / Zoom Out 按钮以 ×1.2 步进（范围 0.3–3）、Reset 复位、当前缩放百分比实时显示；鼠标左键拖拽平移；单指触摸拖拽平移（无双指缩放）。表盘尺寸随窗口自适应：宽 >1200px 时 650、>768px 时 550、否则 400，夹在 400–700，监听 resize 重算。
-
-### 3.3 Currently Running / Recent Failures
-
-- Currently Running：`status === 'Running'` 的任务列表（id + phase/status + 相对时间），点击进详情；空时显示 "No running syncs"。
-- Recent Failures：`last_action_status === 'Failed'` 按 `last_failure_at` 降序前 10 个；空时显示 "No recent failures"。
+画布交互：Zoom In / Zoom Out 按 ×1.2 步进（范围 0.3–3）、Reset 复位、当前缩放百分比实时显示；鼠标左键拖拽平移；单指触摸拖拽平移（无双指缩放）。轮盘 SVG 按浏览器当前可用页面空间缩放，Overview 页面本身不产生滚动条。页面标题为 24-Hour Sync Activity；轮盘标题栏左侧显示 Total mirrors 总数，右侧显示 Running/Waiting/Paused/Failed 状态计数。
 
 ## 4. Mirrors 列表
 
@@ -70,7 +70,7 @@
 - 头部：返回按钮（"Back to Mirrors"）、镜像 id（等宽）、Kind 徽标、Status 徽标。
 - Sync Status 卡（每 5 秒从 `/api/jobs` 按 id 找该行）：Status、Phase、Last Action、Namespace、Active PVC、Last Success、Last Failure、Last Attempt、Next Attempt、Last Finished 十格；找不到对应任务时显示提示（无同步历史的 ProxyMirror 属正常情形）。
 - Storage Usage 卡（`/api/usage` 按 `name` 取该镜像记录，30 秒轮询）以 Name/Time/Size 三列展示：`[Sync] <PVC>` 使用 `sync.writtenBytes`（无快照时回退引用大小）和最近完成时间；快照按新到旧排列，最老快照显示 `referencedBytes` 基线，其余显示 `writtenBytes` 增量；`activeSnapshot` 行标记 `[Active]`；Total 使用后端 ZFS `usedBytes`。时间采用浏览器本地 ISO-8601 数字时区偏移，Next Attempt 使用 `in HH:mm:ss`。ProxyMirror 显示 "Not applicable"；无记录或端点未部署显示 "Usage data unavailable"；`complete: false` 时卡顶轻提示 "Some storage nodes did not respond; data may be partial"。
-- Resource Spec 卡（read-only）：SpecViewer 拉取 `/api/repos/<id>`（无后缀 → YAML），等宽 `<pre>` 只读渲染；Copy 按钮优先 `navigator.clipboard`，不可用时回退临时 textarea + `execCommand('copy')`；复制成功显示 "Copied" 2 秒。
+- Resource Spec 卡：SpecViewer 拉取 `/api/repos/<id>`（无后缀 → YAML），等宽 `<pre>` 只读渲染；Copy 按钮优先 `navigator.clipboard`，不可用时回退临时 textarea + `execCommand('copy')`；复制成功显示 "Copied" 2 秒。
 
 ## 6. hash 路由
 

@@ -1,6 +1,6 @@
 'use client';
 
-// Overview: dashboard cards + the 24h "Schedule Timeline" clock wheel.
+// Overview: the 24-hour sync activity clock wheel.
 //
 // The clock wheel is the visual signature of the legacy admin UI and
 // is kept as-is conceptually: it is a 24-hour round dial (0° at the top =
@@ -149,24 +149,12 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     return () => clearInterval(interval);
   }, []);
 
-  // Responsive clock dimensions - enlarged for main view
-  const getClockDimensions = (): ClockDimensions => {
-    // Much larger sizing for prominent display
-    const size = Math.min(700, Math.max(400, window?.innerWidth > 1200 ? 650 : window?.innerWidth > 768 ? 550 : 400));
-    const radius = size * 0.32; // Larger radius for better visibility
-    const eventRadius = radius + size * 0.08;
-
-    return {
-      size,
-      radius,
-      eventRadius,
-      centerX: size / 2,
-      centerY: size / 2
-    };
-  };
-
-  const [clockDims, setClockDims] = useState<ClockDimensions>(() => {
-    // Default dimensions for SSR, matching new larger calculations
+  // Keep a stable SVG coordinate system. The SVG itself scales to the
+  // available canvas, so the wheel remains usable on both mobile and desktop
+  // without making the page scroll.
+  const [clockDims] = useState<ClockDimensions>(() => {
+    // Coordinate dimensions are intentionally independent of the viewport;
+    // CSS scales the complete SVG into the responsive canvas below.
     return {
       size: 550,
       radius: 176, // 550 * 0.32
@@ -176,17 +164,6 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     };
   });
 
-  // Update dimensions on mount and resize
-  useEffect(() => {
-    const updateDimensions = () => {
-      setClockDims(getClockDimensions());
-    };
-
-    updateDimensions();
-    window.addEventListener('resize', updateDimensions);
-    return () => window.removeEventListener('resize', updateDimensions);
-  }, []);
-
   // Calculate events within ±12 hours
   const timeEvents = useMemo(() => {
     const events: TimeEvent[] = [];
@@ -195,11 +172,11 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     const twelveHoursLater = new Date(now.getTime() + 12 * 60 * 60 * 1000);
 
     jobs.forEach(job => {
-      // Next attempt (skip for running jobs, show all scheduled regardless of time)
+      // Next attempt (skip for running jobs; only show events near now)
       if (!isZeroTime(job.next_attempt_at) && job.status !== 'Running') {
         const nextAttempt = new Date(job.next_attempt_at);
-        // Show all scheduled jobs regardless of time, others within 12h window
-        if (job.status === 'Scheduled' || (nextAttempt >= twelveHoursAgo && nextAttempt <= twelveHoursLater)) {
+        // Only show upcoming attempts within the ±12-hour activity window.
+        if (nextAttempt >= twelveHoursAgo && nextAttempt <= twelveHoursLater) {
           events.push({
             time: nextAttempt,
             type: 'nextAttempt',
@@ -436,7 +413,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     });
 
     return positions;
-  }, [timeEvents, currentTime, clockDims.eventRadius]);
+  }, [timeEvents, clockDims.eventRadius]);
 
   // Derived stats (workers/queue/actions are gone — the controller has no
   // such concepts anymore; counts come straight from the job list).
@@ -445,11 +422,6 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   const waitingJobs = jobs.filter(j => j.status === 'Waiting').length;
   const pausedJobs = jobs.filter(j => j.status === 'Paused').length;
   const failedJobs = jobs.filter(j => j.last_action_status === 'Failed').length;
-  const runningList = jobs.filter(j => j.status === 'Running');
-  const recentFailures = jobs
-    .filter(j => j.last_action_status === 'Failed')
-    .sort((a, b) => new Date(b.last_failure_at).getTime() - new Date(a.last_failure_at).getTime())
-    .slice(0, 10);
 
   if (loading) {
     return (
@@ -470,7 +442,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   const getEventColor = (type: TimeEvent['type'], jobStatus?: string) => {
     switch (type) {
       case 'nextAttempt':
-        return jobStatus === 'Scheduled' ? '#8b5cf6' : '#eab308'; // purple-500 for Scheduled, yellow-500 for others
+        return '#eab308'; // yellow-500
       case 'lastSuccess': return '#22c55e'; // green-500
       case 'lastFailure': return '#ef4444'; // red-500
       case 'lastAttempt': return '#3b82f6'; // blue-500 (only for running jobs now)
@@ -489,60 +461,29 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   };
 
   return (
-    <div className="p-6 space-y-6">
-      {/* A. Page header + LIVE indicator */}
-      <div>
-        <div className="flex items-center gap-2 mb-1">
-          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse-dot" />
-          <span className="text-green-500 text-[10px] font-semibold tracking-widest uppercase">LIVE</span>
-        </div>
-        <h1 className="text-lg font-bold">Overview</h1>
-        <p className="text-xs text-muted-foreground">Sync schedule at a glance (read-only)</p>
-      </div>
+    <div className="h-full min-h-0 p-4 sm:p-6 flex flex-col gap-4 overflow-hidden">
+      {/* Page title */}
+      <h1 className="text-lg font-bold shrink-0">24-Hour Sync Activity</h1>
 
-      {/* B. Stats cards row */}
-      <div className="flex gap-4 overflow-x-auto pb-2">
-        <div className="min-w-[140px] rounded-lg border bg-card p-3">
-          <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">Mirrors</div>
-          <div className="text-xl font-bold tabular-nums">{totalJobs}</div>
-        </div>
-        <div className="min-w-[140px] rounded-lg border bg-card p-3">
-          <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">Running</div>
-          <div className="text-xl font-bold tabular-nums text-blue-500">{runningJobs}</div>
-        </div>
-        <div className="min-w-[140px] rounded-lg border bg-card p-3">
-          <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">Waiting</div>
-          <div className="text-xl font-bold tabular-nums text-yellow-500">{waitingJobs}</div>
-        </div>
-        <div className="min-w-[140px] rounded-lg border bg-card p-3">
-          <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">Paused</div>
-          <div className="text-xl font-bold tabular-nums text-orange-500">{pausedJobs}</div>
-        </div>
-        <div className="min-w-[140px] rounded-lg border bg-card p-3">
-          <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">Last Sync Failed</div>
-          <div className="text-xl font-bold tabular-nums text-red-500">{failedJobs}</div>
-        </div>
-      </div>
-
-      {/* C. Schedule Timeline (Clock) */}
-      <div className="rounded-lg border bg-card">
-        <div className="px-4 py-3 border-b flex justify-between items-center">
-          <span className="text-sm font-semibold">Schedule Timeline</span>
-          <div className="flex gap-3 text-xs text-muted-foreground">
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-purple-500 inline-block" /> Scheduled</span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-yellow-500 inline-block" /> Next</span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500 inline-block" /> Success</span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500 inline-block" /> Failure</span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500 inline-block" /> Running</span>
+      {/* B. 24-hour sync activity clock */}
+      <div className="rounded-lg border bg-card flex-1 min-h-0 flex flex-col overflow-hidden">
+        <div className="px-4 py-3 border-b flex flex-wrap justify-between items-center gap-x-4 gap-y-2 shrink-0">
+          <span className="text-xs text-muted-foreground">Total mirrors: <span className="font-semibold tabular-nums text-foreground">{totalJobs}</span></span>
+          <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            <span className="uppercase tracking-wide text-[10px]">Status:</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500 inline-block" /> Running <span className="font-semibold tabular-nums text-foreground">{runningJobs}</span></span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-yellow-500 inline-block" /> Waiting <span className="font-semibold tabular-nums text-foreground">{waitingJobs}</span></span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-500 inline-block" /> Paused <span className="font-semibold tabular-nums text-foreground">{pausedJobs}</span></span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500 inline-block" /> Last Sync Failed <span className="font-semibold tabular-nums text-foreground">{failedJobs}</span></span>
           </div>
         </div>
-        <div className="flex justify-center p-4 sm:p-8" style={{ overscrollBehavior: 'contain' }}>
+        <div className="flex-1 min-h-0 flex justify-center p-2 sm:p-4" style={{ overscrollBehavior: 'contain' }}>
           <div
             ref={canvasRef}
             className="relative overflow-hidden border rounded-lg bg-muted/20 overscroll-none touch-none select-none"
             style={{
               width: '100%',
-              height: clockDims.size + 300,
+              height: '100%',
               cursor: isDragging ? 'grabbing' : 'grab',
               overscrollBehavior: 'contain'
             }}
@@ -568,9 +509,9 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
               }}
             >
               <svg
-                width={clockDims.size + 400}
-                height={clockDims.size + 400}
-                className="drop-shadow-lg"
+                width="100%"
+                height="100%"
+                className="drop-shadow-lg max-w-full max-h-full"
                 viewBox={`0 0 ${clockDims.size + 400} ${clockDims.size + 400}`}
                 style={{ overflow: 'visible' }}
               >
@@ -845,7 +786,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
         </div>
 
         {/* Canvas Controls */}
-        <div className="flex justify-center gap-2 pb-4">
+        <div className="shrink-0 flex flex-wrap justify-center gap-2 pb-4">
           <button
             onClick={handleZoomIn}
             className="flex items-center gap-1 px-3 py-1 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
@@ -873,59 +814,6 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
           <div className="flex items-center gap-1 px-3 py-1 text-sm bg-muted text-muted-foreground rounded-md">
             <Move className="h-4 w-4" />
             {Math.round(scale * 100)}%
-          </div>
-        </div>
-      </div>
-
-      {/* D. Currently Running + Recent Failures */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Currently Running */}
-        <div className="rounded-lg border bg-card">
-          <div className="px-4 py-3 border-b">
-            <span className="text-sm font-semibold">Currently Running</span>
-          </div>
-          <div className="p-4 space-y-1 max-h-64 overflow-y-auto">
-            {runningList.length > 0 ? runningList.map((job) => (
-              <div
-                key={job.id}
-                className="flex items-center justify-between text-xs cursor-pointer hover:bg-muted/50 rounded px-3 py-2"
-                onClick={() => onNavigateToJob?.(job.id)}
-              >
-                <span className="font-mono text-xs truncate">
-                  {job.id} <span className="text-muted-foreground">&middot;</span> {job.phase || job.status}
-                </span>
-                <span className="text-xs text-muted-foreground flex-shrink-0 ml-2">
-                  <RelativeTime date={job.last_attempt_at} />
-                </span>
-              </div>
-            )) : (
-              <div className="text-sm text-muted-foreground text-center py-4">No running syncs</div>
-            )}
-          </div>
-        </div>
-
-        {/* Recent Failures */}
-        <div className="rounded-lg border bg-card">
-          <div className="px-4 py-3 border-b">
-            <span className="text-sm font-semibold">Recent Failures</span>
-          </div>
-          <div className="p-4 space-y-1 max-h-64 overflow-y-auto">
-            {recentFailures.length > 0 ? recentFailures.map((job) => (
-              <div
-                key={job.id}
-                className="flex items-center justify-between text-xs cursor-pointer hover:bg-muted/50 rounded px-3 py-2"
-                onClick={() => onNavigateToJob?.(job.id)}
-              >
-                <span className="font-mono text-xs truncate text-red-500">
-                  {job.id}
-                </span>
-                <span className="text-xs text-muted-foreground flex-shrink-0 ml-2">
-                  <RelativeTime date={job.last_failure_at} />
-                </span>
-              </div>
-            )) : (
-              <div className="text-sm text-muted-foreground text-center py-4">No recent failures</div>
-            )}
           </div>
         </div>
       </div>

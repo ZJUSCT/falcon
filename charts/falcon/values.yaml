@@ -76,6 +76,11 @@ controller:
         - mirror.zju.edu.cn
       labels: {}                       # 盖到每条发布 HTTPRoute 上
       annotations: {}
+    auth:
+      github:
+        clientID: ""
+        clientSecret: ""
+        allowedUserIDs: []
 
   metrics:
     enabled: true                      # 暴露 metrics Service（:8080）
@@ -155,14 +160,12 @@ webui:
     limits: {}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 管理域路由（UI + 只读 API，与内容域名解耦）：
-#   Exact /api/jobs      → 控制器 webapi Service
-#   PathPrefix /api/repos/ → 控制器 webapi Service
-#   PathPrefix /         → webui Service
+# 管理域路由（OAuth 鉴权 UI + 只读 API，与内容域名解耦）：
+#   PathPrefix /         → 控制器 webapi 鉴权网关（已认证 UI 请求再反代到 webui）
 # ─────────────────────────────────────────────────────────────────────────────
 admin:
   enabled: false
-  hosts: []            # admin.enabled=true 时必填非空，否则渲染直接 fail
+  host: ""             # admin.enabled=true 时必填单一 bare hostname
   route:
     gatewayRef: {}       # 缺省回落 global.gatewayRef
     parentRefs: []       # 非空时整段原样渲染，覆盖 gatewayRef 推导

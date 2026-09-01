@@ -193,6 +193,20 @@ catalog:
   enabled: {{ $cfg.catalog.enabled }}
 sync:
   maxConcurrent: {{ $cfg.sync.maxConcurrent | default 0 }}
+admin:
+  {{- $cfgAdmin := $cfg.admin | default dict }}
+  {{- $adminHost := .Values.admin.host | default $cfgAdmin.host }}
+  {{- with $adminHost }}
+  host: {{ . | quote }}
+  {{- end }}
+auth:
+  github:
+    clientID: {{ $cfg.auth.github.clientID | default "" | quote }}
+    clientSecret: {{ $cfg.auth.github.clientSecret | default "" | quote }}
+    allowedUserIDs:
+      {{- range ($cfg.auth.github.allowedUserIDs | default list) }}
+      - {{ . }}
+      {{- end }}
 serving:
   {{- if $gw }}
   gatewayRef:

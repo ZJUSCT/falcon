@@ -1,18 +1,18 @@
 {{- /*
-Admin domain route: admin UI + read-only API on admin.hosts.
-  Exact /api/jobs        -> controller webapi Service
-  Exact /api/usage       -> controller webapi Service
-  PathPrefix /api/repos/ -> controller webapi Service
-  PathPrefix /           -> admin web UI Service
+Admin domain route: authenticated admin UI + read-only API on admin.host.
+  PathPrefix /           -> controller webapi Service (auth gateway/proxy)
 parentRefs come from admin.route.parentRefs verbatim, or are derived from
 admin.route.gatewayRef merged over global.gatewayRef.
 */ -}}
 {{- if .Values.admin.enabled }}
-{{- if not .Values.admin.hosts }}
-{{- fail "admin.hosts must not be empty when admin.enabled=true" }}
+{{- if not .Values.admin.host }}
+{{- fail "admin.host must not be empty when admin.enabled=true" }}
+{{- end }}
+{{- if not (regexMatch "^[A-Za-z0-9.-]+$" .Values.admin.host) }}
+{{- fail "admin.host must be a bare hostname" }}
 {{- end }}
 {{- if not .Values.webui.enabled }}
-{{- fail "admin.enabled=true requires webui.enabled=true (the '/' rule routes to the UI Service)" }}
+{{- fail "admin.enabled=true requires webui.enabled=true" }}
 {{- end }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -33,36 +33,13 @@ spec:
   parentRefs:
     {{- include "falcon.parentRefs" (dict "ctx" $ "section" .Values.admin.route.gatewayRef "parentRefs" .Values.admin.route.parentRefs) | nindent 4 }}
   hostnames:
-    {{- range .Values.admin.hosts }}
-    - {{ . | quote }}
-    {{- end }}
+    - {{ .Values.admin.host | quote }}
   rules:
-    - matches:
-        - path:
-            type: Exact
-            value: /api/jobs
-      backendRefs:
-        - name: {{ include "falcon.fullname" . }}-webapi
-          port: 80
-    - matches:
-        - path:
-            type: Exact
-            value: /api/usage
-      backendRefs:
-        - name: {{ include "falcon.fullname" . }}-webapi
-          port: 80
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /api/repos/
-      backendRefs:
-        - name: {{ include "falcon.fullname" . }}-webapi
-          port: 80
     - matches:
         - path:
             type: PathPrefix
             value: /
       backendRefs:
-        - name: {{ include "falcon.fullname" . }}-ui
+        - name: {{ include "falcon.fullname" . }}-webapi
           port: 80
 {{- end }}

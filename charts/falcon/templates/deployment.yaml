@@ -91,6 +91,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            {{- if .Values.webui.enabled }}
+            - name: FALCON_UI_UPSTREAM
+              value: http://{{ include "falcon.fullname" . }}-ui
+            {{- end }}
             {{- if .Values.zfsAgent.enabled }}
             # Wires webapi GET /api/usage: the controller aggregates the
             # zfs-agent DaemonSet's reports through this headless Service.

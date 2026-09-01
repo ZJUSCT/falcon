@@ -38,8 +38,8 @@ Falcon（原项目名 MirrorGo，发布为 `github.com/ZJUSCT/falcon`）是一�
 
 - **namespaced 部署**：一个 release = 一个 namespace 内的完整栈（控制器 + UI + webapi + 路由 + 所有子资源）。控制器通过 `POD_NAMESPACE`（chart 注入 `metadata.namespace`）只 watch、只管理、只在其中做 leader election；manager cache 用 `DefaultNamespaces` 限定到本 namespace，webapi 的 List 也因此只见本 namespace 对象。
 - **存储接口**：Falcon 只依赖 Kubernetes 存储 API——CSI StorageClass、VolumeSnapshot（快照与 `dataSource` 克隆 PVC）。对存储后端的可移植要求：CSI 支持卷快照与从快照创建 PVC，且快照克隆可被发布 Pod 挂载（本地 PV 语义下克隆须与快照同节点）；`volumeSnapshotClassName` 为必填字段（无站点默认值），`servingStorageClassName`（发布 PVC 存储）必须与快照同后端、同拓扑。同步 PVC 惯用 `reclaimPolicy: Retain`、发布 PVC 用独立 `Delete` 类以便清理时真正回收后端卷。开发环境使用 OpenEBS ZFS LocalPV 验证；其他满足上述条件的 CSI（含分布式存储）理论上可用但尚未验证。集群需预先安装 CSI 与快照控制器。
-- **流量入口**：Gateway API（`sigs.k8s.io/gateway-api/apis/v1`）。控制器为已发布的 Mirror / Ready 的 ProxyMirror 生成发布 HTTPRoute（仅当 `spec.services` 声明了 `http` 项；rsync/git 服务只有 Service）；chart 另渲染管理域 HTTPRoute（UI + webapi）与目录 HTTPRoute（/mirrorz.json）。chart 默认指向跨 namespace 共享的 `nginx-gateway`（namespace: nginx-gateway, sectionName: https）。
-- **管理域鉴权前提**：UI 与 `/api/*` 无任何内置认证；操作者必须在网关（NGF）层为 admin host 强制 BasicAuth（详见 chart spec §7.2）。
+- **流量入口**：Gateway API（`sigs.k8s.io/gateway-api/apis/v1`）。控制器为已发布的 Mirror / Ready 的 ProxyMirror 生成发布 HTTPRoute（仅当 `spec.services` 声明了 `http` 项；rsync/git 服务只有 Service）；chart 另渲染管理域 HTTPRoute（全部请求进入 webapi 鉴权网关，UI 路径再反代到 webui）与目录 HTTPRoute（/mirrorz.json）。chart 默认指向跨 namespace 共享的 `nginx-gateway`（namespace: nginx-gateway, sectionName: https）。
+- **管理域鉴权**：管理域使用 GitHub OAuth。`controller.config.auth.github` 配置 client ID、secret 与允许的数字 GitHub IDs；单一 `admin.host` 生成回调路径 `/oauth/callback`。Falcon 不维护用户数据库，凭证缺失时拒绝访问；目录域仍公开。
 - **节点放置**：Mirror 通过 `kubernetes.io/hostname` node selector（而非 `pod.spec.nodeName`）约束同步 Job 与发布 Deployment，以保持 WaitForFirstConsumer 卷绑定可用。ProxyMirror 没有任何放置字段。
 - **CR 实例清单**：各站点的 CR 实例与输入 ConfigMap 由站点运维在自有仓库中经 GitOps/Argo CD 管理，不归本仓库；本仓库的 chart 是自助部署路径。
 
@@ -49,7 +49,7 @@ Falcon（原项目名 MirrorGo，发布为 `github.com/ZJUSCT/falcon`）是一�
 |---|---|---|
 | metrics | `:8080` | 仅 controller-runtime 内建指标 |
 | health probe | `:8081` | `/healthz`、`/readyz`（均为 ping） |
-| webapi | `:8082` | 只读 HTTP API（GET-only）；设为 `"0"` 关闭 |
+| webapi | `:8082` | API 与管理域 OAuth 网关（`/oauth/*`、反代 UI）；设为 `"0"` 关闭 |
 
 发布面为每个 `spec.services[]` 项生成一对 Deployment/Service `<base>-publish-<协议>`（http/rsync/git），Service 固定暴露端口 80、按命名端口（协议名，即容器第一个端口）转发；发布 HTTPRoute（仅 http 项，`<base>-publish`）backendRef 端口 80。UI 容器 nginx 监听 8080。
 

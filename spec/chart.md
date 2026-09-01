@@ -59,6 +59,8 @@ controller:
     site: {url: https://mirrors.zjusct.io, abbr: ZJU, name: Zhejiang University Mirror}
     catalog.enabled: true
     sync.maxConcurrent: 4
+    auth:
+      github: {clientID: "", clientSecret: "", allowedUserIDs: []}
     serving:
       gatewayRef: {}              # 空 = 回落 global.gatewayRef
       hostnames: [mirrors.zjusct.io, mirror.zju.edu.cn]
@@ -85,8 +87,8 @@ webui:
   replicaCount: 2
   resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {}}
 admin:
-  enabled: false                  # admin 关闭时 hosts 允许为空（默认即关闭）
-  hosts: []                       # enabled=true 时必填非空，否则渲染 fail
+  enabled: false                  # admin disabled by default
+  host: ""                        # enabled=true requires one bare hostname
   route: {gatewayRef: {}, parentRefs: [], labels: {}, annotations: {}}
 catalog:
   enabled: true
@@ -160,17 +162,9 @@ CRD 是集群级资源，不进 RBAC；由 `crds/` 目录安装（见 §8）。
 
 ### 7.2 管理域 HTTPRoute（admin）
 
-`admin.enabled=true` 时渲染 `<fullname>-admin`（**默认关闭**——默认部署不含管理面板，admin 关闭时 `admin.hosts` 允许为空）；渲染要求 `admin.hosts` 非空且 `webui.enabled=true`，否则 `fail`（`/` 规则指向 UI Service）。
+`admin.enabled=true` renders `<fullname>-admin` (disabled by default). Exactly one scalar `admin.host` is required and must be a bare hostname; `webui.enabled` must also be true. The route has one `PathPrefix /` rule to the controller webapi Service. Falcon authenticates admin requests and reverse-proxies UI paths to `<fullname>-ui` via `FALCON_UI_UPSTREAM`; catalog routes remain public.
 
-- hostnames：`admin.hosts`（默认空；`admin.enabled=true` 时必填非空）。
-- 三条规则按序：
-  1. `Exact /api/jobs` → Service `<fullname>-webapi` 端口 80
-  2. `Exact /api/usage` → Service `<fullname>-webapi` 端口 80
-  3. `PathPrefix /api/repos/` → Service `<fullname>-webapi` 端口 80
-  4. `PathPrefix /` → Service `<fullname>-ui` 端口 80
-- parentRefs/labels/annotations 按 §5.2 与 values 透传。
-
-**无内置鉴权（部署前提）**：admin host 上的 UI 与 `/api/*` 端点没有任何应用层认证——webapi 是只读的（GET-only、spec-only），但 `/api/jobs` 暴露全部 Mirror 的状态与调度信息，spec 视图暴露同步命令/卷配置等内部细节。**操作者必须在网关（NGF / NGINX Gateway Fabric）层为 admin host 强制 BasicAuth**（例如 NGF 的 BasicAuth Policy 绑定到该 host/route）；chart 与控制器都不做、也不计划内置认证。
+GitHub OAuth is configured under `controller.config.auth.github` (`clientID`, `clientSecret`, and numeric `allowedUserIDs`). The callback URI is `https://<admin.host>/oauth/callback`; `/oauth/login`, `/oauth/callback`, `/oauth/session`, and `/oauth/logout` are handled by webapi. Sessions are secure, HTTP-only, signed with the client secret, and checked against the allowlist on every request. Empty credentials fail closed.
 
 ### 7.3 目录 HTTPRoute（catalog）
 

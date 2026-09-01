@@ -75,7 +75,7 @@ function SpecViewer({ mirrorId }: { mirrorId: string }) {
     <div className="rounded-lg border border-border bg-card">
       <div className="px-4 py-3 border-b flex justify-between items-center">
         <span className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-          Resource Spec (read-only)
+          Resource Spec
         </span>
         <button
           onClick={handleCopy}
@@ -130,7 +130,10 @@ function StorageUsageCard({ mirrorId, kind, syncTime }: { mirrorId: string; kind
             <tbody className="divide-y divide-border/60">
               {mirrorUsage.sync && (
                 <tr>
-                  <td className="py-2 font-mono break-all">[Sync] {mirrorUsage.sync.pvc}</td>
+                  <td className="py-2 break-all">
+                    <span className="font-mono">{mirrorUsage.sync.pvc}</span>
+                    <span className="ml-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">Sync</span>
+                  </td>
                   <td className="py-2 text-muted-foreground">{syncTime ? <RelativeTime date={syncTime} variant="absolute" /> : '—'}</td>
                   <td className="py-2 text-right font-mono tabular-nums">{formatBytes(mirrorUsage.sync.writtenBytes) ?? '—'}</td>
                 </tr>
@@ -140,7 +143,12 @@ function StorageUsageCard({ mirrorId, kind, syncTime }: { mirrorId: string; kind
               )}
               {mirrorUsage.snapshots.map((snapshot, index) => (
                 <tr key={snapshot.name}>
-                  <td className="py-2 font-mono break-all">{snapshot.name === mirrorUsage.activeSnapshot ? '[Active] ' : ''}{snapshot.name}</td>
+                  <td className="py-2 break-all">
+                    <span className="font-mono">{snapshot.name}</span>
+                    {snapshot.name === mirrorUsage.activeSnapshot && (
+                      <span className="ml-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">Active</span>
+                    )}
+                  </td>
                   <td className="py-2"><RelativeTime date={new Date(snapshot.createdAt * 1000).toISOString()} variant="absolute" /></td>
                   <td className="py-2 text-right font-mono tabular-nums">{formatBytes(index === mirrorUsage.snapshots.length - 1 ? snapshot.referencedBytes : snapshot.writtenBytes) ?? '—'}</td>
                 </tr>

@@ -135,6 +135,8 @@ func main() {
 			ServingHostnames: cfg.Serving.Hostnames,
 			CatalogEnabled:   cfg.Catalog.Enabled,
 		}
+		apiServer.Auth = &webapi.Authenticator{Config: webapi.GitHubAuthConfig{ClientID: cfg.Auth.GitHub.ClientID, ClientSecret: cfg.Auth.GitHub.ClientSecret, AllowedUserIDs: cfg.Auth.GitHub.AllowedUserIDs}, AdminHost: cfg.Admin.Host}
+		apiServer.UIUpstream = os.Getenv("FALCON_UI_UPSTREAM")
 		// ZFS usage aggregation behind GET /api/usage: enabled purely by the
 		// ZFS_AGENT_SERVICE environment variable (the chart injects it when
 		// zfsAgent.enabled); unset leaves the endpoint a 404.

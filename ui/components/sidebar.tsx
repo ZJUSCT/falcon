@@ -121,6 +121,11 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
              <MonitorSmartphone className="h-4 w-4 flex-shrink-0" />}
             {!collapsed && <span>{theme === 'dark' ? 'Dark' : theme === 'light' ? 'Light' : 'System'}</span>}
           </button>
+          <button onClick={() => { fetch('/oauth/logout').finally(() => { window.location.href = '/oauth/login'; }); }}
+            style={{ padding: '8px 10px', gap: '10px' }}
+            className="w-full flex items-center rounded-md text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-accent">
+            {!collapsed && <span>Log out</span>}
+          </button>
         </div>
         <button
           onClick={() => setCollapsed(!collapsed)}

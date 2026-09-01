@@ -12,6 +12,8 @@ package webapi
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -47,7 +49,9 @@ type Server struct {
 	// Usage aggregates zfs-agent reports for GET /api/usage. It is nil when
 	// the ZFS_AGENT_SERVICE environment variable is unset, which disables
 	// the endpoint (404) — there is no config field for it.
-	Usage *UsageAggregator
+	Usage      *UsageAggregator
+	Auth       *Authenticator
+	UIUpstream string
 }
 
 // Handler builds the http.Handler for the read-only API. All routes are
@@ -59,11 +63,44 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/repos", s.handleRepoRoot)
 	mux.HandleFunc("/api/repos/", s.handleRepo)
 	mux.HandleFunc("/api/usage", s.handleUsage)
+	if s.Auth != nil {
+		mux.HandleFunc("/oauth/login", s.Auth.login)
+		mux.HandleFunc("/oauth/callback", s.Auth.callback)
+		mux.HandleFunc("/oauth/session", s.Auth.session)
+		mux.HandleFunc("/oauth/logout", s.Auth.logout)
+	}
 	// No UI is embedded; everything else is a 404 JSON error.
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "not found")
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.Auth != nil && strings.EqualFold(strings.Split(r.Host, ":")[0], s.Auth.AdminHost) {
+			if strings.HasPrefix(r.URL.Path, "/oauth/") {
+				if r.Method != http.MethodGet {
+					w.Header().Set("Allow", http.MethodGet)
+					writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+					return
+				}
+				mux.ServeHTTP(w, r)
+				return
+			}
+			if r.URL.Path == "/mirrorz.json" {
+				mux.ServeHTTP(w, r)
+				return
+			}
+			if !s.Auth.require(w, r) {
+				return
+			}
+			if !strings.HasPrefix(r.URL.Path, "/api/") && s.UIUpstream != "" {
+				u, err := url.Parse(s.UIUpstream)
+				if err != nil {
+					http.Error(w, "invalid UI upstream", 500)
+					return
+				}
+				httputil.NewSingleHostReverseProxy(u).ServeHTTP(w, r)
+				return
+			}
+		}
 		// Read-only listener: reject anything that is not a plain GET.
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)

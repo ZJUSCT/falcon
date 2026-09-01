@@ -3,12 +3,15 @@
   <br>Falcon<br>
 </h1>
 
+> [!WARNING]
+> Falcon 目前处于开发早期阶段，在[浙江大学镜像站（ZJU Mirror）](https://mirrors.zju.edu.cn/) 的校内测试站点运行。
+
 Falcon 是一个运行在 Kubernetes 上的软件源镜像编排器。
 
 - **镜像编排**：每个镜像由一个 `Mirror` CR 声明，内容包括上游、同步周期、存储、发布方式等。控制器据此分配资源（同步 PVC、同步 Job、发布 PVC、Deployment、对外 Route 等），并按周期调度同步任务；`ProxyMirror` CR 以类似的方式描述只代理不同步（可选缓存）的上游。
 - **原子化发布**：同步任务成功完成后，基于 VolumeSnapshot 生成不可变的快照，并以快照克隆出只读发布 PVC，滚动替换实例。用户永远不会访问到同步的中间状态。
 
-Falcon 目前处于开发早期阶段，在[浙江大学镜像站（ZJU Mirror）](https://mirrors.zju.edu.cn/) 的校内测试站点运行。
+![Falcon Overview](spec/overview.png)
 
 ## 快速开始
 
@@ -20,6 +23,13 @@ helm install falcon oci://ghcr.io/zjusct/charts/falcon \
 - 镜像由 `Mirror` CR 描述；字段与示例见 [`spec/mirror.md`](spec/mirror.md)。
 - CRD 随 chart 的 crds/ 目录在 install 时安装。helm upgrade 不更新 CRD，需手动 kubectl apply。
 - values 结构、RBAC 与部署细节见 [`spec/chart.md`](spec/chart.md)；管理前端见 [`spec/ui.md`](spec/ui.md)。
+
+When the admin panel is enabled, set one scalar `admin.host` and configure
+`controller.config.auth.github` with a GitHub OAuth client and an allowlist of
+numeric GitHub user IDs. The callback is
+`https://<admin.host>/oauth/callback`; requests are authenticated by Falcon's
+webapi gateway before UI content is proxied. Leave credentials empty to fail
+closed while preparing a deployment. The public catalog remains available.
 
 ## 发布物
 

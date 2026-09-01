@@ -34,6 +34,16 @@ type ServingConfig struct {
 
 // Config is the whole controller configuration file.
 type Config struct {
+	Auth struct {
+		GitHub struct {
+			ClientID       string  `json:"clientID,omitempty"`
+			ClientSecret   string  `json:"clientSecret,omitempty"`
+			AllowedUserIDs []int64 `json:"allowedUserIDs,omitempty"`
+		} `json:"github,omitempty"`
+	} `json:"auth,omitempty"`
+	Admin struct {
+		Host string `json:"host,omitempty"`
+	} `json:"admin,omitempty"`
 	Log struct {
 		// Level is one of debug, info, warn, error (default info).
 		Level string `json:"level,omitempty"`
@@ -113,6 +123,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Site.URL == "" {
 		return fmt.Errorf("site.url must not be empty")
+	}
+	if c.Admin.Host != "" {
+		c.Admin.Host = strings.TrimSpace(strings.ToLower(c.Admin.Host))
+		if strings.ContainsAny(c.Admin.Host, "/:@?#") {
+			return fmt.Errorf("admin.host must be a bare hostname")
+		}
 	}
 	if !strings.Contains(c.Site.URL, "://") {
 		return fmt.Errorf("site.url %q must carry a scheme (e.g. https://...)", c.Site.URL)
