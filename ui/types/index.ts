@@ -40,19 +40,22 @@ export function isZeroTime(value: string | undefined): boolean {
 export interface MirrorUsageSync {
   pvc: string; // ZFS dataset backing PVC
   referencedBytes: number;
+  writtenBytes: number; // incremental bytes since latest snapshot (or referencedBytes when no baseline)
 }
 
 export interface MirrorUsageSnapshot {
   name: string;
   writtenBytes: number;
-  createdAt: number; // epoch seconds; snapshots are ordered ascending
+  referencedBytes: number;
+  createdAt: number; // epoch seconds; snapshots are ordered newest first
 }
 
 export interface MirrorUsage {
   name: string;
+  activeSnapshot?: string;
   sync: MirrorUsageSync | null; // null: no ZFS data yet (never synced or agent does not cover it)
   snapshots: MirrorUsageSnapshot[];
-  totalBytes: number; // sync.referencedBytes + Σ snapshots[].writtenBytes (computed server-side)
+  totalBytes: number; // ZFS dataset usedBytes, including snapshot-held space
   complete: boolean; // false: some agent nodes did not respond (see errors) — data is advisory
   errors: string[];
 }

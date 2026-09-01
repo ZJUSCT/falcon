@@ -17,7 +17,6 @@
 // picks that up).
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import type { ReactNode } from 'react';
 import { StatusBadge } from '@/components/status-badge';
 import { RelativeTime } from '@/components/relative-time';
 import { apiClient } from '@/lib/api';
@@ -103,32 +102,12 @@ function SpecViewer({ mirrorId }: { mirrorId: string }) {
   );
 }
 
-// One line of the Storage Usage card: a monospace label (sync PVC or
-// snapshot name) with its size on the right; `meta` renders extra context
-// (e.g. the snapshot age) between label and size.
-function UsageLine({ label, meta, bytes }: { label: string; meta?: ReactNode; bytes: number | null | undefined }) {
-  const size = formatBytes(bytes);
-  return (
-    <div className="flex items-baseline justify-between gap-4">
-      <span className="min-w-0 font-mono break-all">{label}</span>
-      <span className="flex items-baseline gap-2 whitespace-nowrap">
-        {meta}
-        {size !== null ? (
-          <span className="font-mono tabular-nums">{size}</span>
-        ) : (
-          <span className="font-mono text-muted-foreground">—</span>
-        )}
-      </span>
-    </div>
-  );
-}
-
 // Storage Usage card — per-mirror footprint from GET /api/usage (30s poll).
 // Sync PVC first, then one row per snapshot (size + age), then the total.
 // Degradations: ProxyMirror rows show "Not applicable" (no sync/snapshot
 // concept), a missing record or a 404-ing endpoint shows a plain hint, and
 // `complete: false` adds a light "data may be partial" notice.
-function StorageUsageCard({ mirrorId, kind }: { mirrorId: string; kind: string | undefined }) {
+function StorageUsageCard({ mirrorId, kind, syncTime }: { mirrorId: string; kind: string | undefined; syncTime?: string }) {
   const usage = useUsage();
   const mirrorUsage = useMemo(() => (usage?.mirrors ?? []).find(entry => entry.name === mirrorId) ?? null, [usage, mirrorId]);
 
@@ -143,33 +122,35 @@ function StorageUsageCard({ mirrorId, kind }: { mirrorId: string; kind: string |
       ) : mirrorUsage === null ? (
         <div className="text-sm text-muted-foreground">Usage data unavailable</div>
       ) : (
-        <div className="text-sm space-y-1.5">
-          {mirrorUsage.sync ? (
-            <div className="flex items-baseline justify-between gap-4">
-              <span className="min-w-0 break-all">
-                <span className="mr-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">Sync PVC</span>
-                <span className="font-mono">{mirrorUsage.sync.pvc}</span>
-              </span>
-              <span className="whitespace-nowrap font-mono tabular-nums">
-                {formatBytes(mirrorUsage.sync.referencedBytes) ?? '—'}
-              </span>
-            </div>
-          ) : (
-            <div className="text-muted-foreground">No ZFS data yet (never synced or not covered by an agent).</div>
-          )}
-          {mirrorUsage.snapshots.map(snapshot => (
-            <UsageLine
-              key={snapshot.name}
-              label={snapshot.name}
-              bytes={snapshot.writtenBytes}
-              // Snapshot createdAt is epoch seconds; RelativeTime wants a date string.
-              meta={<RelativeTime date={new Date(snapshot.createdAt * 1000).toISOString()} variant="compact" />}
-            />
-          ))}
-          <div className="flex items-baseline justify-between gap-4 border-t border-border pt-1.5">
-            <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Total</span>
-            <span className="whitespace-nowrap font-mono tabular-nums">{formatBytes(mirrorUsage.totalBytes) ?? '—'}</span>
-          </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-[10px] uppercase tracking-wide text-muted-foreground border-b border-border">
+              <tr><th className="py-1.5 text-left font-semibold">Name</th><th className="py-1.5 text-left font-semibold">Time</th><th className="py-1.5 text-right font-semibold">Size</th></tr>
+            </thead>
+            <tbody className="divide-y divide-border/60">
+              {mirrorUsage.sync && (
+                <tr>
+                  <td className="py-2 font-mono break-all">[Sync] {mirrorUsage.sync.pvc}</td>
+                  <td className="py-2 text-muted-foreground">{syncTime ? <RelativeTime date={syncTime} variant="absolute" /> : '—'}</td>
+                  <td className="py-2 text-right font-mono tabular-nums">{formatBytes(mirrorUsage.sync.writtenBytes) ?? '—'}</td>
+                </tr>
+              )}
+              {!mirrorUsage.sync && mirrorUsage.snapshots.length === 0 && (
+                <tr><td colSpan={3} className="py-2 text-muted-foreground">No ZFS data yet (never synced or not covered by an agent).</td></tr>
+              )}
+              {mirrorUsage.snapshots.map((snapshot, index) => (
+                <tr key={snapshot.name}>
+                  <td className="py-2 font-mono break-all">{snapshot.name === mirrorUsage.activeSnapshot ? '[Active] ' : ''}{snapshot.name}</td>
+                  <td className="py-2"><RelativeTime date={new Date(snapshot.createdAt * 1000).toISOString()} variant="absolute" /></td>
+                  <td className="py-2 text-right font-mono tabular-nums">{formatBytes(index === mirrorUsage.snapshots.length - 1 ? snapshot.referencedBytes : snapshot.writtenBytes) ?? '—'}</td>
+                </tr>
+              ))}
+              <tr className="border-t border-border">
+                <td className="py-2 font-semibold" colSpan={2}>Total</td>
+                <td className="py-2 text-right font-mono tabular-nums">{formatBytes(mirrorUsage.totalBytes) ?? '—'}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       )}
     </div>
@@ -265,23 +246,23 @@ export function MirrorDetail({ mirrorId, onBack }: MirrorDetailProps) {
             </div>
             <div>
               <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Last Success</div>
-              <RelativeTime date={job.last_success_at} variant="compact" />
+              <RelativeTime date={job.last_success_at} variant="absolute" />
             </div>
             <div>
               <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Last Failure</div>
-              <RelativeTime date={job.last_failure_at} variant="compact" />
+              <RelativeTime date={job.last_failure_at} variant="absolute" />
             </div>
             <div>
               <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Last Attempt</div>
-              <RelativeTime date={job.last_attempt_at} variant="compact" />
+              <RelativeTime date={job.last_attempt_at} variant="absolute" />
             </div>
             <div>
               <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Next Attempt</div>
-              <RelativeTime date={job.next_attempt_at} variant="compact" />
+              <RelativeTime date={job.next_attempt_at} variant="countdown" />
             </div>
             <div>
               <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Last Finished</div>
-              <RelativeTime date={job.last_finished_at} variant="compact" />
+              <RelativeTime date={job.last_finished_at} variant="absolute" />
             </div>
           </div>
         </div>
@@ -292,7 +273,7 @@ export function MirrorDetail({ mirrorId, onBack }: MirrorDetailProps) {
       )}
 
       {/* Storage Usage (GET /api/usage, 30s poll; silent degrade when absent) */}
-      <StorageUsageCard mirrorId={mirrorId} kind={job?.kind} />
+      <StorageUsageCard mirrorId={mirrorId} kind={job?.kind} syncTime={job?.last_finished_at} />
 
       {/* CRD spec, read-only */}
       <SpecViewer mirrorId={mirrorId} />

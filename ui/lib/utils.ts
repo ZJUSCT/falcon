@@ -128,6 +128,34 @@ export function formatRFC3339(dateString: string): string {
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}${timezoneString}`;
 }
 
+// Local ISO-8601-like timestamp for compact tables. The browser's timezone
+// is used and the numeric offset keeps the value unambiguous (for example,
+// 09-01T13:42:00+08:00 in Asia/Shanghai).
+export function formatLocalISO8601(dateString: string): string {
+  if (!dateString || dateString === '0001-01-01T00:00:00Z') return 'Never';
+  const date = new Date(dateString);
+  if (Number.isNaN(date.getTime()) || date.getTime() <= 0) return 'Never';
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const absolute = Math.abs(offsetMinutes);
+  const offsetHours = String(Math.floor(absolute / 60)).padStart(2, '0');
+  const offsetRemainder = String(absolute % 60).padStart(2, '0');
+  return `${month}-${day}T${hours}:${minutes}:${seconds}${sign}${offsetHours}:${offsetRemainder}`;
+}
+
+export function formatCountdown(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, '0');
+  const minutes = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, '0');
+  const seconds = String(totalSeconds % 60).padStart(2, '0');
+  return `${hours}:${minutes}:${seconds}`;
+}
+
 export function getStatusColor(status: string): string {
   switch (status) {
     // Legacy sync vocabulary (Mirror jobs).

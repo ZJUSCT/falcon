@@ -288,8 +288,8 @@ func TestJoinUsage(t *testing.T) {
 		errors:      []string{"storage-2: Get \"http://10.0.0.2:9474/v1/zfs\": context deadline exceeded"},
 		byPVC: map[string]*zfsagent.Dataset{
 			"mirror/ubuntu-sync": {
-				Name:            "tank/pvc-1",
-				ReferencedBytes: 90,
+				Name:      "tank/pvc-1",
+				UsedBytes: 120, ReferencedBytes: 90, WrittenBytes: 7,
 				Snapshots: []zfsagent.Snapshot{
 					{Name: "tank/pvc-1@s2", VolumeSnapshot: &zfsagent.ObjectRef{Namespace: "mirror", Name: "ubuntu-snap-2000"}, WrittenBytes: 30, ReferencedBytes: 60, CreatedAt: 2000},
 					{Name: "tank/pvc-1@s1", VolumeSnapshot: &zfsagent.ObjectRef{Namespace: "mirror", Name: "ubuntu-snap-1000"}, WrittenBytes: 5, ReferencedBytes: 90, CreatedAt: 1000},
@@ -298,7 +298,7 @@ func TestJoinUsage(t *testing.T) {
 					{Name: "tank/pvc-1@manual", WrittenBytes: 1, ReferencedBytes: 87, CreatedAt: 1500},
 				},
 			},
-			"mirror/debian-sync": {Name: "tank/pvc-2", ReferencedBytes: 20},
+			"mirror/debian-sync": {Name: "tank/pvc-2", UsedBytes: 20, ReferencedBytes: 20},
 			// Other namespace: must not match any mirror below.
 			"other/ubuntu-sync": {Name: "zpool2/pvc-9", ReferencedBytes: 999},
 		},
@@ -306,7 +306,7 @@ func TestJoinUsage(t *testing.T) {
 	mirrors := &mirrorv1alpha1.MirrorList{Items: []mirrorv1alpha1.Mirror{
 		{ObjectMeta: metav1.ObjectMeta{Name: "zebra", Namespace: "mirror"}}, // never synced: derived name matches nothing
 		{ObjectMeta: metav1.ObjectMeta{Name: "ubuntu", Namespace: "mirror"},
-			Status: mirrorv1alpha1.MirrorStatus{WorkPVC: "ubuntu-sync"}},
+			Status: mirrorv1alpha1.MirrorStatus{WorkPVC: "ubuntu-sync", ActiveSnapshot: "ubuntu-snap-2000"}},
 		{ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirror"},
 			Status: mirrorv1alpha1.MirrorStatus{WorkPVC: "debian-sync"}},
 		// ChildBase derivation: dots become dashes.
@@ -315,7 +315,7 @@ func TestJoinUsage(t *testing.T) {
 	}}
 	// rocky's derived sync PVC has agent data (as if synced under the
 	// derived name before status.workPVC was ever written).
-	agg.byPVC["mirror/rockylinux-sync"] = &zfsagent.Dataset{Name: "tank/pvc-3", ReferencedBytes: 10}
+	agg.byPVC["mirror/rockylinux-sync"] = &zfsagent.Dataset{Name: "tank/pvc-3", UsedBytes: 10, ReferencedBytes: 10}
 
 	resp := joinUsage(mirrors, agg)
 
@@ -334,21 +334,26 @@ func TestJoinUsage(t *testing.T) {
 	}
 
 	ubuntu := resp.Mirrors[2]
+	if ubuntu.ActiveSnapshot != "ubuntu-snap-2000" {
+		t.Errorf("activeSnapshot = %q", ubuntu.ActiveSnapshot)
+	}
 	if ubuntu.Sync == nil || ubuntu.Sync.PVC != "ubuntu-sync" || ubuntu.Sync.ReferencedBytes != 90 {
 		t.Errorf("ubuntu sync = %+v", ubuntu.Sync)
 	}
-	// Snapshots ascending by createdAt, vs-name preferred, ZFS name fallback.
+	// Snapshots newest-first; oldest row carries the referenced baseline.
 	wantSnaps := []UsageSnapshot{
-		{Name: "ubuntu-snap-1000", WrittenBytes: 5, CreatedAt: 1000},
-		{Name: "tank/pvc-1@manual", WrittenBytes: 1, CreatedAt: 1500},
-		{Name: "ubuntu-snap-2000", WrittenBytes: 30, CreatedAt: 2000},
+		{Name: "ubuntu-snap-2000", WrittenBytes: 30, ReferencedBytes: 60, CreatedAt: 2000},
+		{Name: "tank/pvc-1@manual", WrittenBytes: 1, ReferencedBytes: 87, CreatedAt: 1500},
+		{Name: "ubuntu-snap-1000", WrittenBytes: 5, ReferencedBytes: 90, CreatedAt: 1000},
 	}
 	if diff := cmp.Diff(wantSnaps, ubuntu.Snapshots); diff != "" {
 		t.Errorf("ubuntu snapshots (-want +got):\n%s", diff)
 	}
-	// totalBytes = sync.referenced + sum(snapshot written) = 90 + 5 + 1 + 30.
-	if ubuntu.TotalBytes != 126 {
-		t.Errorf("ubuntu totalBytes = %d, want 126", ubuntu.TotalBytes)
+	if ubuntu.Sync.WrittenBytes != 7 {
+		t.Errorf("ubuntu sync writtenBytes = %d, want 7", ubuntu.Sync.WrittenBytes)
+	}
+	if ubuntu.TotalBytes != 120 {
+		t.Errorf("ubuntu totalBytes = %d, want 120", ubuntu.TotalBytes)
 	}
 
 	debian := resp.Mirrors[0]
@@ -401,6 +406,7 @@ func TestJoinUsageFallsBackToOpenEBSStorageNames(t *testing.T) {
 		byVolumeName: map[string]*zfsagent.Dataset{
 			"pvc-abc": {
 				Name:            "tank/openebs/pvc-abc",
+				UsedBytes:       95,
 				ReferencedBytes: 90,
 				Snapshots: []zfsagent.Snapshot{{
 					Name:         "tank/openebs/pvc-abc@snapshot-snap-uid",
@@ -505,7 +511,7 @@ func TestUsageEnabledPinsWireShape(t *testing.T) {
 		}
 	}
 	sync := entry["sync"].(map[string]any)
-	for _, key := range []string{"pvc", "referencedBytes"} {
+	for _, key := range []string{"pvc", "referencedBytes", "writtenBytes"} {
 		if _, ok := sync[key]; !ok {
 			t.Errorf("sync key %q missing from %s", key, body)
 		}
@@ -513,8 +519,8 @@ func TestUsageEnabledPinsWireShape(t *testing.T) {
 	if sync["pvc"] != "ubuntu-sync" || sync["referencedBytes"] != float64(90) {
 		t.Errorf("sync = %v", sync)
 	}
-	if entry["totalBytes"] != float64(97) { // 90 + 2 + 5
-		t.Errorf("totalBytes = %v, want 97", entry["totalBytes"])
+	if entry["totalBytes"] != float64(100) {
+		t.Errorf("totalBytes = %v, want 100", entry["totalBytes"])
 	}
 	if entry["complete"] != true {
 		t.Errorf("complete = %v, want true", entry["complete"])

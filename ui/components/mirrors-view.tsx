@@ -217,7 +217,7 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                         )}
                         <div className="mt-0.5 text-[11px] text-muted-foreground md:hidden">
                           <span className="uppercase tracking-wide">Next </span>
-                          <RelativeTime date={job.next_attempt_at} variant="compact" />
+                          <RelativeTime date={job.next_attempt_at} variant="countdown" />
                         </div>
                         <div className="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground md:hidden">
                           <span className="uppercase tracking-wide">Last Action</span>
@@ -270,16 +270,16 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                         )}
                       </td>
                       <td className="hidden md:table-cell px-3 py-2 align-top">
-                        <RelativeTime date={job.next_attempt_at} variant="compact" />
+                        <RelativeTime date={job.next_attempt_at} variant="countdown" />
                       </td>
                       <td className="hidden md:table-cell px-3 py-2 align-top">
-                        <RelativeTime date={job.last_attempt_at} variant="compact" />
+                        <RelativeTime date={job.last_attempt_at} variant="absolute" />
                       </td>
                       <td className="hidden lg:table-cell px-3 py-2 align-top">
-                        <RelativeTime date={job.last_success_at} variant="compact" />
+                        <RelativeTime date={job.last_success_at} variant="absolute" />
                       </td>
                       <td className="hidden lg:table-cell px-3 py-2 align-top">
-                        <RelativeTime date={job.last_failure_at} variant="compact" />
+                        <RelativeTime date={job.last_failure_at} variant="absolute" />
                       </td>
                     </tr>
                   );

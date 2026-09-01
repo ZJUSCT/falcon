@@ -115,18 +115,21 @@ func (a *EndpointSliceAddresser) AgentEndpoints(ctx context.Context) ([]AgentEnd
 type UsageSync struct {
 	PVC             string `json:"pvc"`
 	ReferencedBytes int64  `json:"referencedBytes"`
+	WrittenBytes    int64  `json:"writtenBytes"`
 }
 
 // UsageSnapshot is one VolumeSnapshot's usage on GET /api/usage.
 type UsageSnapshot struct {
-	Name         string `json:"name"`
-	WrittenBytes int64  `json:"writtenBytes"`
-	CreatedAt    int64  `json:"createdAt"`
+	Name            string `json:"name"`
+	WrittenBytes    int64  `json:"writtenBytes"`
+	ReferencedBytes int64  `json:"referencedBytes"`
+	CreatedAt       int64  `json:"createdAt"`
 }
 
 // UsageMirror is one Mirror's entry of GET /api/usage.
 type UsageMirror struct {
-	Name string `json:"name"`
+	Name           string `json:"name"`
+	ActiveSnapshot string `json:"activeSnapshot,omitempty"`
 	// Sync is null when no agent reported the Mirror's sync PVC (never
 	// synced, sync in flight on a node without an agent, or aggregation
 	// incomplete).
@@ -427,10 +430,11 @@ func joinUsageWithStorageObjects(mirrors *mirrorv1alpha1.MirrorList, claims *cor
 	for i := range mirrors.Items {
 		mirror := &mirrors.Items[i]
 		entry := UsageMirror{
-			Name:      mirror.Name,
-			Snapshots: []UsageSnapshot{},
-			Complete:  agg.complete,
-			Errors:    agg.errors,
+			Name:           mirror.Name,
+			ActiveSnapshot: mirror.Status.ActiveSnapshot,
+			Snapshots:      []UsageSnapshot{},
+			Complete:       agg.complete,
+			Errors:         agg.errors,
 		}
 
 		pvcName := mirror.Status.WorkPVC
@@ -443,7 +447,11 @@ func joinUsageWithStorageObjects(mirrors *mirrorv1alpha1.MirrorList, claims *cor
 			ds = agg.byVolumeName[volumeByPVC[pvcKey]]
 		}
 		if ds != nil {
-			entry.Sync = &UsageSync{PVC: pvcName, ReferencedBytes: ds.ReferencedBytes}
+			syncWritten := ds.ReferencedBytes
+			if len(ds.Snapshots) > 0 {
+				syncWritten = ds.WrittenBytes
+			}
+			entry.Sync = &UsageSync{PVC: pvcName, ReferencedBytes: ds.ReferencedBytes, WrittenBytes: syncWritten}
 			for _, snap := range ds.Snapshots {
 				// Prefer the VolumeSnapshot object name (userprop
 				// openebs.io:vs-name) — it is what the rest of Falcon names
@@ -456,27 +464,23 @@ func joinUsageWithStorageObjects(mirrors *mirrorv1alpha1.MirrorList, claims *cor
 					name = objectName
 				}
 				entry.Snapshots = append(entry.Snapshots, UsageSnapshot{
-					Name:         name,
-					WrittenBytes: snap.WrittenBytes,
-					CreatedAt:    snap.CreatedAt,
+					Name:            name,
+					WrittenBytes:    snap.WrittenBytes,
+					ReferencedBytes: snap.ReferencedBytes,
+					CreatedAt:       snap.CreatedAt,
 				})
 			}
-			// Ascending creation order regardless of the wire order (the
-			// agent sorts too, but the join does not rely on it).
+			// Newest first regardless of wire order (the agent sorts too,
+			// but the join does not rely on it).
 			sort.SliceStable(entry.Snapshots, func(i, j int) bool {
 				if entry.Snapshots[i].CreatedAt != entry.Snapshots[j].CreatedAt {
-					return entry.Snapshots[i].CreatedAt < entry.Snapshots[j].CreatedAt
+					return entry.Snapshots[i].CreatedAt > entry.Snapshots[j].CreatedAt
 				}
 				return entry.Snapshots[i].Name < entry.Snapshots[j].Name
 			})
 		}
-
-		entry.TotalBytes = 0
-		if entry.Sync != nil {
-			entry.TotalBytes += entry.Sync.ReferencedBytes
-		}
-		for _, snap := range entry.Snapshots {
-			entry.TotalBytes += snap.WrittenBytes
+		if ds != nil {
+			entry.TotalBytes = ds.UsedBytes
 		}
 		resp.Mirrors = append(resp.Mirrors, entry)
 	}

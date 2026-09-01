@@ -369,9 +369,9 @@ ProxyMirror 条目：`id/namespace/kind/phase` 照常；`status` 直接取原始
 - 数据源：chart 部署的 zfs-agent DaemonSet（每存储节点一个，chroot 进宿主机只读执行 zfs/zpool，见 chart spec §7.5）。控制器用 client-go clientset 列出本 ns 的 `discovery.k8s.io` EndpointSlices（label `kubernetes.io/service-name=<service>`），取 ready 端点地址并去重（Ready 条件缺省按 API 语义视为 ready），并发 `GET http://<ip>:9474/v1/zfs` 拉取各节点的 ZFS 用量报告。agent 端口 9474、单请求超时 5s、聚合缓存 TTL 30s 均为代码常量，不可配置。
 - 聚合与降级：单节点失败（网络错误/超时/非 200/解码失败）不阻塞其余节点；错误记为 `<节点名>: <错误>`（节点名取 EndpointSlice 的 nodeName，缺失时用地址），并使本次聚合 `complete=false`。失败/降级结果与成功结果同样进缓存，TTL 到期重算；无 ready 端点同样 `complete=false`（错误 "no ready zfs-agent endpoints ..."）。EndpointSlices 列取失败则整体 500，且不缓存（下次请求重试）。
 - 响应形状：`{"generatedAt": <聚合时刻>, "mirrors": [...]}`；mirrors 按名升序，**收录本 ns 全部 Mirror**（含从未同步的）。每项 `{name, sync, snapshots, totalBytes, complete, errors}`：
-  - join：同步 PVC 名优先取 `status.workPVC`，为空时按 childBase 规则派生 `<base>-sync`；在聚合数据中按 `pvc.name` 匹配（namespace 须为本 ns）→ `sync: {pvc, referencedBytes}`（ZFS `referenced` 口径）。
-  - `snapshots` = 该 dataset 的全部快照按 `createdAt` 升序 `{name, writtenBytes, createdAt}`；`name` 优先用 userprop `openebs.io:vs-name`（即 VolumeSnapshot 对象名），缺失时回退 ZFS 快照名；`writtenBytes` 是相对上一快照的增量。
-  - `totalBytes = sync.referencedBytes + Σ snapshots[].writtenBytes`（sync 为 null 时按 0 计）。
+  - join：同步 PVC 名优先取 `status.workPVC`，为空时按 childBase 规则派生 `<base>-sync`；在聚合数据中按 `pvc.name` 匹配（namespace 须为本 ns）→ `sync: {pvc, referencedBytes, writtenBytes}`。
+  - `snapshots` = 该 dataset 的全部快照按 `createdAt` 降序 `{name, writtenBytes, referencedBytes, createdAt}`；`name` 优先用 userprop `openebs.io:vs-name`（即 VolumeSnapshot 对象名），缺失时回退 ZFS 快照名；最老快照在 UI 中使用其 `referencedBytes` 基线，后续快照使用相对上一快照的 `writtenBytes` 增量。
+  - `sync.writtenBytes` 为同步 dataset 自最近快照以来的增量（无快照时回退 `referencedBytes`）；`totalBytes` 直接采用 ZFS dataset `usedBytes`，包含快照占用，避免重复计算。
   - 无 agent 数据匹配的 Mirror：`sync: null`、`snapshots: []`、`totalBytes: 0`；`complete`/`errors` 为全局聚合结果（任一 agent 失败，所有 Mirror 同值）。
 - agent 报告中匹配不到任何 Mirror 的 dataset（其他系统的卷、无 openebs userprop 的残留 dataset）被忽略；`mirrorz.json` 的 `size` 与 `status.sizeBytes`（kubelet 口径）不受影响。
 

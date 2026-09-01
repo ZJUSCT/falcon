@@ -69,7 +69,7 @@
 
 - 头部：返回按钮（"Back to Mirrors"）、镜像 id（等宽）、Kind 徽标、Status 徽标。
 - Sync Status 卡（每 5 秒从 `/api/jobs` 按 id 找该行）：Status、Phase、Last Action、Namespace、Active PVC、Last Success、Last Failure、Last Attempt、Next Attempt、Last Finished 十格；找不到对应任务时显示提示（无同步历史的 ProxyMirror 属正常情形）。
-- Storage Usage 卡（`/api/usage` 按 `name` 取该镜像记录，30 秒轮询）：首行 Sync PVC（PVC 名 + `referencedBytes` 格式化；`sync` 为 null 显示 "No ZFS data yet"）、每快照一行（快照名 + `writtenBytes` 格式化 + 相对时间）、末行 Total（`totalBytes`）。ProxyMirror 显示 "Not applicable"；无记录或端点未部署显示 "Usage data unavailable"；`complete: false` 时卡顶轻提示 "Some storage nodes did not respond; data may be partial"。字节格式化用 `formatBytes`（1024 进制 B/KB/…/PB；<1 KB 整数不加小数；否则一位小数，整数值或 ≥100 时省小数；非法输入返回 null，由调用方显示 `—`）。
+- Storage Usage 卡（`/api/usage` 按 `name` 取该镜像记录，30 秒轮询）以 Name/Time/Size 三列展示：`[Sync] <PVC>` 使用 `sync.writtenBytes`（无快照时回退引用大小）和最近完成时间；快照按新到旧排列，最老快照显示 `referencedBytes` 基线，其余显示 `writtenBytes` 增量；`activeSnapshot` 行标记 `[Active]`；Total 使用后端 ZFS `usedBytes`。时间采用浏览器本地 ISO-8601 数字时区偏移，Next Attempt 使用 `in HH:mm:ss`。ProxyMirror 显示 "Not applicable"；无记录或端点未部署显示 "Usage data unavailable"；`complete: false` 时卡顶轻提示 "Some storage nodes did not respond; data may be partial"。
 - Resource Spec 卡（read-only）：SpecViewer 拉取 `/api/repos/<id>`（无后缀 → YAML），等宽 `<pre>` 只读渲染；Copy 按钮优先 `navigator.clipboard`，不可用时回退临时 textarea + `execCommand('copy')`；复制成功显示 "Copied" 2 秒。
 
 ## 6. hash 路由
