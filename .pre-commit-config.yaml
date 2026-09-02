@@ -19,10 +19,19 @@ repos:
         exclude: ^(ui/node_modules/|charts/falcon/crds/|charts/falcon/templates/)
       - id: check-yaml
         args: [--allow-multiple-documents]
-        # Helm templates are only valid YAML after rendering; their correctness
-        # is enforced by `helm lint` (CI) instead.
+        # Helm templates are only valid YAML after rendering; the rendered
+        # manifest is validated by scripts/validate-chart.py below.
         exclude: ^(ui/node_modules/|charts/falcon/crds/|charts/falcon/templates/)
       - id: check-added-large-files
         args: [--maxkb=1024]
       - id: check-merge-conflict
       - id: mixed-line-ending
+  - repo: local
+    hooks:
+      - id: falcon-chart
+        name: falcon chart render validation
+        files: ^charts/
+        language: python
+        additional_dependencies: [pyyaml]
+        entry: scripts/validate-chart.py
+        pass_filenames: false

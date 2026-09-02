@@ -40,17 +40,20 @@ helm install falcon oci://ghcr.io/zjusct/charts/falcon \
 
 ## 概念
 
-在本项目的文档中，**同步 = 可变，发布 = 不变**。
+本项目的文档会使用下面几个词来描述资源的用途、可变性等性质：
 
-时间戳是同步开始时的 UNIX 时间戳。该时间在控制器创建同步任务时生成，并传播到同步 Job、快照、发布 PVC 等对象的名称中。
+- **同步**：可变
+- **发布**：镜像内容对用户可见，不可变
+
+下表中的时间戳是同步开始时的 UNIX 时间戳。该时间在控制器创建同步任务时生成，并传播到同步 Job、快照、发布 PVC 等对象的名称中。
 
 | 术语 | Kubernetes 对象 | 含义 |
 | --- | --- | --- |
-| 同步 Job | `Job`（`<镜像名>-sync-<时间戳>`） | 运行用户指定的同步镜像，把上游内容写入同步 PVC |
-| 同步 PVC | `PersistentVolumeClaim`（`<镜像名>-sync`） | 一个镜像唯一可写的数据卷，同步 Job 的输出位置，从不对外发布 |
-| 快照 | `VolumeSnapshot`（`<镜像名>-snap-<时间戳>`） | 一次成功同步后对同步 PVC 的定格；时间戳即同步开始时间，与对应的同步 Job、发布 PVC 一致。发布的基本单位 |
+| 同步 PVC | `PersistentVolumeClaim`<br/>`<镜像名>-sync` | 一个镜像唯一可写的数据卷，同步 Job 的输出位置，不用于提供内容 |
+| 同步 Job | `Job`<br/>`<镜像名>-sync-<时间戳>` | 运行指定的同步镜像，把上游内容写入同步 PVC |
+| 快照 | `VolumeSnapshot`<br/>`<镜像名>-snap-<时间戳>` | 一次成功同步后的同步 PVC 的快照 |
 | 活跃快照 | `status.activeSnapshot` | 当前正在对外提供内容的那份快照 |
-| 发布 PVC | `PersistentVolumeClaim`（`<镜像名>-snap-<时间戳>`） | 从某个快照克隆出的只读数据卷，是实例实际挂载的内容 |
+| 发布 PVC | `PersistentVolumeClaim`<br/>`<镜像名>-snap-<时间戳>` | 从某个快照克隆出的只读数据卷 |
 | 活跃发布 PVC | `status.activePVC` | 当前正在对外提供内容的发布 PVC；除它之外的历史发布 PVC 按保留策略随各自快照一起清理 |
 | 服务 | `spec.services` 的一个 key | 对外提供内容的方式，目前支持 http 和 rsync |
 
