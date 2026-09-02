@@ -30,23 +30,14 @@ type LocalizedString map[string]string
 type MirrorInfo struct {
 	Name        LocalizedString `json:"name"`
 	Description LocalizedString `json:"description"`
-	// +kubebuilder:validation:Enum=sync
-	Type     string `json:"type"`
-	Upstream string `json:"upstream"`
+	Upstream    string          `json:"upstream"`
 }
 
-// +kubebuilder:validation:XValidation:rule="has(self.configMap) != has(self.secret)",message="exactly one of configMap or secret must be set"
-// MirrorInputVolume describes a ConfigMap/Secret volume mounted into the sync
-// container. Input volumes are always mounted read-only: the former ReadOnly
-// *bool override was removed (the controller hardcodes volumeMount readOnly).
-type MirrorInputVolume struct {
-	Name      string                        `json:"name"`
-	MountPath string                        `json:"mountPath"`
-	SubPath   string                        `json:"subPath,omitempty"`
-	ConfigMap *corev1.ConfigMapVolumeSource `json:"configMap,omitempty"`
-	Secret    *corev1.SecretVolumeSource    `json:"secret,omitempty"`
-}
-
+// MirrorSyncSpec describes one synchronization run. The Job-level knobs
+// (interval/retry/timeout/limits), the data mount point and the placement are
+// CR fields; everything else about the sync container lives in PodTemplate —
+// the full pod template of the sync Job, symmetric to the publish services'
+// podTemplate.
 type MirrorSyncSpec struct {
 	Interval metav1.Duration `json:"interval"`
 	// RetryInterval is the delay before the next synchronization attempt
@@ -56,23 +47,17 @@ type MirrorSyncSpec struct {
 	// +kubebuilder:default="15m"
 	RetryInterval metav1.Duration `json:"retryInterval"`
 	Timeout       metav1.Duration `json:"timeout"`
-	// +kubebuilder:validation:MinLength=1
-	Image string `json:"image"`
-	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
-	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
-	// +kubebuilder:validation:MinItems=1
-	Command       []string               `json:"command"`
-	Args          []string               `json:"args,omitempty"`
-	Env           []corev1.EnvVar        `json:"env,omitempty"`
-	EnvFrom       []corev1.EnvFromSource `json:"envFrom,omitempty"`
-	Volumes       []MirrorInputVolume    `json:"volumes,omitempty"`
-	DataMountPath string                 `json:"dataMountPath,omitempty"`
-	// NodeName constrains the Job through the kubernetes.io/hostname node selector.
-	// The controller deliberately does not set pod.spec.nodeName because doing so
-	// bypasses the scheduler and breaks WaitForFirstConsumer volume binding.
-	NodeName     string                      `json:"nodeName,omitempty"`
-	NodeSelector map[string]string           `json:"nodeSelector,omitempty"`
-	Resources    corev1.ResourceRequirements `json:"resources,omitempty"`
+	// DataMountPath is where the controller mounts the WRITABLE sync PVC
+	// (volume name `sync-data`, forced) inside the first container. It is the
+	// exact mount point. Everything else the sync process needs to know
+	// (paths, credentials, tuning) goes through the pod template / explicit
+	// env — the controller injects no implicit environment variables.
+	//
+	// There are no placement fields: sync pods reference the sync PVC, so the
+	// scheduler handles locality natively (WaitForFirstConsumer decides the
+	// volume's node on first supply; the bound PV's nodeAffinity pins every
+	// later sync pod) — see spec/k8s.md.
+	DataMountPath string `json:"dataMountPath,omitempty"`
 	// FailureRetryLimit caps the fast retry cadence: while
 	// status.consecutiveFailures is below this limit a failed run is retried
 	// after retryInterval; afterwards the next attempt waits for the regular
@@ -88,6 +73,18 @@ type MirrorSyncSpec struct {
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=0
 	KeepFailedJobs int32 `json:"keepFailedJobs"`
+	// PodTemplate is the FULL pod template of the sync Job (Job
+	// .spec.template): the user declares every container, image, command,
+	// args, env, probe, volume and so on — ConfigMap/Secret inputs included,
+	// as plain volumes/mounts. The controller forces the sync pipeline
+	// identity (the WRITABLE `sync-data` PVC volume mounted at dataMountPath
+	// into the first container, restartPolicy Never, the sync labels, the Job
+	// deadline) and injects defaults only where the template is silent
+	// (restricted-profile security defaults, a /tmp emptyDir, imagePullPolicy
+	// IfNotPresent). No placement is injected: volume locality is the
+	// scheduler's job.
+	// +optional
+	PodTemplate corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
 type MirrorRetentionSpec struct {
@@ -101,13 +98,13 @@ type MirrorStorageSpec struct {
 	// StorageClassName provisions the stable sync PVC. A Retain policy is
 	// appropriate when synchronized data must survive accidental CR deletion.
 	StorageClassName string `json:"storageClassName"`
-	// ServingStorageClassName provisions disposable snapshot-derived publish
-	// PVCs. It must provision from the same storage backend and topology as
-	// StorageClassName (under local-PV semantics: the same node), otherwise
-	// the VolumeSnapshot `dataSource` clone cannot be provisioned. It
-	// normally uses reclaimPolicy: Delete so snapshot pruning reclaims the
+	// PublishStorageClassName provisions disposable snapshot-derived
+	// publish PVCs. It must provision from the same storage backend and
+	// topology as StorageClassName (under local-PV semantics: the same node),
+	// otherwise the VolumeSnapshot `dataSource` clone cannot be provisioned.
+	// It normally uses reclaimPolicy: Delete so snapshot pruning reclaims the
 	// underlying backend volumes. When omitted, StorageClassName is used.
-	ServingStorageClassName string            `json:"servingStorageClassName,omitempty"`
+	PublishStorageClassName string            `json:"publishStorageClassName,omitempty"`
 	Capacity                resource.Quantity `json:"capacity"`
 	// +kubebuilder:default=ReadWriteOnce
 	// +kubebuilder:validation:Enum=ReadWriteOnce;ReadWriteMany;ReadOnlyMany;ReadWriteOncePod
@@ -116,56 +113,93 @@ type MirrorStorageSpec struct {
 	// sync; it must be served by the same storage backend as the
 	// StorageClasses above. Required: atomic publication depends on it.
 	// +kubebuilder:validation:MinLength=1
-	VolumeSnapshotClassName string `json:"volumeSnapshotClassName"`
-	// NodeName constrains all volume consumers through the kubernetes.io/hostname node selector.
-	NodeName     string              `json:"nodeName,omitempty"`
-	NodeSelector map[string]string   `json:"nodeSelector,omitempty"`
-	Retention    MirrorRetentionSpec `json:"retention,omitempty"`
+	VolumeSnapshotClassName string              `json:"volumeSnapshotClassName"`
+	Retention               MirrorRetentionSpec `json:"retention,omitempty"`
 }
 
-// MirrorServingService describes one publish service of a Mirror: a
-// Deployment serving the read-only snapshot clone plus a Service in front of
-// it. The service name is the protocol identifier and drives the generated
-// children: every entry gets Deployment/Service `<mirror>-publish-<name>`, but
-// only the "http" entry additionally gets the publish HTTPRoute.
-type MirrorServingService struct {
-	// Name is the protocol identifier of this service. Only "http" services
-	// are routed through the Gateway API; "rsync" and "git" services are
-	// exposed through their Service only (no route, no TCPRoute).
-	// +kubebuilder:validation:Enum=http;rsync;git
-	// MaxLength is no semantic bound (the enum fixes the allowed values); it
-	// keeps the string comparisons of the uniqueness CEL rule cheap enough
-	// for the API server's CRD schema cost budget.
-	// +kubebuilder:validation:MaxLength=63
-	Name string `json:"name"`
-	// +kubebuilder:validation:MinLength=1
-	Image string `json:"image"`
-	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
-	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
+// MirrorServiceSpec is one publish service of a Mirror, addressed by a fixed
+// key under spec.services ("http" or "rsync"). There is no third "git" key on
+// purpose: git publishing is HTTP serving (a fastcgi-style container behind
+// the web server), so it is expressed through the "http" key. Each enabled
+// service gets a Deployment and a Service named `<mirror>-publish-<key>`; only
+// an enabled "http" service additionally gets the publish HTTPRoute (rsync is
+// Service-only; a future RsyncRoute is out of scope).
+// +kubebuilder:validation:XValidation:rule="!self.enable || (has(self.mirrorMountPath) && self.mirrorMountPath.length() > 0)",message="mirrorMountPath is required when enable is true"
+// +kubebuilder:validation:XValidation:rule="!self.enable || has(self.podTemplate.spec)",message="podTemplate.spec is required when enable is true"
+type MirrorServiceSpec struct {
+	// Enable turns the service on. A key that does not appear in
+	// spec.services is disabled, and so is a key declared with
+	// enable: false — Enable is the single source of truth.
+	Enable bool `json:"enable,omitempty"`
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=3
 	Replicas *int32 `json:"replicas,omitempty"`
-	// Ports are the container ports declared on the publish container. At
-	// least one port is required; the first port is the Service target and is
-	// (re)named after the service ("http", "rsync" or "git") so the Service
-	// can reference it as a named port.
-	// +kubebuilder:validation:MinItems=1
-	Ports []corev1.ContainerPort `json:"ports"`
-	// Command runs the container; omitted, the image entrypoint is used.
-	Command []string `json:"command,omitempty"`
-	// Args are appended to the command (or image entrypoint).
-	Args []string `json:"args,omitempty"`
-	// MountPath is where the data PVC is mounted: the controller mounts it
-	// read-only at <MountPath>/<mirror name> (no trailing slash). For
-	// "http" services this yields web-root semantics — PVC-root content is
-	// served under the /<mirror name> route prefix. rsyncd module paths and
-	// git http-backend roots must point at the same directory.
-	// +kubebuilder:default=/srv/mirror
-	MountPath string `json:"mountPath,omitempty"`
-	// +kubebuilder:default=/
-	ReadinessPath string                      `json:"readinessPath,omitempty"`
-	Resources     corev1.ResourceRequirements `json:"resources,omitempty"`
+	// MirrorMountPath is where the controller mounts the publish PVC
+	// (read-only) inside the first container when the service is enabled. It
+	// is the exact mount point: the controller does not append the mirror
+	// name (the publish HTTPRoute prefix remains /<mirror name>; point the
+	// web root, rsyncd module path or git http-backend root at this
+	// directory as the image requires).
+	MirrorMountPath string `json:"mirrorMountPath,omitempty"`
+	// PodTemplate is the FULL pod template of the publish Deployment
+	// (Deployment .spec.template): the user declares every container, port,
+	// probe, volume, affinity and so on. The controller forces the
+	// data-integrity constraints (the read-only `mirror-data` publish PVC
+	// volume mounted at mirrorMountPath, pod labels/annotations, placement,
+	// naming/selector identity) and injects defaults only where the template
+	// is silent (TCP readiness probe on the first container port, a /tmp
+	// emptyDir, readOnlyRootFilesystem and the restricted-profile security
+	// defaults).
+	// +optional
+	PodTemplate corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+}
+
+// MirrorHTTPAlias is one additional public path prefix of an http service.
+// Paths are case-sensitive and uppercase is allowed ON PURPOSE: the CR name is
+// bound by DNS rules while alias paths are not.
+// +kubebuilder:validation:MaxLength=200
+type MirrorHTTPAlias string
+
+// MirrorHTTPServiceSpec is the http publish service of a Mirror: the base
+// MirrorServiceSpec plus additional public path prefixes (Aliases).
+// +kubebuilder:validation:XValidation:rule="!has(self.aliases) || self.aliases.all(a, a.matches('^/([^/\\s]+/)*[^/\\s]+$'))",message="each alias must start with '/', must not end with '/', and must not contain '//' or whitespace"
+type MirrorHTTPServiceSpec struct {
+	MirrorServiceSpec `json:",inline"`
+	// Aliases are ADDITIONAL public path prefixes served by the http service
+	// next to the canonical /<mirror name> (e.g. /linux.git and /git/linux.git
+	// for the same content — Git smart HTTP is prefix-opaque, so every path
+	// serves identical content and negotiation). Aliases are routing-only:
+	// the canonical path stays the one true public path (mirrorz output,
+	// portal links, documentation). Each alias gets a PathPrefix match on the
+	// publish HTTPRoute, appended after the canonical path in declaration
+	// order (matches within a rule are OR). Case-sensitive, uppercase
+	// allowed; an alias equal to the canonical path is rejected by the
+	// controller. Conflicts with other Mirrors' paths are detected at route
+	// generation time (RouteConflict condition).
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	Aliases []MirrorHTTPAlias `json:"aliases,omitempty"`
+}
+
+// MirrorServicesSpec holds the fixed publish service keys of a Mirror. An
+// absent key is disabled; a key declared with enable: false is disabled as
+// well.
+type MirrorServicesSpec struct {
+	// HTTP is the HTTP publish service (web server, git http-backend via
+	// fastcgi, ...). It owns the publish HTTPRoute when enabled, serving the
+	// canonical /<mirror name> path plus any declared aliases.
+	HTTP MirrorHTTPServiceSpec `json:"http,omitempty"`
+	// Rsync is the rsync publish service. It only gets a Deployment and a
+	// ClusterIP Service — no Gateway API route (a future RsyncRoute is out
+	// of scope), and no path concept, hence no aliases.
+	Rsync MirrorServiceSpec `json:"rsync,omitempty"`
+}
+
+// AnyEnabled reports whether at least one publish service key is enabled (a
+// mirror with everything disabled syncs but publishes nothing).
+func (s MirrorServicesSpec) AnyEnabled() bool {
+	return s.HTTP.Enable || s.Rsync.Enable
 }
 
 type MirrorSpec struct {
@@ -173,21 +207,14 @@ type MirrorSpec struct {
 	Info    MirrorInfo        `json:"info"`
 	Sync    MirrorSyncSpec    `json:"sync"`
 	Storage MirrorStorageSpec `json:"storage"`
-	// Services declares how the active snapshot clone is published. Absent
-	// or empty = sync-only mirror: the sync/snapshot pipeline still runs and
-	// the publish PVC is still produced, but no publish
-	// Deployment/Service/HTTPRoute is created. Service names must be unique
-	// (so there can be at most one "http" entry, which owns the publish
-	// HTTPRoute).
+	// Services declares how the active snapshot clone is published, through
+	// the fixed keys "http" and "rsync" (see MirrorServicesSpec). With every
+	// key disabled (including an entirely absent services object) the mirror
+	// is sync-only: the sync/snapshot pipeline still runs and the publish PVC
+	// is still produced, but no publish Deployment/Service/HTTPRoute is
+	// created.
 	// +optional
-	// MaxItems is not just hygiene: the uniqueness CEL rule below iterates the
-	// array with nested exists_one, and an unbounded array makes its estimated
-	// cost exceed the API server's CRD schema budget, so the CRD is rejected
-	// outright on newer K8s (observed on 1.36). The bound is exact: with the
-	// enum-restricted Name and unique names, >3 entries can never validate.
-	// +kubebuilder:validation:MaxItems=3
-	// +kubebuilder:validation:XValidation:rule="self.all(s, self.exists_one(e, e.name == s.name))",message="service names must be unique"
-	Services []MirrorServingService `json:"services,omitempty"`
+	Services MirrorServicesSpec `json:"services,omitempty"`
 }
 
 type MirrorSyncStatus struct {

@@ -22,9 +22,10 @@ import (
 
 // ProxyMirrorReconciler drives publish-only proxy mirrors. Unlike Mirror it
 // has no sync Job, no sync PVC and no snapshot lifecycle: it ensures a cache
-// PVC (optional), a Service and a Deployment, the publish HTTPRoute once the
-// proxy is Ready, and reports readiness through conditions. Cleanup of
-// children relies purely on owner-reference GC, so no finalizer is needed.
+// PVC (optional), the http publish Service and Deployment, the publish
+// HTTPRoute once the proxy is Ready, and reports readiness through conditions.
+// Cleanup of children relies purely on owner-reference GC, so no finalizer is
+// needed.
 type ProxyMirrorReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
@@ -83,8 +84,8 @@ func (r *ProxyMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 	// A Ready proxy is published: ensure its publish HTTPRoute, but only when
-	// an "http" service is declared (rsync/git services are Service-only) and
-	// the config enables route generation — see ServingEnabled.
+	// the http service is enabled and the config enables route generation —
+	// see ServingEnabled.
 	if ready && serviceName != "" {
 		if err := ensureReadyProxyRoute(ctx, r, proxy); err != nil {
 			return ctrl.Result{}, err
@@ -141,13 +142,16 @@ func setProxyCondition(proxy *mirrorv1alpha1.ProxyMirror, conditionType string, 
 func validateProxyMirror(proxy *mirrorv1alpha1.ProxyMirror) field.ErrorList {
 	path := field.NewPath("spec")
 	var errs field.ErrorList
-	// publish-rsync is the longest suffix of any ProxyMirror child name
-	// (<base>-publish-<http|rsync|git>).
-	if err := validateDerivedName(proxy.Name, "publish-rsync"); err != nil {
+	// publish-http is the longest suffix of any ProxyMirror child name
+	// (<base>-publish-http; the proxy has no rsync key).
+	if err := validateDerivedName(proxy.Name, "publish-http"); err != nil {
 		errs = append(errs, err)
 	}
-	if len(proxy.Spec.Services) > 0 {
-		errs = append(errs, validateServices(proxy.Spec.Services, path.Child("services"))...)
+	// Only an ENABLED http service is validated (a disabled key may park
+	// anything).
+	if http := proxy.Spec.Services.HTTP; http.Enable {
+		errs = append(errs, validatePublishPodTemplate(&http.PodTemplate,
+			path.Child("services", "http", "podTemplate"), ProxyCacheVolumeName)...)
 	}
 	if proxyCacheEnabled(proxy) {
 		if proxy.Spec.Proxy.Cache.StorageClassName == "" {

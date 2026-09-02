@@ -175,8 +175,6 @@ Mirrors internal/config Config.Validate():
 {{- end -}}
 log:
   level: {{ $logLevel | quote }}
-leaderElection:
-  enabled: {{ $cfg.leaderElection.enabled }}
 api:
   metricsBindAddress: {{ $cfg.api.metricsBindAddress | default ":8080" | quote }}
   healthProbeBindAddress: {{ $cfg.api.healthProbeBindAddress | default ":8081" | quote }}

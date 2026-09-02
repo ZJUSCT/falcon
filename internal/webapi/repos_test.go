@@ -34,7 +34,6 @@ func TestHandleRepoSpecOnlyYAML(t *testing.T) {
 			Paused: false,
 			Info: mirrorv1alpha1.MirrorInfo{
 				Description: localized("Debian 镜像", "Debian mirror"),
-				Type:        "sync",
 				Upstream:    "rsync://ftp.debian.org/debian/",
 			},
 		},

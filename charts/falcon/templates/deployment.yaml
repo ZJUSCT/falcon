@@ -34,7 +34,8 @@ spec:
   revisionHistoryLimit: {{ . }}
   {{- end }}
   replicas: {{ .Values.controller.replicaCount }}
-  # Leader-elected single-active manager: replicas > 1 only smooths rollouts.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "falcon.selectorLabels" . | nindent 6 }}

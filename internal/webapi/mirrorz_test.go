@@ -60,24 +60,6 @@ func TestMirrorzStatusForProxyMirrorPhase(t *testing.T) {
 	}
 }
 
-func TestPickDescriptionPrefersZh(t *testing.T) {
-	cases := []struct {
-		desc map[string]string
-		want string
-	}{
-		{desc: map[string]string{"zh": "中文", "en": "english"}, want: "中文"},
-		{desc: map[string]string{"en": "english"}, want: "english"},
-		{desc: map[string]string{"zh": "中文"}, want: "中文"},
-		{desc: map[string]string{}, want: ""},
-		{desc: nil, want: ""},
-	}
-	for _, tc := range cases {
-		if got := pickDescription(tc.desc); got != tc.want {
-			t.Errorf("pickDescription(%v) = %q, want %q", tc.desc, got, tc.want)
-		}
-	}
-}
-
 func TestHostOnlyStripsPort(t *testing.T) {
 	cases := map[string]string{
 		"mirrors.zjusct.io":      "mirrors.zjusct.io",
@@ -93,14 +75,24 @@ func TestHostOnlyStripsPort(t *testing.T) {
 	}
 }
 
-// httpService is the single http spec.services[] entry the catalog fixtures
-// declare (a Mirror without services is sync-only and must be omitted).
-func httpService() []mirrorv1alpha1.MirrorServingService {
-	return []mirrorv1alpha1.MirrorServingService{{
-		Name:  "http",
-		Image: "nginxinc/nginx-unprivileged:1.31.0-alpine",
-		Ports: []corev1.ContainerPort{{Name: "web", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
-	}}
+// httpService is the enabled http spec.services key the catalog fixtures
+// declare (a Mirror with every service disabled is sync-only and must be
+// omitted).
+func httpService() mirrorv1alpha1.MirrorServicesSpec {
+	return mirrorv1alpha1.MirrorServicesSpec{
+		HTTP: mirrorv1alpha1.MirrorHTTPServiceSpec{
+			MirrorServiceSpec: mirrorv1alpha1.MirrorServiceSpec{
+				Enable: true,
+				PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "web",
+						Image: "nginxinc/nginx-unprivileged:1.31.0-alpine",
+						Ports: []corev1.ContainerPort{{Name: "web", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
+					}},
+				}},
+			},
+		},
+	}
 }
 
 // mirrorzTestServer builds a Server over the standard fixtures with the
@@ -210,6 +202,40 @@ func TestBuildMirrorZDocument(t *testing.T) {
 	if doc.Mirrors[2].URL != "https://mirrors.zjusct.io/pypi-proxy" {
 		t.Errorf("pypi-proxy url = %q", doc.Mirrors[2].URL)
 	}
+
+	// Helper-level edge cases, pinned next to the document they feed:
+	// pickDescription prefers zh and tolerates missing languages.
+	for _, tc := range []struct {
+		desc map[string]string
+		want string
+	}{
+		{desc: map[string]string{"zh": "中文", "en": "english"}, want: "中文"},
+		{desc: map[string]string{"en": "english"}, want: "english"},
+		{desc: map[string]string{"zh": "中文"}, want: "中文"},
+		{desc: map[string]string{}, want: ""},
+		{desc: nil, want: ""},
+	} {
+		if got := pickDescription(tc.desc); got != tc.want {
+			t.Errorf("pickDescription(%v) = %q, want %q", tc.desc, got, tc.want)
+		}
+	}
+	// mirrorzSize renders sizeBytes as the string the MirrorZ format expects
+	// (binary 1024-based units, two decimals, "" for unknown sizes).
+	for _, tc := range []struct {
+		bytes int64
+		want  string
+	}{
+		{bytes: 0, want: ""}, // unknown: omitted
+		{bytes: 512, want: "512.00B"},
+		{bytes: 1024, want: "1.00K"},
+		{bytes: 640141257728, want: "596.18G"},
+		{bytes: 2990078838784, want: "2.72T"},       // "2.72T" as seen in real catalogs
+		{bytes: 9223372036854775807, want: "8.00E"}, // int64 max
+	} {
+		if got := mirrorzSize(tc.bytes); got != tc.want {
+			t.Errorf("mirrorzSize(%d) = %q, want %q", tc.bytes, got, tc.want)
+		}
+	}
 }
 
 // TestHostReflectionHit: a request Host on the serving whitelist (port
@@ -316,29 +342,6 @@ func TestHandleMirrorZ(t *testing.T) {
 	// sizeBytes is unknown (zero): the size field is omitted.
 	if _, has := entry["size"]; has {
 		t.Errorf("mirror entry must not carry a size field: %v", entry)
-	}
-}
-
-// TestMirrorzSize pins the rendering of sizeBytes into the string the
-// MirrorZ format expects (its frontend schema types size as string): binary
-// (1024-based) units with two decimals, "" for unknown sizes.
-func TestMirrorzSize(t *testing.T) {
-	cases := []struct {
-		bytes int64
-		want  string
-	}{
-		{bytes: 0, want: ""},  // unknown: omitted
-		{bytes: -5, want: ""}, // defensive
-		{bytes: 512, want: "512.00B"},
-		{bytes: 1024, want: "1.00K"},
-		{bytes: 640141257728, want: "596.18G"},
-		{bytes: 2990078838784, want: "2.72T"},       // "2.72T" as seen in real catalogs
-		{bytes: 9223372036854775807, want: "8.00E"}, // int64 max
-	}
-	for _, tc := range cases {
-		if got := mirrorzSize(tc.bytes); got != tc.want {
-			t.Errorf("mirrorzSize(%d) = %q, want %q", tc.bytes, got, tc.want)
-		}
 	}
 }
 

@@ -40,7 +40,7 @@ controller:
     tag: ""            # 空 = Chart.AppVersion
     digest: ""         # 可选，优先于 tag
     pullPolicy: IfNotPresent
-  replicaCount: 1      # leader election 开启时 >1 仅为平滑滚动（单活不变）
+  replicaCount: 1
   revisionHistoryLimit: 10
 
   # 字段名与 internal/config 的 Go 结构体一一对应；控制器启动时强校验
@@ -49,8 +49,6 @@ controller:
   config:
     log:
       level: info                      # debug | info | warn | error
-    leaderElection:
-      enabled: true                    # Lease 落在本 ns（跟随 Release ns）
     api:                               # 监听地址（探针/Service 端口依赖默认值，见 deployment 注释）
       metricsBindAddress: ":8080"
       healthProbeBindAddress: ":8081"
@@ -192,4 +190,3 @@ catalog:
 #    目录安装。helm 只在 install 时套用 crds/、upgrade 时不更新——CRD 变更需
 #    手动 kubectl apply（见 chart README）。
 # 2. Mirror 的发布路径前缀 = /<Mirror 名>，不可配置（spec.info.url 已从 CRD 移除）。
-# 3. 不提供 HPA：控制器 leader-elected 单活。

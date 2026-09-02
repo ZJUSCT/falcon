@@ -2,12 +2,14 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
@@ -64,8 +66,8 @@ func assertPublishRouteShape(t *testing.T, route *gatewayv1.HTTPRoute, owner cli
 	if len(route.Spec.Hostnames) != 2 || route.Spec.Hostnames[0] != "mirrors.zjusct.io" || route.Spec.Hostnames[1] != "mirror.zju.edu.cn" {
 		t.Errorf("hostnames wrong: %v", route.Spec.Hostnames)
 	}
-	if len(route.Spec.Rules) != 1 || len(route.Spec.Rules[0].Matches) != 1 {
-		t.Fatalf("want one rule with one match, got %#v", route.Spec.Rules)
+	if len(route.Spec.Rules) != 1 || len(route.Spec.Rules[0].Matches) < 1 {
+		t.Fatalf("want one rule with at least the canonical match, got %#v", route.Spec.Rules)
 	}
 	match := route.Spec.Rules[0].Matches[0]
 	if ptr.Deref(match.Path.Type, "") != gatewayv1.PathMatchPathPrefix || ptr.Deref(match.Path.Value, "") != wantPath {
@@ -79,28 +81,6 @@ func assertPublishRouteShape(t *testing.T, route *gatewayv1.HTTPRoute, owner cli
 	if string(backend.Name) != wantService || ptr.Deref(backend.Kind, "") != "Service" || ptr.Deref(backend.Port, 0) != 80 {
 		t.Errorf("backendRef wrong: %#v", backend)
 	}
-}
-
-// TestMirrorUnsyncedHasNoPublishRoute: a Mirror that never published anything
-// gets no HTTPRoute.
-func TestMirrorUnsyncedHasNoPublishRoute(t *testing.T) {
-	ctx := context.Background()
-	mirror := testMirror()
-	scheme := testScheme(t)
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&mirrorv1alpha1.Mirror{}).
-		WithObjects(mirror).
-		Build()
-	reconciler := &MirrorReconciler{
-		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
-		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
-	}
-	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
-	reconcile(t, ctx, reconciler, request) // finalizer
-	reconcile(t, ctx, reconciler, request) // start first sync (initializing)
-
-	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, &gatewayv1.HTTPRoute{})
 }
 
 // TestMirrorPausedKeepsPublishRoute: a paused Mirror with a published
@@ -123,6 +103,7 @@ func TestMirrorPausedKeepsPublishRoute(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(mirror).
 		Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
 	reconciler := &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
 		Now:    func() time.Time { return time.Now().UTC() },
@@ -166,6 +147,7 @@ func TestServingDisabledSkipsRouteGeneration(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(mirror).
 		Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
 	reconciler := &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
 		Now:    func() time.Time { return time.Now().UTC() },
@@ -233,6 +215,7 @@ func TestMaxConcurrentQueuesSyncJob(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &batchv1.Job{}).
 		WithObjects(mirror).
 		Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
 	limiter := NewSyncLimiter(1)
 	limiter.Acquire("other-mirror-sync-job", false) // the whole budget is busy
 	reconciler := &MirrorReconciler{
@@ -284,81 +267,87 @@ func TestMaxConcurrentQueuesSyncJob(t *testing.T) {
 	}
 }
 
-// TestPublishDataMountPathAppendsMirrorName: the data PVC is mounted one
-// level below the configured web root (<mountPath>/<name>) so PVC-root
-// content is served under the /<name> publish route prefix.
-func TestPublishDataMountPathAppendsMirrorName(t *testing.T) {
-	cases := []struct {
-		name      string
-		mountPath string
-		want      string
-	}{
-		{name: "custom-webroot", mountPath: "/usr/share/nginx/html", want: "/usr/share/nginx/html/smoke"},
-		{name: "default-webroot", mountPath: "", want: "/srv/mirror/smoke"},
+// TestMirrorMountPathUsedVerbatim: the data PVC is mounted read-only at
+// exactly spec.services.http.mirrorMountPath — the controller no longer
+// appends the mirror name (the user template owns the full path layout).
+func TestMirrorMountPathUsedVerbatim(t *testing.T) {
+	ctx := context.Background()
+	mirror := testMirror()
+	mirror.Spec.Services.HTTP.MirrorMountPath = "/srv/www/debian"
+	mirror.Finalizers = []string{MirrorFinalizer}
+	mirror.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: mirror.Generation,
+		Phase:              mirrorv1alpha1.PhaseReady,
+		WorkPVC:            "smoke-sync",
+		ActivePVC:          "smoke-sync-1756147200",
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			mirror := testMirror()
-			mirror.Spec.Services[0].MountPath = tc.mountPath
-			mirror.Finalizers = []string{MirrorFinalizer}
-			mirror.Status = mirrorv1alpha1.MirrorStatus{
-				ObservedGeneration: mirror.Generation,
-				Phase:              mirrorv1alpha1.PhaseReady,
-				WorkPVC:            "smoke-sync",
-				ActivePVC:          "smoke-sync-1756147200",
-			}
-			scheme := testScheme(t)
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
-				WithObjects(mirror).
-				Build()
-			reconciler := &MirrorReconciler{
-				Client: fakeClient, Scheme: scheme,
-				Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
-			}
-			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
-			reconcile(t, ctx, reconciler, request) // creates Service + publish Deployment
+	scheme := testScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
+		WithObjects(mirror).
+		Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	reconciler := &MirrorReconciler{
+		Client: fakeClient, Scheme: scheme,
+		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
+	reconcile(t, ctx, reconciler, request) // creates Service + publish Deployment
 
-			deployment := &appsv1.Deployment{}
-			get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
-			mounts := deployment.Spec.Template.Spec.Containers[0].VolumeMounts
-			if len(mounts) != 2 {
-				t.Fatalf("want data + tmp mounts, got %#v", mounts)
-			}
-			if mounts[0].Name != "mirror-data" || mounts[0].MountPath != tc.want {
-				t.Fatalf("data PVC mountPath = %q, want %q (web root + route prefix /smoke)", mounts[0].MountPath, tc.want)
-			}
-			if !mounts[0].ReadOnly {
-				t.Fatal("data PVC must stay mounted read-only")
-			}
-			if mounts[1].Name != "tmp" || mounts[1].MountPath != "/tmp" {
-				t.Fatalf("tmp mount wrong: %#v", mounts[1])
-			}
-		})
+	deployment := &appsv1.Deployment{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
+	mount := findMount(deployment.Spec.Template.Spec.Containers[0], "mirror-data")
+	if mount == nil || mount.MountPath != "/srv/www/debian" {
+		t.Fatalf("mirror-data mount = %#v, want read-only /srv/www/debian (verbatim mirrorMountPath)", mount)
+	}
+	if !mount.ReadOnly {
+		t.Fatal("mirror-data mount must stay read-only")
+	}
+	volume := findVolume(deployment.Spec.Template.Spec.Volumes, "mirror-data")
+	if volume == nil || volume.PersistentVolumeClaim == nil || !volume.PersistentVolumeClaim.ReadOnly {
+		t.Fatalf("mirror-data volume source must be a read-only PVC reference, got %#v", volume)
+	}
+
+	// An enabled http service without mirrorMountPath is invalid: the mount
+	// point is the one thing the user must declare (no default exists any
+	// more).
+	broken := mirror.DeepCopy()
+	broken.Spec.Services.HTTP.MirrorMountPath = ""
+	if errs := validateMirror(broken); len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "mirrorMountPath") {
+		t.Fatalf("enabled service without mirrorMountPath must be InvalidSpec, got %v", errs)
+	}
+	// ... and a relative path is rejected as well.
+	broken = mirror.DeepCopy()
+	broken.Spec.Services.HTTP.MirrorMountPath = "srv/relative"
+	if errs := validateMirror(broken); len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "absolute path") {
+		t.Fatalf("relative mirrorMountPath must be InvalidSpec, got %v", errs)
 	}
 }
 
-// TestServicesRenderPerEntry: every services[] entry gets its own
-// Deployment and Service named <base>-publish-<protocol> with per-service pod
-// labels, but only the "http" entry gets the publish HTTPRoute. The first
-// container port is (re)named after the protocol and targeted by the Service;
-// non-http Service ports carry no appProtocol.
-func TestServicesRenderPerEntry(t *testing.T) {
+// TestServicesRenderPerKey: every ENABLED fixed key gets its own Deployment
+// and Service named <base>-publish-<key> with per-service pod labels, but only
+// the "http" key gets the publish HTTPRoute. The first container port is
+// renamed to the key and targeted by the Service; the rsync Service carries no
+// appProtocol.
+func TestServicesRenderPerKey(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	two := int32(2)
-	mirror.Spec.Services = append(mirror.Spec.Services, mirrorv1alpha1.MirrorServingService{
-		Name:     "rsync",
-		Image:    "docker.io/library/busybox:1.37.0",
-		Replicas: &two,
-		Ports: []corev1.ContainerPort{
-			{Name: "ignored", ContainerPort: 8730, Protocol: corev1.ProtocolTCP},
-			{Name: "metrics", ContainerPort: 9100, Protocol: corev1.ProtocolTCP},
-		},
-		MountPath: "/export/mirror",
-	})
+	mirror.Spec.Services.Rsync = mirrorv1alpha1.MirrorServiceSpec{
+		Enable:          true,
+		Replicas:        ptr.To(int32(2)),
+		MirrorMountPath: "/export/mirror/smoke",
+		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "rsyncd",
+				Image: "docker.io/library/busybox:1.37.0",
+				Ports: []corev1.ContainerPort{
+					{Name: "ignored", ContainerPort: 8730, Protocol: corev1.ProtocolTCP},
+					{Name: "metrics", ContainerPort: 9100, Protocol: corev1.ProtocolTCP},
+				},
+			}},
+		}},
+	}
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
@@ -372,6 +361,7 @@ func TestServicesRenderPerEntry(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(mirror).
 		Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
 	reconciler := &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
 		Now:    func() time.Time { return time.Now().UTC() },
@@ -392,13 +382,14 @@ func TestServicesRenderPerEntry(t *testing.T) {
 	if got := rsyncDeployment.Spec.Selector.MatchLabels[RoleLabel]; got != "publish-rsync" {
 		t.Fatalf("rsync selector role = %q, want publish-rsync (per-service pods)", got)
 	}
-	rsyncPorts := rsyncDeployment.Spec.Template.Spec.Containers[0].Ports
+	rsyncContainer := rsyncDeployment.Spec.Template.Spec.Containers[0]
+	rsyncPorts := rsyncContainer.Ports
 	if len(rsyncPorts) != 2 || rsyncPorts[0].Name != "rsync" || rsyncPorts[0].ContainerPort != 8730 || rsyncPorts[1].Name != "metrics" {
 		t.Fatalf("rsync container ports = %#v; want the first port renamed to rsync and the second kept", rsyncPorts)
 	}
-	rsyncMounts := rsyncDeployment.Spec.Template.Spec.Containers[0].VolumeMounts
-	if rsyncMounts[0].MountPath != "/export/mirror/smoke" || !rsyncMounts[0].ReadOnly {
-		t.Fatalf("rsync data mount = %#v; want read-only /export/mirror/smoke (same data PVC for every service type)", rsyncMounts[0])
+	rsyncMount := findMount(rsyncContainer, "mirror-data")
+	if rsyncMount == nil || rsyncMount.MountPath != "/export/mirror/smoke" || !rsyncMount.ReadOnly {
+		t.Fatalf("rsync data mount = %#v; want read-only /export/mirror/smoke (same data PVC for every service key)", rsyncMount)
 	}
 
 	// Both services exist; only the http one is routed and carries appProtocol.
@@ -421,22 +412,34 @@ func TestServicesRenderPerEntry(t *testing.T) {
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
 	assertPublishRouteShape(t, route, mirror, "/smoke", "smoke-publish-http")
 
-	// Readiness requires every entry: flip both, the Mirror settles Ready.
+	// Readiness requires every enabled key: flip both, the Mirror settles Ready.
 	markDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace, "smoke-publish-http")
 	markDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace, "smoke-publish-rsync")
 	reconcile(t, ctx, reconciler, request)
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
 	if current.Status.Phase != mirrorv1alpha1.PhaseReady {
-		t.Fatalf("expected Ready once every service entry rolled out, got %s (%#v)", current.Status.Phase, current.Status.Conditions)
+		t.Fatalf("expected Ready once every service rolled out, got %s (%#v)", current.Status.Phase, current.Status.Conditions)
 	}
 }
 
-// TestRsyncOnlyMirrorGetsNoRoute: a mirror publishing only rsync/git gets
-// Deployments and Services but no HTTPRoute at all (no TCPRoute either).
+// TestRsyncOnlyMirrorGetsNoRoute: a mirror publishing only rsync gets a
+// Deployment and a ClusterIP Service but no HTTPRoute at all (no TCPRoute
+// either).
 func TestRsyncOnlyMirrorGetsNoRoute(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Services[0].Name = "rsync"
+	mirror.Spec.Services.HTTP = mirrorv1alpha1.MirrorHTTPServiceSpec{}
+	mirror.Spec.Services.Rsync = mirrorv1alpha1.MirrorServiceSpec{
+		Enable:          true,
+		MirrorMountPath: "/export/mirror/smoke",
+		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "rsyncd",
+				Image: "docker.io/library/busybox:1.37.0",
+				Ports: []corev1.ContainerPort{{Name: "rsync", ContainerPort: 8730, Protocol: corev1.ProtocolTCP}},
+			}},
+		}},
+	}
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
@@ -450,6 +453,7 @@ func TestRsyncOnlyMirrorGetsNoRoute(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(mirror).
 		Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
 	reconciler := &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
 		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
@@ -462,12 +466,19 @@ func TestRsyncOnlyMirrorGetsNoRoute(t *testing.T) {
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, &gatewayv1.HTTPRoute{})
 }
 
-// TestServicesOmittedDisablePublishing: without spec.services the sync/
-// snapshot pipeline still runs, but no publish workload or route is created.
-func TestServicesOmittedDisablePublishing(t *testing.T) {
+// TestAbsentOrDisabledServicesCreateNoWorkload: anything that is not an
+// enabled service — an entirely absent services object, a key declared with
+// enable: false, or a Mirror that has never published a snapshot — creates no
+// publish children. All three shapes flow through the same enabled-keys
+// filter, so they are pinned in one place.
+func TestAbsentOrDisabledServicesCreateNoWorkload(t *testing.T) {
 	ctx := context.Background()
+
+	// An entirely absent services object: the sync/snapshot pipeline still
+	// runs (the Mirror settles Ready), but no publish workload or route is
+	// created.
 	mirror := testMirror()
-	mirror.Spec.Services = nil
+	mirror.Spec.Services = mirrorv1alpha1.MirrorServicesSpec{}
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
@@ -481,6 +492,7 @@ func TestServicesOmittedDisablePublishing(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}).
 		WithObjects(mirror).
 		Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
 	reconciler := &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
 		Now:    func() time.Time { return time.Now().UTC() },
@@ -496,4 +508,465 @@ func TestServicesOmittedDisablePublishing(t *testing.T) {
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &corev1.Service{})
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, &gatewayv1.HTTPRoute{})
+
+	// A key declared with enable: false is as good as absent — no workload
+	// for it, while the other enabled key still publishes.
+	mirror = testMirror()
+	mirror.Spec.Services.Rsync = mirrorv1alpha1.MirrorServiceSpec{
+		Enable:          false,
+		MirrorMountPath: "/export/mirror/smoke",
+		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "rsyncd",
+				Image: "docker.io/library/busybox:1.37.0",
+				Ports: []corev1.ContainerPort{{Name: "rsync", ContainerPort: 8730, Protocol: corev1.ProtocolTCP}},
+			}},
+		}},
+	}
+	mirror.Finalizers = []string{MirrorFinalizer}
+	mirror.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: mirror.Generation,
+		Phase:              mirrorv1alpha1.PhaseReady,
+		WorkPVC:            "smoke-sync",
+		ActivePVC:          "smoke-snap-1756147200",
+	}
+	scheme = testScheme(t)
+	fakeClient = fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
+		WithObjects(mirror).
+		Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	reconciler = &MirrorReconciler{
+		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
+		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
+	}
+	reconcile(t, ctx, reconciler, request)
+
+	// The enabled http key publishes; the disabled rsync key does not.
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-rsync"}, &appsv1.Deployment{})
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-rsync"}, &corev1.Service{})
+
+	// A Mirror that never published anything gets no HTTPRoute either.
+	mirror = testMirror()
+	scheme = testScheme(t)
+	fakeClient = fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}).
+		WithObjects(mirror).
+		Build()
+	reconciler = &MirrorReconciler{
+		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
+		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
+	}
+	reconcile(t, ctx, reconciler, request) // finalizer
+	reconcile(t, ctx, reconciler, request) // start first sync (initializing)
+
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, &gatewayv1.HTTPRoute{})
+}
+
+// TestPublishDefaultsInjectedWhereSilent pins the default injections into a
+// bare user pod template: TCP readiness probe on the renamed first port, /tmp
+// emptyDir, readOnlyRootFilesystem, allowPrivilegeEscalation false, drop ALL,
+// runAsNonRoot, seccomp RuntimeDefault, automountServiceAccountToken false.
+func TestPublishDefaultsInjectedWhereSilent(t *testing.T) {
+	ctx := context.Background()
+	mirror := testMirror()
+	mirror.Finalizers = []string{MirrorFinalizer}
+	mirror.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: mirror.Generation,
+		Phase:              mirrorv1alpha1.PhaseReady,
+		WorkPVC:            "smoke-sync",
+		ActivePVC:          "smoke-snap-1756147200",
+	}
+	scheme := testScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
+		WithObjects(mirror).
+		Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	reconciler := &MirrorReconciler{
+		Client: fakeClient, Scheme: scheme,
+		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
+	reconcile(t, ctx, reconciler, request)
+
+	deployment := &appsv1.Deployment{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
+	podSpec := deployment.Spec.Template.Spec
+	if ptr.Deref(podSpec.AutomountServiceAccountToken, true) {
+		t.Fatal("automountServiceAccountToken must default to false")
+	}
+	if !ptr.Deref(podSpec.SecurityContext.RunAsNonRoot, false) {
+		t.Fatal("runAsNonRoot must default to true")
+	}
+	if podSpec.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Fatalf("seccomp must default to RuntimeDefault, got %v", podSpec.SecurityContext.SeccompProfile.Type)
+	}
+	first := podSpec.Containers[0]
+	if !ptr.Deref(first.SecurityContext.ReadOnlyRootFilesystem, false) {
+		t.Fatal("readOnlyRootFilesystem must default to true")
+	}
+	if ptr.Deref(first.SecurityContext.AllowPrivilegeEscalation, true) {
+		t.Fatal("allowPrivilegeEscalation must default to false")
+	}
+	if len(first.SecurityContext.Capabilities.Drop) != 1 || first.SecurityContext.Capabilities.Drop[0] != "ALL" {
+		t.Fatalf("capabilities must default to drop ALL, got %#v", first.SecurityContext.Capabilities)
+	}
+	if first.ReadinessProbe == nil || first.ReadinessProbe.TCPSocket == nil {
+		t.Fatalf("a silent template must get the TCP readiness probe, got %#v", first.ReadinessProbe)
+	}
+	if got := first.ReadinessProbe.TCPSocket.Port.StrVal; got != "http" {
+		t.Fatalf("TCP readiness probe port = %q, want the renamed service-key port http", got)
+	}
+	if first.LivenessProbe != nil {
+		t.Fatalf("no liveness probe may be injected, got %#v", first.LivenessProbe)
+	}
+	if v := findVolume(podSpec.Volumes, "tmp"); v == nil || v.EmptyDir == nil {
+		t.Fatalf("a silent template must get the /tmp emptyDir volume, got %#v", v)
+	}
+	if m := findMount(first, "tmp"); m == nil || m.MountPath != "/tmp" {
+		t.Fatalf("a silent template must get the /tmp mount, got %#v", m)
+	}
+}
+
+// TestPublishUserSettingsWin: the defaults only fill silence — an explicit
+// readiness probe, an explicit readOnlyRootFilesystem=false, a user-provided
+// /tmp volume and extra template labels/annotations are preserved.
+func TestPublishUserSettingsWin(t *testing.T) {
+	ctx := context.Background()
+	mirror := testMirror()
+	mirror.Spec.Services.HTTP.MirrorMountPath = "/srv/mirror/smoke"
+	mirror.Spec.Services.HTTP.PodTemplate = corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:      map[string]string{"pool": "edge"},
+			Annotations: map[string]string{"example.com/owner": "webteam"},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "web",
+				Image: "nginxinc/nginx-unprivileged:1.31.0-alpine",
+				Ports: []corev1.ContainerPort{{Name: "web", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
+				ReadinessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(8080)}},
+				},
+				SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: ptr.To(false)},
+				VolumeMounts:    []corev1.VolumeMount{{Name: "scratch", MountPath: "/tmp"}},
+			}},
+			Volumes: []corev1.Volume{{
+				Name:         "scratch",
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			}},
+		},
+	}
+	mirror.Finalizers = []string{MirrorFinalizer}
+	mirror.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: mirror.Generation,
+		Phase:              mirrorv1alpha1.PhaseReady,
+		WorkPVC:            "smoke-sync",
+		ActivePVC:          "smoke-snap-1756147200",
+	}
+	scheme := testScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
+		WithObjects(mirror).
+		Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	reconciler := &MirrorReconciler{
+		Client: fakeClient, Scheme: scheme,
+		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
+	reconcile(t, ctx, reconciler, request)
+
+	deployment := &appsv1.Deployment{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
+	podSpec := deployment.Spec.Template.Spec
+	first := podSpec.Containers[0]
+	if first.ReadinessProbe == nil || first.ReadinessProbe.HTTPGet == nil || first.ReadinessProbe.HTTPGet.Path != "/healthz" {
+		t.Fatalf("the user readiness probe must win, got %#v", first.ReadinessProbe)
+	}
+	if ptr.Deref(first.SecurityContext.ReadOnlyRootFilesystem, true) {
+		t.Fatal("an explicit readOnlyRootFilesystem=false must be respected")
+	}
+	if findVolume(podSpec.Volumes, "tmp") != nil {
+		t.Fatal("no tmp volume may be injected when the template provides its own /tmp mount")
+	}
+	// User metadata merges with the forced identity labels.
+	if got := deployment.Spec.Template.Labels["pool"]; got != "edge" {
+		t.Fatalf("user pod label lost: %#v", deployment.Spec.Template.Labels)
+	}
+	if deployment.Spec.Template.Labels[RoleLabel] != "publish-http" {
+		t.Fatalf("forced role label must win: %#v", deployment.Spec.Template.Labels)
+	}
+	if got := deployment.Spec.Template.Annotations["example.com/owner"]; got != "webteam" {
+		t.Fatalf("user pod annotation lost: %#v", deployment.Spec.Template.Annotations)
+	}
+	if got := deployment.Spec.Template.Annotations[ActivePVCAnnotation]; got != "smoke-snap-1756147200" {
+		t.Fatalf("forced active-pvc annotation missing: %#v", deployment.Spec.Template.Annotations)
+	}
+}
+
+// TestMirrorDataMountsAreForcedReadOnly: an extra user mount of the injected
+// mirror-data volume is allowed only read-only; a writable one is InvalidSpec,
+// and a user volume named mirror-data is rejected as reserved.
+func TestMirrorDataMountsAreForcedReadOnly(t *testing.T) {
+	mirror := testMirror()
+	mirror.Spec.Services.HTTP.MirrorMountPath = "/srv/mirror/smoke"
+	mirror.Spec.Services.HTTP.PodTemplate.Spec.Containers = append(mirror.Spec.Services.HTTP.PodTemplate.Spec.Containers, corev1.Container{
+		Name:         "sidecar",
+		Image:        "docker.io/library/busybox:1.37.0",
+		VolumeMounts: []corev1.VolumeMount{{Name: "mirror-data", MountPath: "/data", ReadOnly: false}},
+	})
+
+	errs := validateMirror(mirror)
+	if len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "mirror-data") {
+		t.Fatalf("a writable mirror-data mount must be InvalidSpec, got %v", errs)
+	}
+
+	// Read-only extra mounts are fine.
+	mirror = testMirror()
+	mirror.Spec.Services.HTTP.MirrorMountPath = "/srv/mirror/smoke"
+	mirror.Spec.Services.HTTP.PodTemplate.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
+		{Name: "mirror-data", MountPath: "/srv/mirror/smoke/index", ReadOnly: true},
+	}
+	if errs := validateMirror(mirror); len(errs) != 0 {
+		t.Fatalf("a read-only extra mirror-data mount must be accepted, got %v", errs)
+	}
+
+	// A user-declared volume named mirror-data collides with the injection.
+	mirror = testMirror()
+	mirror.Spec.Services.HTTP.MirrorMountPath = "/srv/mirror/smoke"
+	mirror.Spec.Services.HTTP.PodTemplate.Spec.Volumes = []corev1.Volume{{
+		Name:         "mirror-data",
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}}
+	errs = validateMirror(mirror)
+	if len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "reserved") {
+		t.Fatalf("a user volume named mirror-data must be rejected as reserved, got %v", errs)
+	}
+}
+
+// TestPublishTemplateWithoutPortsOrContainersIsInvalid: the Service targets
+// the first container port of the first container, so both must exist on an
+// enabled service.
+func TestPublishTemplateWithoutPortsOrContainersIsInvalid(t *testing.T) {
+	mirror := testMirror()
+
+	// No ports on the first container.
+	broken := mirror.DeepCopy()
+	broken.Spec.Services.HTTP.PodTemplate.Spec.Containers[0].Ports = nil
+	errs := validateMirror(broken)
+	if len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "ports") {
+		t.Fatalf("an enabled service without container ports must be InvalidSpec, got %v", errs)
+	}
+
+	// No containers at all.
+	broken = mirror.DeepCopy()
+	broken.Spec.Services.HTTP.PodTemplate.Spec.Containers = nil
+	errs = validateMirror(broken)
+	if len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "containers") {
+		t.Fatalf("an enabled service without containers must be InvalidSpec, got %v", errs)
+	}
+
+	// A DISABLED key may park a template that would not validate.
+	disabled := mirror.DeepCopy()
+	disabled.Spec.Services.Rsync = mirrorv1alpha1.MirrorServiceSpec{
+		Enable: false,
+		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "x", Image: "img"}},
+		}},
+	}
+	if errs := validateMirror(disabled); len(errs) != 0 {
+		t.Fatalf("a disabled key must not be validated, got %v", errs)
+	}
+}
+
+// publishedMirrorFixture returns a published, Ready Mirror whose http service
+// carries the given aliases, plus a reconciler wired to a fake client holding it.
+func publishedMirrorFixture(t *testing.T, name string, aliases ...mirrorv1alpha1.MirrorHTTPAlias) (*mirrorv1alpha1.Mirror, *MirrorReconciler, client.Client, ctrl.Request, context.Context) {
+	ctx := context.Background()
+	mirror := testMirror()
+	mirror.ObjectMeta = metav1.ObjectMeta{
+		Namespace:  "mirrors",
+		Name:       name,
+		UID:        types.UID("uid-" + name),
+		Generation: 1,
+	}
+	base, _ := childBase(name)
+	mirror.Spec.Services.HTTP.MirrorServiceSpec = mirrorv1alpha1.MirrorServiceSpec{
+		Enable:          true,
+		MirrorMountPath: "/srv/mirror/" + base,
+		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "web",
+				Image: "nginxinc/nginx-unprivileged:1.31.0-alpine",
+				Ports: []corev1.ContainerPort{{Name: "web", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
+			}},
+		}},
+	}
+	mirror.Spec.Services.HTTP.Aliases = aliases
+	mirror.Finalizers = []string{MirrorFinalizer}
+	mirror.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: mirror.Generation,
+		Phase:              mirrorv1alpha1.PhaseReady,
+		WorkPVC:            base + "-sync",
+		ActivePVC:          base + "-snap-1756147200",
+	}
+	scheme := testScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
+		WithObjects(mirror).
+		Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, base+"-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	reconciler := &MirrorReconciler{
+		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
+		Now:    func() time.Time { return time.Now().UTC() },
+		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
+	}
+	return mirror, reconciler, fakeClient, ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name},
+	}, ctx
+}
+
+// TestAliasesServeMultiMatchRoute: aliases append PathPrefix matches to the
+// single rule after the canonical path (OR semantics, same backend).
+func TestAliasesServeMultiMatchRoute(t *testing.T) {
+	mirror, reconciler, fakeClient, request, ctx := publishedMirrorFixture(t, "smoke", "/linux.git", "/git/linux.git")
+	reconcile(t, ctx, reconciler, request) // creates the workload (+ route attempt)
+	markDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace, "smoke-publish-http")
+	reconcile(t, ctx, reconciler, request)
+
+	route := &gatewayv1.HTTPRoute{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
+	if len(route.Spec.Rules) != 1 {
+		t.Fatalf("want exactly one rule, got %#v", route.Spec.Rules)
+	}
+	matches := route.Spec.Rules[0].Matches
+	if len(matches) != 3 {
+		t.Fatalf("want canonical + 2 alias matches, got %#v", matches)
+	}
+	wantPaths := []string{"/smoke", "/linux.git", "/git/linux.git"}
+	for i, want := range wantPaths {
+		if ptr.Deref(matches[i].Path.Type, "") != gatewayv1.PathMatchPathPrefix || ptr.Deref(matches[i].Path.Value, "") != want {
+			t.Fatalf("match %d = %#v, want PathPrefix %s", i, matches[i], want)
+		}
+	}
+	// All matches share the single http backend.
+	if backends := route.Spec.Rules[0].BackendRefs; len(backends) != 1 || string(backends[0].BackendRef.Name) != "smoke-publish-http" {
+		t.Fatalf("aliases must share the canonical backend, got %#v", backends)
+	}
+	assertPublishRouteShape(t, route, mirror, "/smoke", "smoke-publish-http")
+}
+
+// TestAliasValidation: syntax rules and the canonical-path rule are enforced
+// (mirroring the admission-time CEL); case-sensitive paths and uppercase are
+// legal.
+func TestAliasValidation(t *testing.T) {
+	// Uppercase and multi-segment aliases are the point of the mechanism.
+	valid := testMirror()
+	valid.Spec.Services.HTTP.Aliases = []mirrorv1alpha1.MirrorHTTPAlias{
+		"/Linux.Git", "/git/smoke.git", "/a/b/c",
+	}
+	if errs := validateMirror(valid); len(errs) != 0 {
+		t.Fatalf("valid aliases rejected: %v", errs.ToAggregate())
+	}
+
+	cases := map[string]mirrorv1alpha1.MirrorHTTPAlias{
+		"relative":       "linux.git",
+		"trailing slash": "/linux.git/",
+		"double slash":   "/git//linux.git",
+		"whitespace":     "/git linux",
+		"canonical path": "/smoke",
+	}
+	for name, alias := range cases {
+		broken := testMirror()
+		broken.Spec.Services.HTTP.Aliases = []mirrorv1alpha1.MirrorHTTPAlias{alias}
+		if errs := validateMirror(broken); len(errs) == 0 {
+			t.Fatalf("%s: alias %q must be InvalidSpec", name, alias)
+		}
+	}
+
+	// A DISABLED http key may park invalid aliases.
+	disabled := testMirror()
+	disabled.Spec.Services.HTTP = mirrorv1alpha1.MirrorHTTPServiceSpec{}
+	disabled.Spec.Services.HTTP.Aliases = []mirrorv1alpha1.MirrorHTTPAlias{"no-leading-slash", "/smoke"}
+	if errs := validateMirror(disabled); len(errs) != 0 {
+		t.Fatalf("aliases of a disabled http key must not be validated, got %v", errs.ToAggregate())
+	}
+}
+
+// TestRouteConflictWithholdsRouteKeepsWorkload: when this Mirror's canonical
+// path or an alias overlaps (equality or segment-boundary prefix) another
+// Mirror's paths in the same namespace, the route is not created/updated and
+// the Mirror degrades with reason RouteConflict — while the publish workload
+// keeps running. Non-overlapping lookalike paths (/gitlinux vs /git) do not
+// conflict.
+func TestRouteConflictWithholdsRouteKeepsWorkload(t *testing.T) {
+	// The "git" Mirror's canonical path /git prefix-overlaps smoke's alias
+	// /git/linux.git (Gateway API PathPrefix is segment-aware).
+	conflicting := testMirror()
+	conflicting.Name = "git"
+	conflicting.UID = types.UID("uid-git")
+	conflicting.Spec.Services.HTTP.MirrorServiceSpec = mirrorv1alpha1.MirrorServiceSpec{
+		Enable:          true,
+		MirrorMountPath: "/srv/mirror/git",
+		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name: "web", Image: "nginxinc/nginx-unprivileged:1.31.0-alpine",
+				Ports: []corev1.ContainerPort{{Name: "web", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
+			}},
+		}},
+	}
+	conflicting.Finalizers = []string{MirrorFinalizer}
+	conflicting.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: conflicting.Generation,
+		Phase:              mirrorv1alpha1.PhaseReady,
+		WorkPVC:            "git-sync",
+		ActivePVC:          "git-snap-1756147200",
+	}
+
+	mirror, reconciler, fakeClient, request, ctx := publishedMirrorFixture(t, "smoke", "/linux.git", "/git/linux.git")
+	if err := fakeClient.Create(ctx, conflicting); err != nil {
+		t.Fatalf("create conflicting mirror: %v", err)
+	}
+	reconcile(t, ctx, reconciler, request) // creates the workload, withholds the route
+	markDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace, "smoke-publish-http")
+	reconcile(t, ctx, reconciler, request) // settles into RouteConflict
+
+	// The route is withheld, the Mirror degrades with RouteConflict...
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, &gatewayv1.HTTPRoute{})
+	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
+	if current.Status.Phase != mirrorv1alpha1.PhaseDegraded {
+		t.Fatalf("expected Degraded on route conflict, got %s", current.Status.Phase)
+	}
+	cond := findCondition(current.Status.Conditions, conditionDegraded)
+	if cond == nil || cond.Reason != "RouteConflict" || !strings.Contains(cond.Message, "/git/linux.git") || !strings.Contains(cond.Message, `"git"`) {
+		t.Fatalf("expected RouteConflict condition naming the overlap, got %#v", cond)
+	}
+	// ...but the publish workload keeps running.
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &corev1.Service{})
+
+	// A non-overlapping alias (/gitlinux does not segment-prefix /git) keeps
+	// the route flowing.
+	other, otherReconciler, otherClient, otherRequest, otherCtx := publishedMirrorFixture(t, "smoke", "/gitlinux")
+	otherConflicting := conflicting.DeepCopy()
+	otherConflicting.ResourceVersion = ""
+	if err := otherClient.Create(otherCtx, otherConflicting); err != nil {
+		t.Fatalf("create conflicting mirror: %v", err)
+	}
+	reconcile(t, otherCtx, otherReconciler, otherRequest)
+	markDeploymentAvailable(t, otherCtx, otherClient, other.Namespace, "smoke-publish-http")
+	reconcile(t, otherCtx, otherReconciler, otherRequest)
+	get(t, otherCtx, otherClient, client.ObjectKey{Namespace: other.Namespace, Name: "smoke-publish"}, &gatewayv1.HTTPRoute{})
+	current = getMirror(t, otherCtx, otherClient, otherRequest.NamespacedName)
+	if current.Status.Phase != mirrorv1alpha1.PhaseReady {
+		t.Fatalf("non-overlapping alias must not degrade, got %s (%#v)", current.Status.Phase, current.Status.Conditions)
+	}
 }

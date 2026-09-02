@@ -19,8 +19,6 @@ func TestLoadFullConfig(t *testing.T) {
 	path := writeTemp(t, `
 log:
   level: debug
-leaderElection:
-  enabled: true
 api:
   metricsBindAddress: ":9080"
   healthProbeBindAddress: ":9081"
@@ -52,9 +50,6 @@ serving:
 	}
 	if cfg.Log.Level != "debug" {
 		t.Errorf("log.level = %q, want debug", cfg.Log.Level)
-	}
-	if !cfg.LeaderElection.Enabled {
-		t.Errorf("leaderElection.enabled = false, want true")
 	}
 	if cfg.API.MetricsBindAddress != ":9080" || cfg.API.HealthProbeBindAddress != ":9081" || cfg.API.WebapiBindAddress != ":9082" {
 		t.Errorf("api addresses wrong: %+v", cfg.API)
@@ -96,9 +91,6 @@ func TestLoadDefaultsForSparseConfig(t *testing.T) {
 	}
 	if cfg.API.MetricsBindAddress != ":8080" || cfg.API.HealthProbeBindAddress != ":8081" || cfg.API.WebapiBindAddress != ":8082" {
 		t.Errorf("api address defaults wrong: %+v", cfg.API)
-	}
-	if cfg.LeaderElection.Enabled {
-		t.Errorf("leaderElection default = true, want false")
 	}
 	if cfg.Catalog.Enabled {
 		t.Errorf("catalog default = enabled, want disabled")

@@ -242,6 +242,7 @@ func TestPublishActivationRecordsSizeBytes(t *testing.T) {
 		UsageReader: usage,
 	}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
 
 	reconcile(t, ctx, reconciler, request) // finalizer
 	reconcile(t, ctx, reconciler, request) // startSync
@@ -333,6 +334,7 @@ func TestIdlePathBackfillsSizeBytes(t *testing.T) {
 		UsageReader: usage,
 	}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
 
 	reconcile(t, ctx, reconciler, request) // ensure publish workload (not ready yet)
 	deployment := &appsv1.Deployment{}

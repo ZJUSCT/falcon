@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -83,7 +84,6 @@ type MirrorReconciler struct {
 // +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots,verbs=get;list;watch;create;patch;update;delete
 // +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;patch;update;delete
-// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;patch;update;delete
 //
 // nodes/proxy is cluster-scoped and cannot live in the namespaced Role: the
 // chart grants it through the controller.rbac.nodeStats ClusterRole
@@ -141,13 +141,25 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	if mirror.Status.ActivePVC != "" && publishEnabled(mirror) {
-		// A published Mirror is served. Only the "http" service entry is
-		// routed through the Gateway API (rsync/git are Service-only); the
+		// A published Mirror is served. Only the "http" service is routed
+		// through the Gateway API (the rsync Service is never routed); the
 		// config switch still gates all route generation — see ServingEnabled.
-		if publishHTTPEnabled(mirror) {
-			if err := ensurePublishedMirrorRoute(ctx, r, mirror); err != nil {
+		// Before ensuring the route, the canonical path and every alias are
+		// checked against all other Mirrors of the namespace: a conflict
+		// (RouteConflict) keeps the workload running but leaves the route
+		// untouched (never created, never updated).
+		routeConflict := ""
+		if publishHTTPEnabled(mirror) && r.Config.ServingEnabled() {
+			conflict, err := r.publishRouteConflict(ctx, mirror)
+			if err != nil {
 				return ctrl.Result{}, err
 			}
+			if conflict == "" {
+				if err := ensurePublishedMirrorRoute(ctx, r, mirror); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			routeConflict = conflict
 		}
 		ready, err := r.ensurePublish(ctx, mirror, mirror.Status.ActivePVC, int64(0))
 		if err != nil {
@@ -158,6 +170,18 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 				mirror.Status.Phase = mirrorv1alpha1.PhasePublishing
 				setCondition(mirror, conditionReady, metav1.ConditionFalse, "ServingRollout", "waiting for the publish Deployment to become available")
 				setCondition(mirror, conditionProgressing, metav1.ConditionTrue, "ServingRollout", "updating the publish Deployment")
+			})
+		}
+		if routeConflict != "" {
+			// The publish workload keeps running — only the route generation
+			// is withheld. Requeue after a minute so a conflict that dissolves
+			// (the other Mirror deleted or its aliases changed) is noticed
+			// without a spec change on this side.
+			return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: time.Minute}, func() {
+				mirror.Status.Phase = mirrorv1alpha1.PhaseDegraded
+				setCondition(mirror, conditionReady, metav1.ConditionFalse, "RouteConflict", routeConflict)
+				setCondition(mirror, conditionProgressing, metav1.ConditionFalse, "RouteConflict", routeConflict)
+				setCondition(mirror, conditionDegraded, metav1.ConditionTrue, "RouteConflict", routeConflict)
 			})
 		}
 	}
@@ -583,9 +607,6 @@ func validateMirror(mirror *mirrorv1alpha1.Mirror) field.ErrorList {
 	if err := validateDerivedName(mirror.Name, mirrorLongestNameSuffix()); err != nil {
 		errs = append(errs, err)
 	}
-	if mirror.Spec.Info.Type != "sync" {
-		errs = append(errs, field.NotSupported(path.Child("info", "type"), mirror.Spec.Info.Type, []string{"sync"}))
-	}
 	if mirror.Spec.Sync.Interval.Duration <= 0 {
 		errs = append(errs, field.Invalid(path.Child("sync", "interval"), mirror.Spec.Sync.Interval.Duration.String(), "must be greater than zero"))
 	}
@@ -595,11 +616,20 @@ func validateMirror(mirror *mirrorv1alpha1.Mirror) field.ErrorList {
 	if mirror.Spec.Sync.Timeout.Duration <= 0 {
 		errs = append(errs, field.Invalid(path.Child("sync", "timeout"), mirror.Spec.Sync.Timeout.Duration.String(), "must be greater than zero"))
 	}
-	if mirror.Spec.Sync.Image == "" {
-		errs = append(errs, field.Required(path.Child("sync", "image"), "must not be empty"))
+	// sync.podTemplate: at least one container with an image (the former
+	// sync.image/sync.command requirements moved into the template), and no
+	// user volume clashing with the injected writable sync-data volume.
+	syncTemplatePath := path.Child("sync", "podTemplate")
+	if len(mirror.Spec.Sync.PodTemplate.Spec.Containers) == 0 {
+		errs = append(errs, field.Required(syncTemplatePath.Child("spec", "containers"), "must declare at least one container"))
+	} else if mirror.Spec.Sync.PodTemplate.Spec.Containers[0].Image == "" {
+		errs = append(errs, field.Required(syncTemplatePath.Child("spec", "containers").Index(0).Child("image"), "must not be empty"))
 	}
-	if len(mirror.Spec.Sync.Command) == 0 {
-		errs = append(errs, field.Required(path.Child("sync", "command"), "must contain an executable"))
+	for i := range mirror.Spec.Sync.PodTemplate.Spec.Volumes {
+		if mirror.Spec.Sync.PodTemplate.Spec.Volumes[i].Name == SyncDataVolumeName {
+			errs = append(errs, field.Invalid(syncTemplatePath.Child("spec", "volumes").Index(i).Child("name"), SyncDataVolumeName,
+				"this volume name is reserved: the controller injects it itself"))
+		}
 	}
 	if mirror.Spec.Storage.StorageClassName == "" {
 		errs = append(errs, field.Required(path.Child("storage", "storageClassName"), "must not be empty"))
@@ -610,69 +640,115 @@ func validateMirror(mirror *mirrorv1alpha1.Mirror) field.ErrorList {
 	if mirror.Spec.Storage.VolumeSnapshotClassName == "" {
 		errs = append(errs, field.Required(path.Child("storage", "volumeSnapshotClassName"), "is required for atomic publication"))
 	}
-	if mirror.Spec.Storage.NodeName != "" && mirror.Spec.Sync.NodeName != "" && mirror.Spec.Storage.NodeName != mirror.Spec.Sync.NodeName {
-		errs = append(errs, field.Invalid(path.Child("sync", "nodeName"), mirror.Spec.Sync.NodeName, "must match storage.nodeName for a local PV"))
+	services := mirror.Spec.Services
+	servicesPath := path.Child("services")
+	for _, entry := range []struct {
+		key  string
+		spec *mirrorv1alpha1.MirrorServiceSpec
+	}{
+		{PublishProtocolHTTP, &services.HTTP.MirrorServiceSpec},
+		{PublishProtocolRsync, &services.Rsync},
+	} {
+		if !entry.spec.Enable {
+			continue
+		}
+		errs = append(errs, validateMirrorService(entry.spec, servicesPath.Child(entry.key))...)
 	}
-	for key, storageValue := range mirror.Spec.Storage.NodeSelector {
-		if syncValue, exists := mirror.Spec.Sync.NodeSelector[key]; exists && syncValue != storageValue {
-			errs = append(errs, field.Invalid(path.Child("sync", "nodeSelector").Key(key), syncValue, "must match storage.nodeSelector for the same key"))
-		}
+	// Alias paths of an ENABLED http service (a disabled key may park
+	// anything).
+	if services.HTTP.Enable {
+		errs = append(errs, validateHTTPAliases(&services.HTTP, mirror.Name, servicesPath.Child("http", "aliases"))...)
 	}
-	effectiveNodeName := mirror.Spec.Storage.NodeName
-	if effectiveNodeName == "" {
-		effectiveNodeName = mirror.Spec.Sync.NodeName
+	// There is no placement validation: node locality is K8s-native on the
+	// sync side (WFFC + bound-PV nodeAffinity) and PV-derived on the publish
+	// side (publishPlacement). Multi-replica publishing on shared (RWX)
+	// storage is a legal extension — no nodeName requirement exists any more.
+	return errs
+}
+
+// publishEnabled reports whether at least one spec.services key is enabled
+// (a mirror with everything disabled syncs but publishes nothing).
+func publishEnabled(mirror *mirrorv1alpha1.Mirror) bool {
+	return mirror.Spec.Services.AnyEnabled()
+}
+
+// validateMirrorService validates one ENABLED publish service of a Mirror
+// (disabled keys are skipped entirely — anything may be parked there). The
+// CRD additionally enforces the enable-time presence of mirrorMountPath and
+// podTemplate.spec at admission; the controller-side checks keep the
+// InvalidSpec path complete for specs that bypassed it.
+func validateMirrorService(service *mirrorv1alpha1.MirrorServiceSpec, path *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	if service.MirrorMountPath == "" {
+		errs = append(errs, field.Required(path.Child("mirrorMountPath"), "must not be empty when enable is true"))
+	} else if service.MirrorMountPath[0] != '/' {
+		errs = append(errs, field.Invalid(path.Child("mirrorMountPath"), service.MirrorMountPath, "must be an absolute path"))
 	}
-	if effectiveNodeName != "" {
-		if hostname, exists := mirror.Spec.Storage.NodeSelector[corev1.LabelHostname]; exists && hostname != effectiveNodeName {
-			errs = append(errs, field.Invalid(path.Child("storage", "nodeSelector").Key(corev1.LabelHostname), hostname, "must match the effective nodeName"))
-		}
-		if hostname, exists := mirror.Spec.Sync.NodeSelector[corev1.LabelHostname]; exists && hostname != effectiveNodeName {
-			errs = append(errs, field.Invalid(path.Child("sync", "nodeSelector").Key(corev1.LabelHostname), hostname, "must match the effective nodeName"))
-		}
+	templatePath := path.Child("podTemplate")
+	errs = append(errs, validatePublishPodTemplate(&service.PodTemplate, templatePath, PublishDataVolumeName)...)
+	// Data integrity: every mount of the controller-injected mirror-data
+	// volume — including extra user mounts in sidecars or init containers —
+	// must be read-only. The controller forces the volume source read-only
+	// regardless, but a writable mount attempt must not slip through silently.
+	for i := range service.PodTemplate.Spec.Containers {
+		container := &service.PodTemplate.Spec.Containers[i]
+		errs = append(errs, validateMirrorDataMounts(container.VolumeMounts, templatePath.Child("spec", "containers").Index(i))...)
 	}
-	if len(mirror.Spec.Services) > 0 {
-		errs = append(errs, validateServices(mirror.Spec.Services, path.Child("services"))...)
-		// Multi-replica publishing requires forced co-location: with a
-		// ReadWriteOnce data PVC all publish pods must run on the storage
-		// node, which the controller enforces only when spec.storage.nodeName
-		// pins the node (it becomes a kubernetes.io/hostname node selector).
-		if mirror.Spec.Storage.NodeName == "" {
-			for i := range mirror.Spec.Services {
-				if serviceReplicas(&mirror.Spec.Services[i]) > 1 {
-					errs = append(errs, field.Invalid(path.Child("storage", "nodeName"), "",
-						"must be set when any spec.services[].replicas is greater than 1: a ReadWriteOnce data PVC can only be mounted by pods on its node, so multi-replica publishing requires the controller to pin every publish pod to the storage node"))
-					break
-				}
-			}
-		}
+	for i := range service.PodTemplate.Spec.InitContainers {
+		container := &service.PodTemplate.Spec.InitContainers[i]
+		errs = append(errs, validateMirrorDataMounts(container.VolumeMounts, templatePath.Child("spec", "initContainers").Index(i))...)
 	}
-	for i := range mirror.Spec.Sync.Volumes {
-		volume := &mirror.Spec.Sync.Volumes[i]
-		volumePath := path.Child("sync", "volumes").Index(i)
-		if volume.Name == "" {
-			errs = append(errs, field.Required(volumePath.Child("name"), "must not be empty"))
-		}
-		if volume.MountPath == "" || volume.MountPath[0] != '/' {
-			errs = append(errs, field.Invalid(volumePath.Child("mountPath"), volume.MountPath, "must be an absolute path"))
-		}
-		sources := 0
-		if volume.ConfigMap != nil {
-			sources++
-		}
-		if volume.Secret != nil {
-			sources++
-		}
-		if sources != 1 {
-			errs = append(errs, field.Invalid(volumePath, volume.Name, "exactly one of configMap or secret must be set"))
+	return errs
+}
+
+// validateMirrorDataMounts rejects writable volumeMounts of the injected
+// mirror-data publish PVC volume.
+func validateMirrorDataMounts(mounts []corev1.VolumeMount, path *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	for i := range mounts {
+		if mounts[i].Name == PublishDataVolumeName && !mounts[i].ReadOnly {
+			errs = append(errs, field.Invalid(path.Child("volumeMounts").Index(i).Child("readOnly"), false,
+				"mounts of the injected mirror-data publish PVC volume must always be read-only"))
 		}
 	}
 	return errs
 }
 
-// publishEnabled reports whether spec.services declares at least one entry
-// (a mirror with no services syncs but publishes nothing).
-func publishEnabled(mirror *mirrorv1alpha1.Mirror) bool {
-	return len(mirror.Spec.Services) > 0
+// validateHTTPAliases validates the additional public path prefixes of an
+// ENABLED http service: no duplicate, no alias equal to the canonical
+// /<mirror name> path, and the syntax rules (start with '/', no trailing '/',
+// no '//', no whitespace). Syntax is additionally enforced at admission by a
+// CEL rule; the controller-side mirror keeps the InvalidSpec path complete
+// for specs that bypassed it. Case-sensitive on purpose: CR names are bound
+// by DNS rules while alias paths are not.
+func validateHTTPAliases(http *mirrorv1alpha1.MirrorHTTPServiceSpec, mirrorName string, path *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	canonical := "/" + mirrorName
+	seen := map[mirrorv1alpha1.MirrorHTTPAlias]bool{}
+	for i, alias := range http.Aliases {
+		aliasPath := path.Index(i)
+		value := string(alias)
+		if seen[alias] {
+			errs = append(errs, field.Duplicate(aliasPath, value))
+			continue
+		}
+		seen[alias] = true
+		if value == canonical {
+			errs = append(errs, field.Invalid(aliasPath, value, "must not equal the canonical path "+canonical))
+			continue
+		}
+		switch {
+		case !strings.HasPrefix(value, "/"):
+			errs = append(errs, field.Invalid(aliasPath, value, "must start with '/'"))
+		case strings.HasSuffix(value, "/"):
+			errs = append(errs, field.Invalid(aliasPath, value, "must not end with '/'"))
+		case strings.Contains(value, "//"):
+			errs = append(errs, field.Invalid(aliasPath, value, "must not contain '//'"))
+		case strings.ContainsFunc(value, unicode.IsSpace):
+			errs = append(errs, field.Invalid(aliasPath, value, "must not contain whitespace"))
+		}
+	}
+	return errs
 }
 
 func jobSucceeded(job *batchv1.Job) bool {

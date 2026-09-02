@@ -1,9 +1,16 @@
 {{- /*
-Cluster-scoped RBAC for reading kubelet stats summaries through the API
-server node proxy (GET /api/v1/nodes/<node>/proxy/stats/summary): the data
-source of Mirror status.sizeBytes. nodes/proxy is a cluster-scoped
-subresource and cannot be granted by a namespaced Role, so this is the
-chart's only cluster-level object; everything else stays namespaced.
+Cluster-scoped RBAC. Two independent grants, both required by the
+controller:
+
+  - node-stats (opt-out switch rbac.nodeStats): kubelet stats summaries
+    through the API server node proxy (GET /api/v1/nodes/<node>/proxy/stats/summary),
+    the data source of Mirror status.sizeBytes. nodes/proxy is a
+    cluster-scoped subresource and cannot be granted by a namespaced Role.
+  - pv-reader (always on with rbac.create): the publish placement is derived
+    from the source PV's nodeAffinity (sync PVC -> .spec.volumeName -> PV),
+    so the controller must be able to READ PersistentVolumes. persistentvolumes
+    are cluster-scoped; the grant is read-only and core to publishing, hence
+    rendered whenever the controller's RBAC is rendered at all.
 */ -}}
 {{- if and .Values.controller.enabled .Values.controller.rbac.create .Values.controller.rbac.nodeStats }}
 apiVersion: rbac.authorization.k8s.io/v1
@@ -18,6 +25,22 @@ rules:
       - ""
     resources:
       - nodes/proxy
+    verbs:
+      - get
+{{- end }}
+{{- if and .Values.controller.enabled .Values.controller.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "falcon.fullname" . }}-pv-reader
+  labels:
+    {{- include "falcon.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumes
     verbs:
       - get
 {{- end }}

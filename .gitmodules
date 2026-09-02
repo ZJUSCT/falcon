@@ -1,0 +1,3 @@
+[submodule "tunasync-scripts"]
+	path = tunasync-scripts
+	url = https://github.com/ZJUSCT/tunasync-scripts.git

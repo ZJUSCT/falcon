@@ -13,6 +13,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -77,26 +78,34 @@ func TestAtomicPublicationUsesStableSyncPVCAndSnapshotClone(t *testing.T) {
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.WorkPVC}, workClaim)
 	job := &batchv1.Job{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingJob}, job)
-	jobClaim := job.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName
-	if jobClaim != current.Status.WorkPVC {
-		t.Fatalf("sync Job mounted %q; expected sync PVC %q", jobClaim, current.Status.WorkPVC)
+	// The writable sync-data volume is forced: PVC source without ReadOnly.
+	jobData := findVolume(job.Spec.Template.Spec.Volumes, "sync-data")
+	if jobData == nil || jobData.PersistentVolumeClaim == nil || jobData.PersistentVolumeClaim.ClaimName != current.Status.WorkPVC {
+		t.Fatalf("sync Job must mount the sync PVC %q as writable sync-data, got %#v", current.Status.WorkPVC, jobData)
 	}
-	// Input volumes (ConfigMap/Secret) must always be mounted read-only; the
-	// CR-level readOnly override no longer exists.
+	if jobData.PersistentVolumeClaim.ReadOnly {
+		t.Fatal("sync-data is the sync OUTPUT volume: it must not be mounted read-only")
+	}
+	jobMount := findMount(job.Spec.Template.Spec.Containers[0], "sync-data")
+	if jobMount == nil || jobMount.MountPath != "/data" || jobMount.ReadOnly {
+		t.Fatalf("sync-data must be mounted writable at the declared dataMountPath, got %#v", jobMount)
+	}
+	// The user-declared input volume from the pod template is preserved.
 	jobMounts := job.Spec.Template.Spec.Containers[0].VolumeMounts
-	if len(jobMounts) != 2 {
-		t.Fatalf("want data + input mounts, got %#v", jobMounts)
+	if jobMounts[0].Name != "sync-config" || jobMounts[0].MountPath != "/etc/sync" || !jobMounts[0].ReadOnly {
+		t.Fatalf("user input volume must be preserved read-only, got %#v", jobMounts[0])
 	}
-	if jobMounts[1].Name != "sync-config" || jobMounts[1].MountPath != "/etc/sync" || !jobMounts[1].ReadOnly {
-		t.Fatalf("input volume must be mounted read-only, got %#v", jobMounts[1])
+	if job.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Fatalf("sync pod restartPolicy must be Never, got %q", job.Spec.Template.Spec.RestartPolicy)
 	}
 	if job.Spec.Template.Spec.NodeName != "" {
 		t.Fatalf("sync Job bypasses the scheduler with spec.nodeName %q", job.Spec.Template.Spec.NodeName)
 	}
-	if got := job.Spec.Template.Spec.NodeSelector[corev1.LabelHostname]; got != "s3.mirrors.zjusct.io" {
-		t.Fatalf("sync Job hostname selector = %q; expected storage node", got)
+	if len(job.Spec.Template.Spec.NodeSelector) != 0 {
+		t.Fatalf("sync Job must carry no controller-injected nodeSelector (placement is scheduler-native), got %#v", job.Spec.Template.Spec.NodeSelector)
 	}
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingSnapshot}, &snapshotv1.VolumeSnapshot{})
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingPVC}, &corev1.PersistentVolumeClaim{})
 
 	job.Status.Succeeded = 1
@@ -134,18 +143,22 @@ func TestAtomicPublicationUsesStableSyncPVCAndSnapshotClone(t *testing.T) {
 	}
 	deployment := &appsv1.Deployment{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
-	deploymentClaim := deployment.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName
-	if deploymentClaim != current.Status.PendingPVC {
-		t.Fatalf("publish Deployment mounted %q; expected clone PVC %q", deploymentClaim, current.Status.PendingPVC)
+	dataVolume := findVolume(deployment.Spec.Template.Spec.Volumes, "mirror-data")
+	if dataVolume == nil || dataVolume.PersistentVolumeClaim == nil || dataVolume.PersistentVolumeClaim.ClaimName != current.Status.PendingPVC {
+		t.Fatalf("publish Deployment must mount the clone PVC %q as mirror-data, got %#v", current.Status.PendingPVC, dataVolume)
 	}
-	if !deployment.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ReadOnly || !deployment.Spec.Template.Spec.Containers[0].VolumeMounts[0].ReadOnly {
-		t.Fatal("publish clone must be mounted read-only in both the volume source and container mount")
+	if !dataVolume.PersistentVolumeClaim.ReadOnly {
+		t.Fatal("the mirror-data volume source must be read-only")
 	}
-	if got := deployment.Spec.Template.Spec.Containers[0].VolumeMounts[0].MountPath; got != "/usr/share/nginx/html/smoke" {
-		t.Fatalf("data PVC must be mounted at <mountPath>/<name> so PVC-root content is served under the /smoke route prefix, got %q", got)
+	dataMount := findMount(deployment.Spec.Template.Spec.Containers[0], "mirror-data")
+	if dataMount == nil || !dataMount.ReadOnly {
+		t.Fatal("the mirror-data mount must be read-only in both the volume source and container mount")
 	}
-	// The first container port is (re)named after the service so the Service
-	// and probes reference a named port; the Service targets it on port 80.
+	if got := dataMount.MountPath; got != "/usr/share/nginx/html/smoke" {
+		t.Fatalf("mirrorMountPath must be used verbatim as the data mount point, got %q", got)
+	}
+	// The first container port is the Service target; the controller renames
+	// it to the service key so the Service and probes reference a named port.
 	containerPorts := deployment.Spec.Template.Spec.Containers[0].Ports
 	if len(containerPorts) != 1 || containerPorts[0].Name != "http" || containerPorts[0].ContainerPort != 8080 {
 		t.Fatalf("publish container ports = %#v; want the single declared port renamed to http", containerPorts)
@@ -153,8 +166,10 @@ func TestAtomicPublicationUsesStableSyncPVCAndSnapshotClone(t *testing.T) {
 	if deployment.Spec.Template.Spec.NodeName != "" {
 		t.Fatalf("publish Deployment bypasses the scheduler with spec.nodeName %q", deployment.Spec.Template.Spec.NodeName)
 	}
+	// The node constraint is derived from the sync PVC's bound local PV: the
+	// hostname selector comes from the PV nodeAffinity, not from any spec field.
 	if got := deployment.Spec.Template.Spec.NodeSelector[corev1.LabelHostname]; got != "s3.mirrors.zjusct.io" {
-		t.Fatalf("publish Deployment hostname selector = %q; expected storage node", got)
+		t.Fatalf("publish Deployment hostname selector = %q; expected the PV-derived storage node", got)
 	}
 
 	deployment.Status.ObservedGeneration = deployment.Generation
@@ -215,6 +230,7 @@ func TestNextSnapshotStillWritesOnlyToSyncPVC(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &batchv1.Job{}, &snapshotv1.VolumeSnapshot{}, &appsv1.Deployment{}).
 		WithObjects(mirror, syncClaim, publishClaim).
 		Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
 	reconciler := &MirrorReconciler{
 		Client:      fakeClient,
 		Scheme:      scheme,
@@ -243,14 +259,14 @@ func TestNextSnapshotStillWritesOnlyToSyncPVC(t *testing.T) {
 	reconcile(t, ctx, reconciler, request) // create Job
 	job := &batchv1.Job{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingJob}, job)
-	if got := job.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName; got != mirror.Status.WorkPVC {
-		t.Fatalf("next synchronization Job mounted %q; expected stable sync PVC %q", got, mirror.Status.WorkPVC)
+	jobData := findVolume(job.Spec.Template.Spec.Volumes, "sync-data")
+	if jobData == nil || jobData.PersistentVolumeClaim == nil || jobData.PersistentVolumeClaim.ClaimName != mirror.Status.WorkPVC {
+		t.Fatalf("next synchronization Job must mount the stable sync PVC %q as sync-data, got %#v", mirror.Status.WorkPVC, jobData)
 	}
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingSnapshot}, &snapshotv1.VolumeSnapshot{})
 }
 
 func testMirror() *mirrorv1alpha1.Mirror {
-	replicas := int32(1)
 	return &mirrorv1alpha1.Mirror{
 		TypeMeta: metav1.TypeMeta{APIVersion: mirrorv1alpha1.GroupVersion.String(), Kind: "Mirror"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -263,7 +279,6 @@ func testMirror() *mirrorv1alpha1.Mirror {
 			Info: mirrorv1alpha1.MirrorInfo{
 				Name:        mirrorv1alpha1.LocalizedString{"en": "Smoke"},
 				Description: mirrorv1alpha1.LocalizedString{"en": "Controller smoke test"},
-				Type:        "sync",
 				Upstream:    "generated locally",
 			},
 			Sync: mirrorv1alpha1.MirrorSyncSpec{
@@ -272,33 +287,50 @@ func testMirror() *mirrorv1alpha1.Mirror {
 				Timeout:           metav1.Duration{Duration: 10 * time.Minute},
 				FailureRetryLimit: 3,
 				KeepFailedJobs:    1,
-				Image:             "busybox:1.37.0",
-				Command:           []string{"sh", "-c"},
-				Args:              []string{"date -u > /data/index.html"},
-				Volumes: []mirrorv1alpha1.MirrorInputVolume{{
-					Name:      "sync-config",
-					MountPath: "/etc/sync",
-					ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "sync-config"}},
+				DataMountPath:     "/data",
+				PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:    "sync",
+						Image:   "busybox:1.37.0",
+						Command: []string{"sh", "-c"},
+						Args:    []string{"date -u > /data/index.html"},
+						VolumeMounts: []corev1.VolumeMount{{
+							Name:      "sync-config",
+							MountPath: "/etc/sync",
+							ReadOnly:  true,
+						}},
+					}},
+					Volumes: []corev1.Volume{{
+						Name: "sync-config",
+						VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "sync-config"},
+						}},
+					}},
 				}},
-				DataMountPath: "/data",
 			},
 			Storage: mirrorv1alpha1.MirrorStorageSpec{
 				StorageClassName:        "retain-class",
-				ServingStorageClassName: "delete-class",
+				PublishStorageClassName: "delete-class",
 				Capacity:                resource.MustParse("1Gi"),
 				AccessMode:              corev1.ReadWriteOnce,
 				VolumeSnapshotClassName: "snapshot-class",
-				NodeName:                "s3.mirrors.zjusct.io",
 				Retention:               mirrorv1alpha1.MirrorRetentionSpec{PreviousSnapshots: 1},
 			},
-			Services: []mirrorv1alpha1.MirrorServingService{{
-				Name:          "http",
-				Image:         "nginxinc/nginx-unprivileged:1.31.0-alpine",
-				Replicas:      &replicas,
-				Ports:         []corev1.ContainerPort{{Name: "web", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
-				MountPath:     "/usr/share/nginx/html",
-				ReadinessPath: "/",
-			}},
+			Services: mirrorv1alpha1.MirrorServicesSpec{
+				HTTP: mirrorv1alpha1.MirrorHTTPServiceSpec{
+					MirrorServiceSpec: mirrorv1alpha1.MirrorServiceSpec{
+						Enable:          true,
+						MirrorMountPath: "/usr/share/nginx/html/smoke",
+						PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:  "web",
+								Image: "nginxinc/nginx-unprivileged:1.31.0-alpine",
+								Ports: []corev1.ContainerPort{{Name: "web", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
+							}},
+						}},
+					},
+				},
+			},
 		},
 	}
 }
@@ -347,18 +379,19 @@ func assertNotFound(t *testing.T, ctx context.Context, c client.Client, key clie
 	}
 }
 
-// TestChildBaseNamingRules pins the childBase/resourceName contract: charset
-// mapping, the defensive empty fallback, and the hard 63-character limit that
-// replaced the former truncation+sha256 shortening.
+// TestChildBaseNamingRules pins the childBase/resourceName contract: the CR
+// name is returned AS-IS (no case folding, no character mapping — dots are
+// legal in DNS subdomain child names and label values), with only the hard
+// 63-character limit that guards suffix concatenation and label values.
 func TestChildBaseNamingRules(t *testing.T) {
 	cases := []struct {
 		name string
 		want string
 	}{
 		{name: "smoke", want: "smoke"},
-		{name: "Debian.Archive_2", want: "debian-archive-2"},
-		{name: "a.b.c", want: "a-b-c"},
-		{name: "...", want: "mirror"}, // everything dropped -> defensive fallback
+		{name: "linux.git", want: "linux.git"}, // dots preserved verbatim
+		{name: "a.b.c", want: "a.b.c"},
+		{name: "Debian.Archive_2", want: "Debian.Archive_2"}, // no lowercasing, no mapping
 	}
 	for _, tc := range cases {
 		got, err := childBase(tc.name)
@@ -379,6 +412,15 @@ func TestChildBaseNamingRules(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "64") || !strings.Contains(err.Error(), "63") {
 		t.Fatalf("error must name the offending length and the limit: %v", err)
+	}
+
+	// Dotted base names flow into child names unconverted.
+	got, err := resourceName("linux.git", "sync")
+	if err != nil {
+		t.Fatalf("resourceName(linux.git, sync): %v", err)
+	}
+	if got != "linux.git-sync" {
+		t.Fatalf("resourceName(linux.git, sync) = %q, want linux.git-sync", got)
 	}
 
 	if _, err := resourceName(strings.Repeat("a", 58), "sync"); err != nil {
@@ -533,6 +575,7 @@ func TestFailureRetryIntervals(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &batchv1.Job{}, &snapshotv1.VolumeSnapshot{}, &appsv1.Deployment{}).
 		WithObjects(mirror).
 		Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
 	reconciler := &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
 		Now:    func() time.Time { return clock },
@@ -746,14 +789,35 @@ func TestVolumeSnapshotClassNameIsRequired(t *testing.T) {
 	}
 }
 
-// TestMultiReplicaPublishRequiresStorageNodeName: publishing with any service
-// replicas > 1 while spec.storage.nodeName is empty is an InvalidSpec — with a
-// ReadWriteOnce data PVC all publish pods must be pinned to the storage node.
-func TestMultiReplicaPublishRequiresStorageNodeName(t *testing.T) {
+// waitForEvent drains the FakeRecorder until an event containing substr is
+// seen (route/other events may precede it), failing after the buffer empties.
+func waitForEvent(t *testing.T, recorder *record.FakeRecorder, substr string) {
+	t.Helper()
+	for {
+		select {
+		case event := <-recorder.Events:
+			if strings.Contains(event, substr) {
+				return
+			}
+		default:
+			t.Fatalf("expected an event containing %q, none in the buffer", substr)
+		}
+	}
+}
+
+// TestPublishPlacementDerivedFromLocalPV: the publish Deployment's hostname
+// node selector is derived from the sync PVC's bound local PV (not from any
+// spec field); the hostname key overrides the user template's own value while
+// other user keys merge; multi-replica publishing is no longer tied to any
+// placement field.
+func TestPublishPlacementDerivedFromLocalPV(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Storage.NodeName = ""
-	mirror.Spec.Services[0].Replicas = ptr.To(int32(2))
+	mirror.Spec.Services.HTTP.Replicas = ptr.To(int32(2))
+	mirror.Spec.Services.HTTP.PodTemplate.Spec.NodeSelector = map[string]string{
+		corev1.LabelHostname: "user-chosen.example.com", // must be overridden
+		"pool":               "edge",                    // must be merged
+	}
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
@@ -767,56 +831,200 @@ func TestMultiReplicaPublishRequiresStorageNodeName(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(mirror).
 		Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
 	reconciler := &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
 		Now:    func() time.Time { return time.Now().UTC() },
 		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
 	}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
-	reconcile(t, ctx, reconciler, request) // finalizer
-	reconcile(t, ctx, reconciler, request) // validation
-
-	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.Phase != mirrorv1alpha1.PhaseDegraded {
-		t.Fatalf("expected Degraded, got %s", current.Status.Phase)
-	}
-	cond := findCondition(current.Status.Conditions, conditionDegraded)
-	if cond == nil || !strings.Contains(cond.Message, "storage.nodeName") {
-		t.Fatalf("expected a validation error naming storage.nodeName, got %#v", cond)
-	}
-
-	// Pinning the node satisfies the co-location requirement: the spec
-	// validates and the publish Deployment rolls out with the declared
-	// replica count.
-	if errs := validateMirror(func() *mirrorv1alpha1.Mirror {
-		pinned := mirror.DeepCopy()
-		pinned.Spec.Storage.NodeName = "s3.mirrors.zjusct.io"
-		return pinned
-	}()); len(errs) > 0 {
-		t.Fatalf("pinned node must satisfy the co-location requirement, got %v", errs.ToAggregate())
-	}
-	current = getMirror(t, ctx, fakeClient, request.NamespacedName)
-	current.Spec.Storage.NodeName = "s3.mirrors.zjusct.io"
-	if err := fakeClient.Update(ctx, current); err != nil {
-		t.Fatalf("pin storage node: %v", err)
-	}
 	reconcile(t, ctx, reconciler, request) // valid spec: publish workload ensured
+
+	if errs := validateMirror(mirror); len(errs) != 0 {
+		t.Fatalf("multi-replica publishing needs no placement field any more, got %v", errs.ToAggregate())
+	}
 	deployment := &appsv1.Deployment{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
 	if got := *deployment.Spec.Replicas; got != 2 {
 		t.Fatalf("deployment replicas = %d, want 2", got)
 	}
+	selector := deployment.Spec.Template.Spec.NodeSelector
+	if selector[corev1.LabelHostname] != "s3.mirrors.zjusct.io" {
+		t.Fatalf("PV-derived hostname selector missing/overridden, got %#v", selector)
+	}
+	if selector["pool"] != "edge" {
+		t.Fatalf("user nodeSelector keys must merge, got %#v", selector)
+	}
+	if deployment.Spec.Template.Spec.Affinity != nil && deployment.Spec.Template.Spec.Affinity.NodeAffinity != nil {
+		t.Fatalf("no affinity may be injected when the PV carries a hostname selector, got %#v", deployment.Spec.Template.Spec.Affinity)
+	}
+}
+
+// TestPublishPlacementSharedStorageStaysFree: a PV without nodeAffinity
+// (shared storage) yields no constraint — publish pods schedule freely and
+// multi-replica on RWX is legal.
+func TestPublishPlacementSharedStorageStaysFree(t *testing.T) {
+	ctx := context.Background()
+	mirror := testMirror()
+	mirror.Spec.Services.HTTP.Replicas = ptr.To(int32(2))
+	mirror.Finalizers = []string{MirrorFinalizer}
+	mirror.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: mirror.Generation,
+		Phase:              mirrorv1alpha1.PhaseReady,
+		WorkPVC:            "smoke-sync",
+		ActivePVC:          "smoke-snap-1756147200",
+	}
+	scheme := testScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
+		WithObjects(mirror).
+		Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "", nil)
+	reconciler := &MirrorReconciler{
+		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
+		Now:    func() time.Time { return time.Now().UTC() },
+		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
+	reconcile(t, ctx, reconciler, request)
+
+	deployment := &appsv1.Deployment{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
+	if len(deployment.Spec.Template.Spec.NodeSelector) != 0 {
+		t.Fatalf("shared storage must not gain a nodeSelector, got %#v", deployment.Spec.Template.Spec.NodeSelector)
+	}
+	if deployment.Spec.Template.Spec.Affinity != nil && deployment.Spec.Template.Spec.Affinity.NodeAffinity != nil {
+		t.Fatalf("shared storage must not gain a nodeAffinity, got %#v", deployment.Spec.Template.Spec.Affinity)
+	}
+}
+
+// TestPublishPlacementNonHostnameAffinityCopied: a PV whose nodeAffinity has
+// no hostname expression (another topology shape) copies its required terms
+// verbatim into the pod affinity; a user-provided nodeAffinity is overridden
+// with a Warning event (volume locality is authoritative).
+func TestPublishPlacementNonHostnameAffinityCopied(t *testing.T) {
+	ctx := context.Background()
+	mirror := testMirror()
+	mirror.Spec.Services.HTTP.PodTemplate.Spec.Affinity = &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+				MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "wrong", Operator: corev1.NodeSelectorOpIn, Values: []string{"x"}}},
+			}},
+		}},
+	}
+	mirror.Finalizers = []string{MirrorFinalizer}
+	mirror.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: mirror.Generation,
+		Phase:              mirrorv1alpha1.PhaseReady,
+		WorkPVC:            "smoke-sync",
+		ActivePVC:          "smoke-snap-1756147200",
+	}
+	scheme := testScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
+		WithObjects(mirror).
+		Build()
+	topology := &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+		MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "topology.example.com/zone", Operator: corev1.NodeSelectorOpIn, Values: []string{"z1"}}},
+	}}}
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "", topology)
+	recorder := record.NewFakeRecorder(20)
+	reconciler := &MirrorReconciler{
+		Client: fakeClient, Scheme: scheme, Recorder: recorder,
+		Now:    func() time.Time { return time.Now().UTC() },
+		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
+	reconcile(t, ctx, reconciler, request)
+
+	deployment := &appsv1.Deployment{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
+	affinity := deployment.Spec.Template.Spec.Affinity
+	if affinity == nil || affinity.NodeAffinity == nil || affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		t.Fatalf("PV nodeAffinity must be copied into the pod, got %#v", affinity)
+	}
+	terms := affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+	if len(terms) != 1 || len(terms[0].MatchExpressions) != 1 || terms[0].MatchExpressions[0].Key != "topology.example.com/zone" {
+		t.Fatalf("PV-derived affinity terms wrong: %#v", terms)
+	}
+	if len(deployment.Spec.Template.Spec.NodeSelector) != 0 {
+		t.Fatalf("no hostname selector may be injected for a non-hostname topology, got %#v", deployment.Spec.Template.Spec.NodeSelector)
+	}
+	waitForEvent(t, recorder, "PublishNodeAffinityOverridden")
+}
+
+// TestPublishDeferredUntilSourcePVReadable: without a bound sync PVC/PV the
+// placement cannot be derived — no publish Deployment is created (never
+// without the volume locality constraint), the Mirror waits in Publishing,
+// and a Warning event explains the deferral.
+func TestPublishDeferredUntilSourcePVReadable(t *testing.T) {
+	ctx := context.Background()
+	mirror := testMirror()
+	mirror.Finalizers = []string{MirrorFinalizer}
+	mirror.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: mirror.Generation,
+		Phase:              mirrorv1alpha1.PhaseReady,
+		WorkPVC:            "smoke-sync",
+		ActivePVC:          "smoke-snap-1756147200",
+	}
+	scheme := testScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
+		WithObjects(mirror).
+		Build()
+	recorder := record.NewFakeRecorder(20)
+	reconciler := &MirrorReconciler{
+		Client: fakeClient, Scheme: scheme, Recorder: recorder,
+		Now:    func() time.Time { return time.Now().UTC() },
+		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
+	reconcile(t, ctx, reconciler, request) // publish deferred
+
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
+	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
+	if current.Status.Phase != mirrorv1alpha1.PhasePublishing {
+		t.Fatalf("expected Publishing while placement is undetermined, got %s", current.Status.Phase)
+	}
+	cond := findCondition(current.Status.Conditions, conditionProgressing)
+	if cond == nil || cond.Reason != "ServingRollout" {
+		t.Fatalf("expected the ServingRollout wait condition, got %#v", cond)
+	}
+	waitForEvent(t, recorder, "PublishPlacementPending")
+
+	// Once the sync PVC shows up bound to a local PV, the next reconcile
+	// creates the Deployment with the derived constraint.
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	reconcile(t, ctx, reconciler, request)
+	deployment := &appsv1.Deployment{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
+	if got := deployment.Spec.Template.Spec.NodeSelector[corev1.LabelHostname]; got != "s3.mirrors.zjusct.io" {
+		t.Fatalf("derived hostname selector missing after PVC bound, got %#v", deployment.Spec.Template.Spec.NodeSelector)
+	}
 }
 
 // TestServicesSchemaInCRDs pins the generated schema contracts that a plain
-// fake-client test cannot exercise: services without minItems (absent/empty
-// services = sync-only mirror is legal), the name uniqueness CEL rule, the
-// protocol enum, and the ports minItems 1 — in both the Mirror and the
-// ProxyMirror CRD.
+// fake-client test cannot exercise: the fixed services keys with the enable/
+// mirrorMountPath/podTemplate shape, the enable-time presence CEL rules, and
+// the absence of the old array shape (per-entry name/image/ports) — in both
+// the Mirror and the ProxyMirror CRD.
 func TestServicesSchemaInCRDs(t *testing.T) {
-	for _, crd := range []string{"mirrors.zjusct.io_mirrors.yaml", "mirrors.zjusct.io_proxymirrors.yaml"} {
-		t.Run(crd, func(t *testing.T) {
-			raw, err := os.ReadFile(filepath.Join("..", "..", "charts", "falcon", "crds", crd))
+	// The committed chart CRDs are installed manually (helm does not upgrade
+	// crds/), so this test only guards the realistic drift: the committed
+	// YAML lagging behind a type change. It pins the fixed-key services shape,
+	// the embedded corev1 pod template schema, and the enable-time CEL rules.
+	for _, tc := range []struct {
+		crd             string
+		wantMirrorMount bool
+	}{
+		{crd: "mirrors.zjusct.io_mirrors.yaml", wantMirrorMount: true},
+		{crd: "mirrors.zjusct.io_proxymirrors.yaml", wantMirrorMount: false},
+	} {
+		t.Run(tc.crd, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("..", "..", "charts", "falcon", "crds", tc.crd))
 			if err != nil {
 				t.Fatalf("read CRD: %v", err)
 			}
@@ -828,36 +1036,126 @@ func TestServicesSchemaInCRDs(t *testing.T) {
 			if !ok {
 				t.Fatal("services schema not found in CRD")
 			}
-			if _, has := services["minItems"]; has {
-				t.Fatalf("services must not enforce minItems (empty services = sync-only mirror), got %v", services["minItems"])
+			properties, _ := services["properties"].(map[string]interface{})
+			http, ok := properties["http"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("services.http schema missing, got %v", properties)
 			}
-			rules, ok := services["x-kubernetes-validations"].([]interface{})
-			if !ok || len(rules) == 0 {
-				t.Fatalf("services must carry x-kubernetes-validations, got %#v", services)
-			}
-			foundUnique := false
-			for _, rule := range rules {
-				r, _ := rule.(map[string]interface{})
-				if r["message"] == "service names must be unique" {
-					foundUnique = true
+			httpProperties, _ := http["properties"].(map[string]interface{})
+			for _, required := range []string{"enable", "replicas", "podTemplate"} {
+				if _, has := httpProperties[required]; !has {
+					t.Fatalf("services.http.%s schema missing, got %v", required, httpProperties)
 				}
 			}
-			if !foundUnique {
-				t.Fatalf("name-uniqueness CEL rule missing, got %#v", rules)
+			if _, has := httpProperties["mirrorMountPath"]; has != tc.wantMirrorMount {
+				t.Fatalf("services.http.mirrorMountPath presence = %v, want %v", !tc.wantMirrorMount, tc.wantMirrorMount)
 			}
-			items, _ := services["items"].(map[string]interface{})
-			properties, _ := items["properties"].(map[string]interface{})
-			name, _ := properties["name"].(map[string]interface{})
-			enum, _ := name["enum"].([]interface{})
-			if len(enum) != 3 {
-				t.Fatalf("name enum = %#v, want http/rsync/git", enum)
+			// The full corev1 pod template schema must be embedded.
+			podTemplate, _ := httpProperties["podTemplate"].(map[string]interface{})
+			templateProperties, _ := podTemplate["properties"].(map[string]interface{})
+			spec, _ := templateProperties["spec"].(map[string]interface{})
+			specProperties, _ := spec["properties"].(map[string]interface{})
+			containers, _ := specProperties["containers"].(map[string]interface{})
+			if _, has := containers["items"]; !has {
+				t.Fatal("podTemplate.spec.containers must carry the full corev1 schema")
 			}
-			ports, _ := properties["ports"].(map[string]interface{})
-			if ports["minItems"] != float64(1) {
-				t.Fatalf("ports minItems = %v, want 1", ports["minItems"])
+
+			// Enable-time presence CEL rules on the service spec.
+			rules, _ := http["x-kubernetes-validations"].([]interface{})
+			messages := map[string]bool{}
+			for _, rule := range rules {
+				if r, ok := rule.(map[string]interface{}); ok {
+					if m, _ := r["message"].(string); m != "" {
+						messages[m] = true
+					}
+				}
+			}
+			if !messages["podTemplate.spec is required when enable is true"] {
+				t.Fatalf("podTemplate presence CEL rule missing, got %#v", rules)
+			}
+			if tc.wantMirrorMount && !messages["mirrorMountPath is required when enable is true"] {
+				t.Fatalf("mirrorMountPath presence CEL rule missing, got %#v", rules)
 			}
 		})
 	}
+}
+
+// findVolume returns the pod volume with the given name (nil when absent).
+func findVolume(volumes []corev1.Volume, name string) *corev1.Volume {
+	for i := range volumes {
+		if volumes[i].Name == name {
+			return &volumes[i]
+		}
+	}
+	return nil
+}
+
+// findMount returns the container volumeMount with the given volume name
+// (nil when absent).
+func findMount(container corev1.Container, name string) *corev1.VolumeMount {
+	for i := range container.VolumeMounts {
+		if container.VolumeMounts[i].Name == name {
+			return &container.VolumeMounts[i]
+		}
+	}
+	return nil
+}
+
+// addBoundSyncPVC creates the stable sync PVC bound to a local PV whose
+// nodeAffinity pins `hostname` (the OpenEBS zfs local PV shape), so the
+// publish placement derivation can resolve. affinity == nil simulates shared
+// storage (PV without nodeAffinity). pvcName defaults to <base>-sync.
+func addBoundSyncPVC(t *testing.T, ctx context.Context, c client.Client, mirror *mirrorv1alpha1.Mirror, pvcName string, hostname string, affinity *corev1.NodeSelector) {
+	t.Helper()
+	if pvcName == "" {
+		base, err := childBase(mirror.Name)
+		if err != nil {
+			t.Fatalf("childBase: %v", err)
+		}
+		pvcName = base + "-sync"
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: mirror.Namespace, Name: pvcName},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName: pvcName + "-pv",
+			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			}},
+		},
+	}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: pvcName + "-pv"},
+		Spec:       corev1.PersistentVolumeSpec{NodeAffinity: &corev1.VolumeNodeAffinity{Required: affinity}},
+	}
+	// The fake client does not bind PVCs: upsert the volumeName the real
+	// binder would set, so publishPlacement can resolve the PV.
+	existing := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: mirror.Namespace, Name: pvcName}, existing); err != nil {
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("get sync PVC: %v", err)
+		}
+		if err := c.Create(ctx, pvc); err != nil {
+			t.Fatalf("create bound sync PVC: %v", err)
+		}
+	} else if existing.Spec.VolumeName == "" {
+		existing.Spec.VolumeName = pvcName + "-pv"
+		if err := c.Update(ctx, existing); err != nil {
+			t.Fatalf("bind sync PVC: %v", err)
+		}
+	}
+	if err := c.Create(ctx, pv); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("create sync PV: %v", err)
+	}
+}
+
+// hostnameAffinity is the local-PV nodeAffinity shape: a required term with a
+// single kubernetes.io/hostname In expression.
+func hostnameAffinity(hostname string) *corev1.NodeSelector {
+	return &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+		MatchExpressions: []corev1.NodeSelectorRequirement{{
+			Key: corev1.LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{hostname},
+		}},
+	}}}
 }
 
 // findSchemaNode walks a decoded YAML/JSON document and returns the first
@@ -881,4 +1179,89 @@ func findSchemaNode(node interface{}, key string) (map[string]interface{}, bool)
 		}
 	}
 	return nil, false
+}
+
+// TestSyncPodTemplateDefaultsAndInjection: the sync Job is built from the
+// user's sync.podTemplate with the writable sync-data volume forced at
+// dataMountPath and the silent-only defaults injected (runAsUser 65532,
+// restricted profile, /tmp emptyDir, IfNotPresent pull policy). The published
+// testMirror template already carries the user input volume, which must be
+// preserved.
+func TestSyncPodTemplateDefaultsAndInjection(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
+	mirror := testMirror()
+	mirror.Finalizers = []string{MirrorFinalizer}
+	scheme := testScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &batchv1.Job{}).
+		WithObjects(mirror).
+		Build()
+	reconciler := &MirrorReconciler{
+		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
+		Now: func() time.Time { return now }, Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
+	reconcile(t, ctx, reconciler, request) // finalizer
+	reconcile(t, ctx, reconciler, request) // startSync
+	reconcile(t, ctx, reconciler, request) // sync PVC + sync Job
+
+	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
+	job := &batchv1.Job{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingJob}, job)
+	podSpec := job.Spec.Template.Spec
+	first := podSpec.Containers[0]
+	// Silent fields got the sync defaults.
+	if first.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("imagePullPolicy must default to IfNotPresent, got %q", first.ImagePullPolicy)
+	}
+	if got := ptr.Deref(podSpec.SecurityContext.RunAsUser, 0); got != 65532 {
+		t.Fatalf("runAsUser must default to 65532, got %d", got)
+	}
+	if !ptr.Deref(first.SecurityContext.ReadOnlyRootFilesystem, false) || ptr.Deref(first.SecurityContext.AllowPrivilegeEscalation, true) {
+		t.Fatalf("restricted-profile container defaults missing: %#v", first.SecurityContext)
+	}
+	if v := findVolume(podSpec.Volumes, "tmp"); v == nil || v.EmptyDir == nil {
+		t.Fatalf("a silent template must get the /tmp emptyDir volume, got %#v", v)
+	}
+	// Job-level pipeline identity is forced.
+	if podSpec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Fatalf("restartPolicy must be forced to Never, got %q", podSpec.RestartPolicy)
+	}
+	if job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != 0 || job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != 600 {
+		t.Fatalf("Job backoffLimit/deadline wrong: %#v %#v", job.Spec.BackoffLimit, job.Spec.ActiveDeadlineSeconds)
+	}
+	// The user image/command flow through the template untouched.
+	if first.Image != "busybox:1.37.0" || len(first.Command) != 2 || first.Command[0] != "sh" {
+		t.Fatalf("user image/command lost: %#v", first)
+	}
+}
+
+// TestSyncReservedDataVolumeRejected: a user volume named sync-data collides
+// with the controller-injected writable sync PVC volume and is InvalidSpec; a
+// sync template without containers or image is invalid as well.
+func TestSyncReservedDataVolumeRejected(t *testing.T) {
+	mirror := testMirror()
+
+	broken := mirror.DeepCopy()
+	broken.Spec.Sync.PodTemplate.Spec.Volumes = append(broken.Spec.Sync.PodTemplate.Spec.Volumes, corev1.Volume{
+		Name:         "sync-data",
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+	if errs := validateMirror(broken); len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "reserved") {
+		t.Fatalf("a user volume named sync-data must be rejected as reserved, got %v", errs)
+	}
+
+	broken = mirror.DeepCopy()
+	broken.Spec.Sync.PodTemplate = corev1.PodTemplateSpec{}
+	if errs := validateMirror(broken); len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "containers") {
+		t.Fatalf("a sync template without containers must be InvalidSpec, got %v", errs)
+	}
+
+	broken = mirror.DeepCopy()
+	broken.Spec.Sync.PodTemplate.Spec.Containers[0].Image = ""
+	if errs := validateMirror(broken); len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "image") {
+		t.Fatalf("a sync container without an image must be InvalidSpec, got %v", errs)
+	}
 }

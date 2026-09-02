@@ -1,7 +1,7 @@
 // Package config loads and validates the controller's single YAML
 // configuration file (mounted from a ConfigMap at /etc/falcon/config.yaml).
 // It holds the complete runtime configuration: the former Deployment flags
-// (listen addresses, leader election, log level) and the behavior knobs
+// (listen addresses, log level) and the behavior knobs
 // (site identity, catalog, sync concurrency, serving route publishing).
 package config
 
@@ -48,10 +48,6 @@ type Config struct {
 		// Level is one of debug, info, warn, error (default info).
 		Level string `json:"level,omitempty"`
 	} `json:"log,omitempty"`
-
-	LeaderElection struct {
-		Enabled bool `json:"enabled,omitempty"`
-	} `json:"leaderElection,omitempty"`
 
 	API struct {
 		MetricsBindAddress     string `json:"metricsBindAddress,omitempty"`

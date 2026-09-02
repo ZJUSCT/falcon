@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -42,33 +43,58 @@ type ProxyMirrorProxySpec struct {
 	Cache ProxyMirrorCacheSpec `json:"cache,omitempty"`
 }
 
+// ProxyMirrorServiceSpec is the HTTP publish service of a ProxyMirror,
+// addressed by the fixed "http" key under spec.services. Unlike the Mirror
+// service there is no mirrorMountPath: a proxy has no data volume to mount.
+// +kubebuilder:validation:XValidation:rule="!self.enable || has(self.podTemplate.spec)",message="podTemplate.spec is required when enable is true"
+type ProxyMirrorServiceSpec struct {
+	// Enable turns the service on. A key that does not appear in
+	// spec.services is disabled, and so is a key declared with
+	// enable: false — Enable is the single source of truth. With the service
+	// disabled nothing is deployed (the proxy is not published).
+	Enable bool `json:"enable,omitempty"`
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=3
+	Replicas *int32 `json:"replicas,omitempty"`
+	// PodTemplate is the FULL pod template of the publish Deployment
+	// (Deployment .spec.template). The controller forces the naming/label/
+	// selector identity and injects defaults only where the template is
+	// silent (TCP readiness probe on the first container port, a /tmp
+	// emptyDir, readOnlyRootFilesystem and the restricted-profile security
+	// defaults); the optional cache PVC is still provisioned and injected at
+	// /var/cache/nginx/proxy when spec.proxy.cache.enabled is true.
+	// +optional
+	PodTemplate corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+}
+
+// ProxyMirrorServicesSpec holds the fixed publish service keys of a
+// ProxyMirror: only "http" — a proxy is an HTTP publisher by definition.
+type ProxyMirrorServicesSpec struct {
+	HTTP ProxyMirrorServiceSpec `json:"http,omitempty"`
+}
+
 // ProxyMirrorSpec groups the proxy mirror configuration. ProxyMirror has no
 // paused concept (unlike Mirror): to take a proxy mirror offline, delete the CR.
 type ProxyMirrorSpec struct {
 	Info  ProxyMirrorInfo      `json:"info"`
 	Proxy ProxyMirrorProxySpec `json:"proxy,omitempty"`
-	// Services uses the same shape as Mirror's spec.services: each entry gets
-	// Deployment/Service `<name>-publish-<service name>`, and only an "http"
-	// entry additionally gets the publish HTTPRoute (typically the single
-	// "http" proxy service). Absent or empty services = the proxy is not
-	// publishing (nothing is deployed). There is no data volume to mount: the
-	// optional cache PVC is mounted at ProxyCacheMountPath instead. Service
-	// names must be unique.
+	// Services declares the publish workload through the fixed "http" key
+	// (see ProxyMirrorServicesSpec). With the key disabled (including an
+	// entirely absent services object) nothing is deployed: the proxy is not
+	// published. An enabled http service gets Deployment/Service
+	// `<name>-publish-http` plus the publish HTTPRoute (once Ready).
 	// +optional
-	// Same MaxItems rationale as Mirror.spec.services: bounds the uniqueness
-	// CEL rule's estimated cost below the API server's CRD schema budget.
-	// +kubebuilder:validation:MaxItems=3
-	// +kubebuilder:validation:XValidation:rule="self.all(s, self.exists_one(e, e.name == s.name))",message="service names must be unique"
-	Services []MirrorServingService `json:"services,omitempty"`
+	Services ProxyMirrorServicesSpec `json:"services,omitempty"`
 }
 
 type ProxyMirrorStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// +kubebuilder:validation:Enum=Pending;Ready;Degraded
 	Phase string `json:"phase,omitempty"`
-	// PublishedServiceName is the Service fronting the http-type proxy
-	// service (<name>-publish-http); empty when no "http" service is declared
-	// (such a proxy is reachable only through its raw Services).
+	// PublishedServiceName is the Service fronting the http publish service
+	// (<name>-publish-http); empty when the http service is disabled (such a
+	// proxy deploys nothing).
 	PublishedServiceName string `json:"publishedServiceName,omitempty"`
 	// CachePVC is the cache backing PVC when spec.proxy.cache.enabled is true.
 	CachePVC   string             `json:"cachePVC,omitempty"`

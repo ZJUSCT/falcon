@@ -212,8 +212,9 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 		m := &mirrors.Items[i]
 		// Mirrors with nothing reachable are omitted: never-published ones
 		// (no publish PVC derived from a successful snapshot) and sync-only
-		// ones (no spec.services entry, so no way to access the content).
-		if m.Status.ActivePVC == "" || len(m.Spec.Services) == 0 {
+		// ones (no spec.services key enabled, so no way to access the
+		// content).
+		if m.Status.ActivePVC == "" || !m.Spec.Services.AnyEnabled() {
 			continue
 		}
 		entries = append(entries, mirrorzMirror{

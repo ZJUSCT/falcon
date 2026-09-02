@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,7 +24,6 @@ import (
 )
 
 func testProxyMirror() *mirrorv1alpha1.ProxyMirror {
-	replicas := int32(1)
 	return &mirrorv1alpha1.ProxyMirror{
 		TypeMeta: metav1.TypeMeta{APIVersion: mirrorv1alpha1.GroupVersion.String(), Kind: "ProxyMirror"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -45,13 +45,18 @@ func testProxyMirror() *mirrorv1alpha1.ProxyMirror {
 					Size:             resource.MustParse("100Gi"),
 				},
 			},
-			Services: []mirrorv1alpha1.MirrorServingService{{
-				Name:          "http",
-				Image:         "nginxinc/nginx-unprivileged:1.31.0-alpine",
-				Replicas:      &replicas,
-				Ports:         []corev1.ContainerPort{{ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
-				ReadinessPath: "/",
-			}},
+			Services: mirrorv1alpha1.ProxyMirrorServicesSpec{
+				HTTP: mirrorv1alpha1.ProxyMirrorServiceSpec{
+					Enable: true,
+					PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "proxy",
+							Image: "nginxinc/nginx-unprivileged:1.31.0-alpine",
+							Ports: []corev1.ContainerPort{{Name: "web", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
+						}},
+					}},
+				},
+			},
 		},
 	}
 }
@@ -138,6 +143,19 @@ func TestProxyMirrorHappyPathPublishesAndProvisionsCache(t *testing.T) {
 	if len(deployment.Spec.Template.Spec.Volumes) != 2 { // cache + tmp emptyDir, no data volume
 		t.Fatalf("proxy Deployment must have no data volume, got %#v", deployment.Spec.Template.Spec.Volumes)
 	}
+	// The default injections apply to the proxy as well: TCP readiness probe
+	// on the renamed first port and a writable-root-free security posture.
+	first := deployment.Spec.Template.Spec.Containers[0]
+	if first.ReadinessProbe == nil || first.ReadinessProbe.TCPSocket == nil || first.ReadinessProbe.TCPSocket.Port.StrVal != "http" {
+		t.Fatalf("proxy pod must get the default TCP readiness probe on the http port, got %#v", first.ReadinessProbe)
+	}
+	if !ptr.Deref(first.SecurityContext.ReadOnlyRootFilesystem, false) {
+		t.Fatal("readOnlyRootFilesystem must default to true on the proxy container")
+	}
+	cacheMount := findMount(first, "proxy-cache")
+	if cacheMount == nil || cacheMount.MountPath != "/var/cache/nginx/proxy" {
+		t.Fatalf("proxy-cache must be mounted at /var/cache/nginx/proxy, got %#v", cacheMount)
+	}
 
 	current := getProxyMirror(t, ctx, fakeClient, request.NamespacedName)
 	if current.Status.CachePVC != "pypi-proxy-cache" || current.Status.PublishedServiceName != "pypi-proxy-publish-http" {
@@ -190,6 +208,65 @@ func TestProxyMirrorInvalidCacheSpecIsDegraded(t *testing.T) {
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-cache"}, &corev1.PersistentVolumeClaim{})
 	// A proxy that never became Ready gets no publish route.
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-publish"}, &gatewayv1.HTTPRoute{})
+}
+
+// TestProxyMirrorDisabledHTTPDeploysNothing: with the http key absent or
+// enable: false nothing is deployed, no cache PVC is touched and the status
+// carries no published Service.
+func TestProxyMirrorDisabledHTTPDeploysNothing(t *testing.T) {
+	for name, mutate := range map[string]func(*mirrorv1alpha1.ProxyMirror){
+		"absent":  func(p *mirrorv1alpha1.ProxyMirror) { p.Spec.Services = mirrorv1alpha1.ProxyMirrorServicesSpec{} },
+		"disable": func(p *mirrorv1alpha1.ProxyMirror) { p.Spec.Services.HTTP.Enable = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			proxy := testProxyMirror()
+			mutate(proxy)
+			scheme := testProxyScheme(t)
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&mirrorv1alpha1.ProxyMirror{}, &appsv1.Deployment{}).
+				WithObjects(proxy).
+				Build()
+			reconciler := &ProxyMirrorReconciler{
+				Client:   fakeClient,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(20),
+				Now:      func() time.Time { return time.Now().UTC() },
+				Config:   testConfig(),
+			}
+			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: proxy.Namespace, Name: proxy.Name}}
+
+			reconcileProxy(t, ctx, reconciler, request)
+
+			assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-publish-http"}, &appsv1.Deployment{})
+			assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-publish-http"}, &corev1.Service{})
+			assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-publish"}, &gatewayv1.HTTPRoute{})
+			current := getProxyMirror(t, ctx, fakeClient, request.NamespacedName)
+			if current.Status.PublishedServiceName != "" {
+				t.Fatalf("publishedServiceName must stay empty, got %q", current.Status.PublishedServiceName)
+			}
+			// The cache spec is independent of services: still provisioned.
+			claim := &corev1.PersistentVolumeClaim{}
+			if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-cache"}, claim); err != nil {
+				t.Fatalf("cache PVC must be provisioned regardless of services: %v", err)
+			}
+		})
+	}
+}
+
+// TestProxyMirrorReservedCacheVolumeRejected: a user pod template may not
+// declare a volume named proxy-cache (the controller injects it itself).
+func TestProxyMirrorReservedCacheVolumeRejected(t *testing.T) {
+	proxy := testProxyMirror()
+	proxy.Spec.Services.HTTP.PodTemplate.Spec.Volumes = []corev1.Volume{{
+		Name:         "proxy-cache",
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}}
+	errs := validateProxyMirror(proxy)
+	if len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "reserved") {
+		t.Fatalf("a user volume named proxy-cache must be rejected as reserved, got %v", errs)
+	}
 }
 
 func findCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {

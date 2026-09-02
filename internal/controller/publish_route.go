@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"maps"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,23 +21,23 @@ import (
 	"github.com/ZJUSCT/falcon/internal/config"
 )
 
-// Publish protocol identifiers allowed in spec.services[].name. Only the
-// "http" entry gets a publish HTTPRoute; "rsync"/"git" are exposed through
-// their Services only (no route, no TCPRoute).
+// Publish service keys allowed under spec.services. Only an enabled "http"
+// service gets a publish HTTPRoute; "rsync" is exposed through its Service
+// only (no route, no TCPRoute). "git" is not a key on purpose: git publishing
+// is HTTP serving (fastcgi-style container) expressed through the "http" key.
 const (
 	PublishProtocolHTTP  = "http"
 	PublishProtocolRsync = "rsync"
-	PublishProtocolGit   = "git"
 
 	// publishServicePort is the port every publish Service exposes on its
 	// Service (the container port is reached through the named target port,
-	// which is named after the service protocol), and the port publish
-	// HTTPRoute backendRefs point at.
+	// which is named after the service key), and the port publish HTTPRoute
+	// backendRefs point at.
 	publishServicePort = 80
 
-	// publishRolePrefix is the shared prefix of every service entry's role
-	// label value ("publish-http", "publish-rsync", "publish-git") — publish
-	// pods are told apart from other children by this prefix.
+	// publishRolePrefix is the shared prefix of every service key's role
+	// label value ("publish-http", "publish-rsync") — publish pods are told
+	// apart from other children by this prefix.
 	publishRolePrefix = "publish-"
 )
 
@@ -61,39 +63,39 @@ func publishAppProtocol(protocol string) *string {
 	return nil
 }
 
-// publishHTTPEnabled reports whether any declared service entry is the "http"
-// service — the only entry that receives a publish HTTPRoute.
+// publishHTTPEnabled reports whether the "http" publish service is enabled —
+// the only service that receives a publish HTTPRoute.
 func publishHTTPEnabled(mirror *mirrorv1alpha1.Mirror) bool {
-	for i := range mirror.Spec.Services {
-		if mirror.Spec.Services[i].Name == PublishProtocolHTTP {
-			return true
-		}
-	}
-	return false
+	return mirror.Spec.Services.HTTP.Enable
 }
 
-// validateServices validates the spec.services[] entries shared by Mirror and
-// ProxyMirror. The CRD additionally enforces these rules (enum, name-uniqueness
-// CEL, ports MinItems) at admission; the controller-side check keeps the
-// InvalidSpec path complete for specs that bypassed it. An absent or empty
-// list is legal (a sync-only mirror publishes nothing).
-func validateServices(services []mirrorv1alpha1.MirrorServingService, path *field.Path) field.ErrorList {
+// validatePublishPodTemplate checks the user-written pod template of an
+// enabled publish service: at least one container, whose first declared
+// container port becomes the Service target (the controller renames it to the
+// service key), and no user-declared volume clashing with a volume name the
+// controller injects itself. The CRD additionally enforces the enable-time
+// presence rules (mirrorMountPath / podTemplate.spec) at admission; the
+// controller-side check keeps the InvalidSpec path complete for specs that
+// bypassed it.
+func validatePublishPodTemplate(template *corev1.PodTemplateSpec, path *field.Path, reservedVolumeNames ...string) field.ErrorList {
 	var errs field.ErrorList
-	for i := range services {
-		service := &services[i]
-		servicePath := path.Index(i)
-		switch service.Name {
-		case PublishProtocolHTTP, PublishProtocolRsync, PublishProtocolGit:
-		default:
-			errs = append(errs, field.NotSupported(servicePath.Child("name"), service.Name,
-				[]string{PublishProtocolHTTP, PublishProtocolRsync, PublishProtocolGit}))
-		}
-		if service.Image == "" {
-			errs = append(errs, field.Required(servicePath.Child("image"), "must not be empty"))
-		}
-		if len(service.Ports) == 0 {
-			errs = append(errs, field.Required(servicePath.Child("ports"),
-				"must declare at least one container port (the first port is the Service target)"))
+	containers := template.Spec.Containers
+	if len(containers) == 0 {
+		errs = append(errs, field.Required(path.Child("spec", "containers"), "must declare at least one container"))
+		return errs
+	}
+	if len(containers[0].Ports) == 0 {
+		errs = append(errs, field.Required(path.Child("spec", "containers").Index(0).Child("ports"),
+			"must declare at least one container port on the first container (the first port is the Service target and is renamed to the service key)"))
+	}
+	reserved := make(map[string]bool, len(reservedVolumeNames))
+	for _, name := range reservedVolumeNames {
+		reserved[name] = true
+	}
+	for i := range template.Spec.Volumes {
+		if reserved[template.Spec.Volumes[i].Name] {
+			errs = append(errs, field.Invalid(path.Child("spec", "volumes").Index(i).Child("name"),
+				template.Spec.Volumes[i].Name, "this volume name is reserved: the controller injects it itself"))
 		}
 	}
 	return errs
@@ -110,12 +112,14 @@ func validateServices(services []mirrorv1alpha1.MirrorServingService, path *fiel
 //   - parentRefs: [config serving.gatewayRef] (namespace omitted when it
 //     equals the CR namespace);
 //   - hostnames: config serving.hostnames;
-//   - one rule: PathPrefix /<cr name> -> Service <base>-publish-http port 80.
+//   - one rule with one PathPrefix match PER public path (canonical first,
+//     then aliases in declaration order — matches within a rule are OR),
+//     all pointing at Service <base>-publish-http port 80.
 //
 // It is the caller's responsibility to only invoke this for CRs in a
 // published state, and only when config.ServingEnabled() is true
 // (with serving disabled existing routes are deliberately left alone).
-func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record.EventRecorder, scheme *runtime.Scheme, cfg *config.Config, owner client.Object) error {
+func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record.EventRecorder, scheme *runtime.Scheme, cfg *config.Config, owner client.Object, pathPrefixes []string) error {
 	base, err := childBase(owner.GetName())
 	if err != nil {
 		return err
@@ -126,7 +130,7 @@ func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record
 	}
 	routeKey := types.NamespacedName{Namespace: owner.GetNamespace(), Name: routeName}
 	route := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: routeKey.Namespace, Name: routeKey.Name}}
-	// The route always targets the http service entry: rsync/git services are
+	// The route always targets the http service: the rsync service is
 	// Service-only and never routed.
 	httpServiceName, err := publishChildName(base, PublishProtocolHTTP)
 	if err != nil {
@@ -135,6 +139,16 @@ func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record
 
 	labels := objectLabels(base, "publish")
 	maps.Copy(labels, cfg.Serving.Labels)
+
+	matches := make([]gatewayv1.HTTPRouteMatch, 0, len(pathPrefixes))
+	for _, prefix := range pathPrefixes {
+		matches = append(matches, gatewayv1.HTTPRouteMatch{
+			Path: &gatewayv1.HTTPPathMatch{
+				Type:  ptr.To(gatewayv1.PathMatchPathPrefix),
+				Value: ptr.To(prefix),
+			},
+		})
+	}
 
 	op, err := controllerutil.CreateOrUpdate(ctx, c, route, func() error {
 		route.Labels = labels
@@ -145,12 +159,7 @@ func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record
 			},
 			Hostnames: hostnamesAsGatewayHostnames(cfg.Serving.Hostnames),
 			Rules: []gatewayv1.HTTPRouteRule{{
-				Matches: []gatewayv1.HTTPRouteMatch{{
-					Path: &gatewayv1.HTTPPathMatch{
-						Type:  ptr.To(gatewayv1.PathMatchPathPrefix),
-						Value: ptr.To("/" + owner.GetName()),
-					},
-				}},
+				Matches: matches,
 				BackendRefs: []gatewayv1.HTTPBackendRef{{
 					BackendRef: gatewayv1.BackendRef{
 						BackendObjectReference: gatewayv1.BackendObjectReference{
@@ -208,19 +217,72 @@ func hostnamesAsGatewayHostnames(hostnames []string) []gatewayv1.Hostname {
 }
 
 // ensurePublishedMirrorRoute guards the Mirror-specific invocation: only
-// published Mirrors (status.activePVC non-empty) get a publish route.
+// published Mirrors (status.activePVC non-empty) get a publish route, serving
+// the canonical /<mirror name> path first and every declared http alias after
+// it (in declaration order).
 func ensurePublishedMirrorRoute(ctx context.Context, r *MirrorReconciler, mirror *mirrorv1alpha1.Mirror) error {
 	if !r.Config.ServingEnabled() {
 		return nil
 	}
-	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, mirror)
+	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, mirror, mirrorRoutePaths(mirror))
 }
 
 // ensureReadyProxyRoute guards the ProxyMirror-specific invocation: only
-// Ready proxies (deployment available) get a publish route.
+// Ready proxies (deployment available) get a publish route. A proxy has no
+// aliases: its single public path is the canonical /<name>.
 func ensureReadyProxyRoute(ctx context.Context, r *ProxyMirrorReconciler, proxy *mirrorv1alpha1.ProxyMirror) error {
 	if !r.Config.ServingEnabled() {
 		return nil
 	}
-	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, proxy)
+	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, proxy, []string{"/" + proxy.GetName()})
+}
+
+// mirrorRoutePaths returns the public path prefixes a Mirror is served under:
+// the canonical /<mirror name> first, then the enabled http service's aliases
+// in declaration order. The rsync service has no path representation.
+func mirrorRoutePaths(mirror *mirrorv1alpha1.Mirror) []string {
+	paths := []string{"/" + mirror.Name}
+	if mirror.Spec.Services.HTTP.Enable {
+		for _, alias := range mirror.Spec.Services.HTTP.Aliases {
+			paths = append(paths, string(alias))
+		}
+	}
+	return paths
+}
+
+// routePathsOverlap reports whether two Gateway API PathPrefix values can
+// both match the same request path: full equality or a prefix relationship at
+// a path segment boundary (Gateway API PathPrefix is segment-aware — /git
+// matches /git/linux.git but never /gitfoo).
+func routePathsOverlap(a, b string) bool {
+	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
+}
+
+// publishRouteConflict checks the mirror's public paths against every OTHER
+// Mirror of the namespace and returns a human-readable description of the
+// first conflict, or "" when the route can be generated. A conflicting route
+// is not created or updated (Degraded condition reason RouteConflict); the
+// publish workload is unaffected — only the route generation is withheld.
+// The check needs cluster state, so it runs per reconcile (and self-heals
+// through the caller's requeue) instead of in the spec validation.
+func (r *MirrorReconciler) publishRouteConflict(ctx context.Context, mirror *mirrorv1alpha1.Mirror) (string, error) {
+	paths := mirrorRoutePaths(mirror)
+	var others mirrorv1alpha1.MirrorList
+	if err := r.List(ctx, &others, client.InNamespace(mirror.Namespace)); err != nil {
+		return "", err
+	}
+	for i := range others.Items {
+		other := &others.Items[i]
+		if other.Name == mirror.Name {
+			continue
+		}
+		for _, mine := range paths {
+			for _, theirs := range mirrorRoutePaths(other) {
+				if routePathsOverlap(mine, theirs) {
+					return fmt.Sprintf("public path %s overlaps %s of Mirror %q: the publish HTTPRoute would be ambiguous, so it is not created or updated (the publish workload is unaffected; resolve the overlap to restore route generation)", mine, theirs, other.Name), nil
+				}
+			}
+		}
+	}
+	return "", nil
 }
