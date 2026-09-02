@@ -62,7 +62,8 @@ func main() {
 
 	// POD_NAMESPACE scopes everything: the manager's cache (only objects of
 	// this namespace are watched — the chart deploys one full stack per
-	// namespace) and the leader-election Lease.
+	// namespace) and the zfs-agent usage aggregation (same-namespace
+	// EndpointSlice discovery).
 	podNamespace := os.Getenv("POD_NAMESPACE")
 	if podNamespace == "" {
 		logger.Error(nil, "POD_NAMESPACE must be set to the controller's namespace")
@@ -80,12 +81,8 @@ func main() {
 		Cache: cache.Options{
 			DefaultNamespaces: map[string]cache.Config{podNamespace: {}},
 		},
-		Metrics:                       metricsserver.Options{BindAddress: cfg.API.MetricsBindAddress},
-		HealthProbeBindAddress:        cfg.API.HealthProbeBindAddress,
-		LeaderElection:                cfg.LeaderElection.Enabled,
-		LeaderElectionID:              "falcon-controller.mirrors.zjusct.io",
-		LeaderElectionNamespace:       podNamespace,
-		LeaderElectionReleaseOnCancel: true,
+		Metrics:                metricsserver.Options{BindAddress: cfg.API.MetricsBindAddress},
+		HealthProbeBindAddress: cfg.API.HealthProbeBindAddress,
 	})
 	if err != nil {
 		logger.Error(err, "unable to create controller manager")
