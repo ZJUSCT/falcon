@@ -5,7 +5,7 @@
 ## 1. Chart 元数据与部署单元
 
 - `Chart.yaml`：`name: falcon`、`type: application`、`version: 0.0.0`、`appVersion: "v0.0.0"`（checked-in 占位值，与首个发布对齐；CI 发布时按 git tag 盖写——version 为剥离 `v` 前缀的 tag、appVersion 为 tag 原样，发布以 tag 为唯一事实来源，见 §9.2）；`home`/`sources` 指向 `github.com/ZJUSCT/falcon`；注解 `org.opencontainers.image.source` 声明 OCI 发布目标 `oci://ghcr.io/<owner>/charts/falcon`。
-- 一次 release = 一个 namespace 内的完整栈（控制器 + UI + webapi + 路由 + metrics + 所有 CR 子资源）。全部资源渲染到 `.Release.Namespace`，不接收逐资源 namespace 覆写（唯一例外：`rbac.nodeStats` 的集群级 ClusterRole/Binding，见 §6）。
+- 一次 release = 一个 namespace 内的完整栈（控制器 + UI + webapi + 路由 + metrics + 所有 CR 子资源）。全部资源渲染到 `.Release.Namespace`，不接收逐资源 namespace 覆写（例外：集群级 ClusterRole/Binding——`rbac.nodeStats` 与 pv-reader，见 §6）。
 - `namespace.create=true`（默认）时渲染 Namespace 对象，名为 `namespace.name`（空则 Release.Namespace），带 chart 通用标签。
 - Mirror / ProxyMirror **CR 实例不归 chart 管**（GitOps 仓库管理）；chart 只带 CRD。
 - 资源名由 `falcon.fullname` 派生（`fullnameOverride` 优先，否则 release 名含 chart 名时用 release 名、否则 `<release>-<name|nameOverride>`，截断 63）。通用标签：`helm.sh/chart`、`app.kubernetes.io/name`、`app.kubernetes.io/instance`、`app.kubernetes.io/version`（AppVersion 存在时）、`app.kubernetes.io/managed-by`，加 `app.kubernetes.io/component: <controller|webui|admin|catalog>`。
@@ -18,7 +18,7 @@
 | `serviceaccount.yaml` | ServiceAccount `<fullname>` | controller.enabled 且 rbac.create |
 | `role.yaml` | Role `<fullname>`（namespaced） | 同上 |
 | `rolebinding.yaml` | RoleBinding `<fullname>` → SA | 同上 |
-| `clusterrole.yaml` | ClusterRole `<fullname>-node-stats` | controller.enabled 且 rbac.create 且 rbac.nodeStats |
+| `clusterrole.yaml` | ClusterRole `<fullname>-node-stats` 与 `<fullname>-pv-reader` | node-stats：controller.enabled 且 rbac.create 且 rbac.nodeStats；pv-reader：controller.enabled 且 rbac.create |
 | `clusterrolebinding.yaml` | ClusterRoleBinding `<fullname>-node-stats` → SA | 同上 |
 | `configmap.yaml` | ConfigMap `falcon-config`（固定名，键 `config.yaml`） | controller.enabled |
 | `deployment.yaml` | 控制器 Deployment `<fullname>` | controller.enabled |
@@ -50,11 +50,10 @@ controller:
   enabled: true
   image:    {repository: falcon, tag: "", digest: "", pullPolicy: IfNotPresent}
                                     # tag 空 = Chart.AppVersion；digest 设置时优先于 tag
-  replicaCount: 1                 # leader election 下 >1 仅为平滑滚动，单活不变
+  replicaCount: 1
   revisionHistoryLimit: 10
   config:                         # 字段与 internal/config 一一对应，见 §5.1
     log.level: info
-    leaderElection.enabled: true
     api: {metricsBindAddress: ":8080", healthProbeBindAddress: ":8081", webapiBindAddress: ":8082"}
     site: {url: https://mirrors.zjusct.io, abbr: ZJU, name: Zhejiang University Mirror}
     catalog.enabled: true
@@ -98,11 +97,11 @@ catalog:
 
 镜像引用拼接规则（`falcon.image`）：`[global.imageRegistry/]repository` + `@digest`（设置时优先）或 `:tag`（tag 空取 defaultTag；控制器、webui 与 zfs-agent 三处均传 Chart.AppVersion）。默认即 GitHub 正式镜像 `ghcr.io/zjusct/falcon` / `ghcr.io/zjusct/falcon-ui` / `ghcr.io/zjusct/zfs-agent`。
 
-不提供 HPA（控制器 leader-elected 单活）；不渲染任何 NetworkPolicy/PDB。
+不提供 HPA；不渲染任何 NetworkPolicy/PDB。
 
 ## 4. 控制器 Deployment
 
-- `replicas = controller.replicaCount`；`revisionHistoryLimit`；SA 为 `falcon.serviceAccountName`；`terminationGracePeriodSeconds: 10`。
+- `replicas = controller.replicaCount`；`revisionHistoryLimit`；SA 为 `falcon.serviceAccountName`；`terminationGracePeriodSeconds: 10`。策略 `Recreate`：旧控制器终止后才启动新控制器，单副本单写者，无滚动重叠窗口。
 - Pod securityContext：`runAsNonRoot: true`、`runAsUser/runAsGroup: 65532`、seccomp `RuntimeDefault`。容器 securityContext：`allowPrivilegeEscalation: false`、`drop: [ALL]`、`readOnlyRootFilesystem: true`。
 - args 仅 `--config=/etc/falcon/config.yaml`；env 注入 `POD_NAMESPACE`（fieldRef `metadata.namespace`）+ `extraEnv`；`zfsAgent.enabled` 时另注入 `ZFS_AGENT_SERVICE = <fullname>-zfs-agent`（webapi /api/usage 的唯一开关，未启用时不注入该变量，见 mirror spec §8.5）。
 - 容器端口声明（命名）：`metrics: 8080`、`health: 8081`、`webapi: 8082`。liveness GET `/healthz` 端口 health（period 10s、timeout 2s、failure 3）；readiness GET `/readyz` 同参数。
@@ -114,7 +113,7 @@ catalog:
 
 ### 5.1 config.yaml 渲染（falcon.config helper）
 
-`controller.config` 按 `internal/config` 的 schema 原样渲染为 `config.yaml`（schema 与默认值见 mirror spec §10.1）：`log.level`（空补 info）、`leaderElection.enabled`、api 三地址（空补默认）、`site.{url,abbr,name}`、`catalog.enabled`、`sync.maxConcurrent`（空补 0）、`serving.gatewayRef`（合并结果为空则整段省略）、`serving.hostnames`、`serving.labels/annotations`（空 dict 渲染为 `{}`）。
+`controller.config` 按 `internal/config` 的 schema 原样渲染为 `config.yaml`（schema 与默认值见 mirror spec §10.1）：`log.level`（空补 info）、api 三地址（空补默认）、`site.{url,abbr,name}`、`catalog.enabled`、`sync.maxConcurrent`（空补 0）、`serving.gatewayRef`（合并结果为空则整段省略）、`serving.hostnames`、`serving.labels/annotations`（空 dict 渲染为 `{}`）。
 
 模板在渲染期复刻 Go 侧校验，以下情况 `fail`（渲染即报错，不部署非法配置）：`log.level` 不在 debug/info/warn/error；`site.url` 为空或不含 `://`；`serving.hostnames` 含空白项或含 `/`；hostnames 非空但合并后的 gatewayRef 无 `name`。
 
@@ -142,10 +141,12 @@ catalog:
 | ""（core） | pods/log | get |
 | ""（core） | configmaps | get, list, watch |
 | "" 与 events.k8s.io | events | create, patch, update |
-| coordination.k8s.io | leases | create, delete, get, list, patch, update, watch |
 | discovery.k8s.io | endpointslices | get, list（仅 `zfsAgent.enabled` 时渲染） |
 
-除上表外，`controller.rbac.nodeStats=true`（默认）时另渲染 ClusterRole + ClusterRoleBinding `<fullname>-node-stats`（规则仅 `""` 组 `nodes/proxy` 的 `get`，subject 为控制器 SA）：kubelet stats summary 经 API server 节点代理读取（`GET /api/v1/nodes/<node>/proxy/stats/summary`），是 Mirror `status.sizeBytes`（活跃发布 PVC 占用）的数据来源。`nodes/proxy` 是集群级子资源，无法由 namespaced Role 授予——这两个对象是 chart 内唯一的集群级资源；关闭开关后 sizeBytes 恒不填充，其余功能不受影响。
+除上表外另渲染两组集群级 ClusterRole + ClusterRoleBinding（subject 均为控制器 SA）——`nodes/proxy` 与 `persistentvolumes` 都是集群级资源，无法由 namespaced Role 授予：
+
+- `<fullname>-node-stats`（`controller.rbac.nodeStats=true`，默认）：规则仅 `""` 组 `nodes/proxy` 的 `get`。kubelet stats summary 经 API server 节点代理读取（`GET /api/v1/nodes/<node>/proxy/stats/summary`），是 Mirror `status.sizeBytes`（活跃发布 PVC 占用）的数据来源。关闭开关后 sizeBytes 恒不填充，其余功能不受影响。
+- `<fullname>-pv-reader`（随 `rbac.create` 恒渲染，无独立开关）：规则仅 `""` 组 `persistentvolumes` 的 `get`。发布放置由控制器从源 PV 的 nodeAffinity 推导（mirror spec §4.4：`status.workPVC` → volumeName → PV），读 PV 是发布负载创建的前置依赖——只读权限且为核心功能，故不做 opt-out。
 
 `discovery.k8s.io` endpointslices 一行随 `zfsAgent.enabled` 门控（保持 Role 最小化）：webapi 的 /api/usage 聚合器经 zfs-agent headless Service 的 EndpointSlices 发现就绪 agent 端点（mirror spec §8.5）；`zfsAgent.enabled=false` 时不渲染该规则，`/api/usage` 404，其余功能不受影响。
 

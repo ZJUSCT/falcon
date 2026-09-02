@@ -2,14 +2,11 @@
 
 本文覆盖 `ui/` 下 Next.js 静态导出管理后台的页面集、数据来源、时钟轮盘、hash 路由、主题、时间显示与构建/静态服务。依据 `ui/` 全部源码、`ui/Dockerfile`、`ui/nginx.conf`。技术栈：Next.js 14（`output: 'export'`）+ React 18 + Tailwind + TypeScript，构建产物由 nginx 提供纯静态服务。
 
-## Authentication
+## 鉴权
 
-The static UI is served behind Falcon's webapi authentication gateway. On
-startup it requests `/oauth/session`; unauthenticated users are redirected to
-`/oauth/login` and complete GitHub OAuth at `/oauth/callback`. The controller
-accepts only numeric GitHub IDs listed in `controller.config.auth.github` and
-sets a secure, HTTP-only session cookie. The sidebar's **Log out** action calls
-`GET /oauth/logout`. OAuth credentials are not embedded in the UI image.
+由于 Falcon UI 包含敏感信息（例如全量展示 Mirror CRD 等），故使用简单的配置文件 + OAuth 鉴权。允许访问 UI 的用户直接在配置文件中指定，不自己管理用户数据库等。
+
+目前实现了 GitHub OAuth，在配置文件中指定可访问用户的 GitHub ID（数字）。
 
 ## 1. 只读页面集
 
