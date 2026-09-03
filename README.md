@@ -20,10 +20,10 @@ Falcon 使用 [规范驱动开发（SDD）](https://en.wikipedia.org/wiki/Specif
 
 ```sh
 helm install falcon oci://ghcr.io/zjusct/charts/falcon \
-  --version 0.0.0 -n mirror --create-namespace -f my-values.yaml
+  -n mirror --create-namespace -f my-values.yaml
 ```
 
-- 镜像由 `Mirror` CR 描述；字段与示例见 [`spec/mirror.md`](spec/mirror.md)。
+- 镜像由 `Mirror` CR 描述；字段与示例见 [`spec/mirror.md`](spec/mirror.md)，也可在 [`crds.dev`](https://doc.crds.dev/github.com/ZJUSCT/falcon) 浏览。
 - CRD 随 chart 的 crds/ 目录在 install 时安装。helm upgrade 不更新 CRD，需手动 kubectl apply。
 - values 结构、RBAC 与部署细节见 [`spec/chart.md`](spec/chart.md)；管理前端见 [`spec/ui.md`](spec/ui.md)。
 
@@ -56,6 +56,23 @@ helm install falcon oci://ghcr.io/zjusct/charts/falcon \
 | 发布 PVC | `PersistentVolumeClaim`<br/>`<镜像名>-snap-<时间戳>` | 从某个快照克隆出的只读数据卷 |
 | 活跃发布 PVC | `status.activePVC` | 当前正在对外提供内容的发布 PVC；除它之外的历史发布 PVC 按保留策略随各自快照一起清理 |
 | 服务 | `spec.services` 的一个 key | 对外提供内容的方式，目前支持 http 和 rsync |
+
+## TODO
+
+已经整理完成的 Spec：
+
+- `common.md`
+
+等待做的：
+
+- `mirror.md` 整理
+    - CRD 整理
+    - 同步整理
+    - 服务整理
+- Spec 全部整理
+- 审查测试用例
+- chart 和 pre-commit hook 等的校验完善
+- e2e 测试
 
 ## 许可证
 

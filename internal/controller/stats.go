@@ -130,10 +130,7 @@ func (r *MirrorReconciler) publishPVCUsage(ctx context.Context, mirror *mirrorv1
 		return 0, false
 	}
 	logger := log.FromContext(ctx)
-	base, err := childBase(mirror.Name)
-	if err != nil {
-		return 0, false
-	}
+	base := childBase(mirror.Name)
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods, client.InNamespace(mirror.Namespace), client.MatchingLabels{MirrorLabel: base}); err != nil {
 		logger.Info("publish PVC usage accounting skipped: cannot list publish pods", "mirror", mirror.Name, "error", err.Error())
@@ -143,7 +140,7 @@ func (r *MirrorReconciler) publishPVCUsage(ctx context.Context, mirror *mirrorv1
 		pod := &pods.Items[i]
 		// Any running publish pod works: every service entry mounts the same
 		// publish PVC, so its node's kubelet reports the volume's usage.
-		if !strings.HasPrefix(pod.Labels[RoleLabel], publishRolePrefix) ||
+		if !strings.HasPrefix(pod.Labels[ComponentLabel], publishRolePrefix) ||
 			pod.Status.Phase != corev1.PodRunning || pod.Spec.NodeName == "" {
 			continue
 		}

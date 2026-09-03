@@ -17,7 +17,7 @@
 ## 2. 数据来源与刷新
 
 - API 客户端同源（`fetch('/api/...')`）：网关把 `Exact /api/jobs` 与 `PathPrefix /api/repos/` 指到控制器 webapi Service、`/` 指到 UI Service；UI 容器内 nginx 不做任何代理。
-  - `GET /api/jobs` → 任务列表（字段见 mirror spec §8.3）。
+  - `GET /api/jobs` → 任务列表（字段语义见下文「API 字段语义」）。
   - `GET /api/repos/<name>` → spec 文本（默认 YAML；传 `ext: 'json'` 得 JSON）。
   - `GET /api/usage` → 全集群存储占用聚合（`generatedAt` + `mirrors[]`：`name` 对应任务 `id`、`sync`（PVC 名 + 引用字节；null 表示暂无 ZFS 数据）、`snapshots[]`（按 `createdAt` 升序）、`totalBytes`（后端已算好）、`complete`/`errors`）。功能未部署时返回 404，UI 静默降级为无数据（仅 `console.warn`，不打断界面）；ProxyMirror 不会出现。
 - 刷新节奏：Overview 与 Mirrors 挂载时拉一次 `/api/jobs`，之后每 **5000 ms** 后台轮询（失败仅 `console.warn`，不打断界面）；详情视图同样每 5 秒重拉 `/api/jobs` 按 `id` 找本行。Mirrors 列表与详情视图另经 `useUsage` 每 **30000 ms** 轮询 `/api/usage`（聚合开销大，节奏放缓；404/网络失败同样静默——成功前为无数据，成功后失败保留上次结果）。
@@ -56,10 +56,10 @@
 
 ## 4. Mirrors 列表
 
-- 排序：状态优先级 Running=0、Waiting=2、Paused=3、其余（含 ProxyMirror 原始 phase）=4；同优先级按 `next_attempt_at` 升序，零值时间排最后。
+- 排序：状态优先级 Running=0、Waiting=2、Paused=3、其余（含 ProxyMirror 推导 phase）=4；同优先级按 `next_attempt_at` 升序，零值时间排最后。
 - 过滤：搜索按 `id` 不区分大小写子串匹配；状态下拉 All/Running/Waiting/Paused/Failed——`Failed` 匹配 `last_action_status === 'Failed'`，其余按 `status` 精确匹配。
 - 顶部统计卡四个：Running / Waiting / Paused / Last Sync Failed。
-- 表格列：Job（id + namespace + 移动端紧凑信息）、Kind（`ProxyMirror` 紫徽标 / `Mirror` 主色徽标）、Status（徽标；`phase` 与 `status` 不同时附注原始 phase）、Size（`/api/usage` 按 `name` join 后的 `totalBytes` 经 `formatBytes` 格式化；无数据显示 `—`；`complete: false` 时数值后附 `~` 并以 title 提示部分数据；md 以下隐藏）、Last Action、Next Attempt、Last Attempt、Last Success、Last Failure（Last Action 起按 md/lg 断点渐进显示）。
+- 表格列：Job（id + namespace + 移动端紧凑信息）、Kind（`ProxyMirror` 紫徽标 / `Mirror` 主色徽标）、Status（徽标；`phase` 与 `status` 不同时附注推导 phase）、Size（`/api/usage` 按 `name` join 后的 `totalBytes` 经 `formatBytes` 格式化；无数据显示 `—`；`complete: false` 时数值后附 `~` 并以 title 提示部分数据；md 以下隐藏）、Last Action、Next Attempt、Last Attempt、Last Success、Last Failure（Last Action 起按 md/lg 断点渐进显示）。
 - 行点击或 Enter/Space 键进入详情；行可聚焦（tabIndex 0）。
 
 ## 5. Mirror 详情
@@ -85,7 +85,7 @@
 
 - 相对时间（每秒刷新）：零值/无效/`≤ 0` 显示 `Never`；未来时间 `in <时长>`；1 秒内 `Just now`；过去 `<时长> ago`。时长由天/小时/分/秒拼装（有天时省略秒；多段以 `, ` 与 ` and ` 连接；单段直接显示）。`title` 属性为本地化完整时间。
 - 绝对时间：函数名为 `formatRFC3339`，实际输出本地时区 `YYYY-MM-DD HH:MM:SS±HH:MM`；stacked 变体两行（绝对时间 + 相对时间）、inline 变体单行、compact 变体只显示相对时间；`Never` 时只显示 `Never`。
-- 徽标颜色（getStatusColor）覆盖旧同步词汇（Running 蓝/Succeeded 绿/Failed 红/Waiting 黄/Scheduled 紫/Paused 橙/Orphan 灰）、CR 原始 phase（Ready 绿/Syncing·Publishing 蓝/Initializing 黄/Degraded 红/Pending 灰）与 mirrorz 字母（U/S/D/P），未知值灰色。
+- 徽标颜色（getStatusColor）覆盖旧同步词汇（Running 蓝/Succeeded 绿/Failed 红/Waiting 黄/Scheduled 紫/Paused 橙/Orphan 灰）、推导 phase（Ready 绿/Syncing·Publishing 蓝/Initializing 黄/Degraded 红/Pending 灰）与 mirrorz 字母（U/S/D/P），未知值灰色。
 
 ## 9. 构建与静态服务
 
@@ -103,3 +103,41 @@
 - `location /` 执行 `try_files $uri $uri/ /index.html`（应用走 hash 路由，实际只请求 `/`；此规则兜底过期深链）。
 - `/_next/static/`：内容哈希文件名，`Cache-Control: public, max-age=31536000, immutable`。
 - 只读根文件系统兼容：pid 与全部 temp 路径（client/proxy/fastcgi/uwsgi/scgi）置于 `/tmp`；日志走 stdout/stderr；无任何 proxy 配置。
+
+## 10. API 字段语义
+
+三个端点的完整字段语义。通用约束（GET-only、JSON 输出格式、缓存 client）见 mirror spec「webapi」章。
+
+### GET /api/jobs（legacy 兼容任务列表）
+
+字段名保持旧 Docker 时代 `shared.Job` 兼容，附新字段 `kind/namespace/phase/active_pvc/last_finished_at`。不受 `catalog.enabled` 影响。
+
+Mirror 条目映射：
+
+- `id = metadata.name`；`phase` 由 Conditions 与 `currentSync` 推导，`status` 再归一到旧词汇表：`Initializing/Syncing/Publishing→Running`、`Paused→Paused`、`Ready/Pending/Degraded/""→Waiting`（旧 `Scheduled`/`Orphan` 在新系统永不出现）。
+- 当 `currentSync` 存在时，`last_attempt_at = currentSync.startedAt`、`last_action_status = Running`；否则两者分别来自 `lastSync.startedAt` 和 `lastSync.phase`（Succeeded/Failed）。`next_attempt_at = nextSyncAt`。
+- `lastSync` 只表示最近一次已结束的同步；`last_finished_at = lastSync.finishedAt`；`last_success_at` 仅 Succeeded 时 = finishedAt 否则零值；`last_failure_at` 仅 Failed 时。
+- `updated_at` 尽力而为：同步进行中取 `currentSync.startedAt`；否则取 `lastSync.finishedAt`，再回退到 `lastSync.startedAt`，未知则零值。`actions` 恒 `[]`。
+- 时间戳未知时输出零值 `0001-01-01T00:00:00Z`。
+
+ProxyMirror 条目：`id/namespace/kind` 照常；`phase` 由 Conditions 推导，`status` 直接取该推导值（Ready/Pending/Publishing/Degraded），不映射旧词汇表；全部时间戳零值；`actions: []`。
+
+排序：`kind` 升序（Mirror 在 ProxyMirror 前）→ `namespace` → `id`；无 CR 输出 `[]`。
+
+### GET /api/repos/\<name\>（spec-only 单仓视图）
+
+- 格式协商：`.json` → JSON；`.yaml`/`.yml` → YAML；无后缀默认 YAML（Content-Type `application/x-yaml`）。名字先 TrimSpace 再去后缀。
+- 恰一个 Mirror 或 ProxyMirror 匹配（跨 namespace、跨 kind）→ 200，body 为其 `spec` 序列化；**status、metadata 永不出现**。
+- 无匹配 → 404 `{"error": "repo not found: <name>"}`；多于一个（不同 namespace 或 Mirror 与 ProxyMirror 重名——不同资源类型 API 层允许）→ 409 `{"error": "ambiguous repo name: <name>"}`；名字为空（`/api/repos`、`/api/repos/`）→ 404 `{"error": "missing repo name: use /api/repos/<name>"}`（旧版整表 JSON 列表端点不再存在）。
+
+### GET /api/usage（ZFS 用量聚合）
+
+- 开关：仅环境变量 `ZFS_AGENT_SERVICE`（非空 = 启用，值为 zfs-agent headless Service 名）；没有 config 字段。未启用时 404 `{"error": "usage aggregation is disabled"}`。
+- 数据源：chart 部署的 zfs-agent DaemonSet（每存储节点一个，chroot 进宿主机只读执行 zfs/zpool，见 chart spec §7.5）。控制器用 client-go clientset 列出本 ns 的 `discovery.k8s.io` EndpointSlices（label `kubernetes.io/service-name=<service>`），取 ready 端点地址并去重（Ready 条件缺省按 API 语义视为 ready），并发 `GET http://<ip>:9474/v1/zfs` 拉取各节点的 ZFS 用量报告。agent 端口 9474、单请求超时 5s、聚合缓存 TTL 30s 均为代码常量，不可配置。
+- 聚合与降级：单节点失败（网络错误/超时/非 200/解码失败）不阻塞其余节点；错误记为 `<节点名>: <错误>`（节点名取 EndpointSlice 的 nodeName，缺失时用地址），并使本次聚合 `complete=false`。失败/降级结果与成功结果同样进缓存，TTL 到期重算；无 ready 端点同样 `complete=false`（错误 "no ready zfs-agent endpoints ..."）。EndpointSlices 列取失败则整体 500，且不缓存（下次请求重试）。
+- 响应形状：`{"generatedAt": <聚合时刻>, "mirrors": [...]}`；mirrors 按名升序，**收录本 ns 全部 Mirror**（含从未同步的）。每项 `{name, sync, snapshots, totalBytes, complete, errors}`：
+    - join：同步 PVC 名优先取 `status.workPVC`，为空时按 childBase 规则派生 `<base>-sync`；在聚合数据中按 `pvc.name` 匹配（namespace 须为本 ns）→ `sync: {pvc, referencedBytes, writtenBytes}`。
+    - `snapshots` = 该 dataset 的全部快照按 `createdAt` 降序 `{name, writtenBytes, referencedBytes, createdAt}`；`name` 优先用 userprop `openebs.io:vs-name`（即 VolumeSnapshot 对象名），缺失时回退 ZFS 快照名；最老快照在 UI 中使用其 `referencedBytes` 基线，后续快照使用相对上一快照的 `writtenBytes` 增量。
+    - `sync.writtenBytes` 为同步 dataset 自最近快照以来的增量（无快照时回退 `referencedBytes`）；`totalBytes` 直接采用 ZFS dataset `usedBytes`，包含快照占用，避免重复计算。
+    - 无 agent 数据匹配的 Mirror：`sync: null`、`snapshots: []`、`totalBytes: 0`；`complete`/`errors` 为全局聚合结果（任一 agent 失败，所有 Mirror 同值）。
+- agent 报告中匹配不到任何 Mirror 的 dataset（其他系统的卷、无 openebs userprop 的残留 dataset）被忽略；`mirrorz.json` 的 `size` 与 `status.sizeBytes`（kubelet 口径）不受影响。

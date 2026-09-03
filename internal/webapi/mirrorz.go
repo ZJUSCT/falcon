@@ -8,19 +8,24 @@ import (
 	"strconv"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	mirrorv1alpha1 "github.com/ZJUSCT/falcon/api/v1alpha1"
 )
 
 // The MirrorZ data format implemented here is v1.7 (documented as "Data
-// Format v1.7" in github.com/mirrorz-org/mirrorz, see also
-// src/schema/index.ts in that repo):
+// Format v1.7" in github.com/mirrorz-org/mirrorz):
 //
 //	{version?: number, site: Site, info: Info[], mirrors: Mirror[]}
 //	Site  {url, abbr, name?, ...}
-//	Mirror{cname, url, status, desc?, help?, upstream?, size?}
+//	Mirror{cname, url, status, desc?, help?, upstream?, size?, ...}
 //
-// status is a single letter of: "U" up-to-date, "S" syncing, "D" down,
-// "P" paused. There is no timestamp field in the v1 format.
+// mirrors[].status is a concat of `[A-Z](\d+)?` tokens: one main status
+// (S successful, D pending, Y syncing, F failed, P paused, C reverse proxy
+// with cache, R reverse proxy without cache, U unknown) plus any number of
+// auxiliary tokens (X next sync, N new mirror, O old success), each carrying
+// a unix timestamp where the spec allows one.
 const mirrorzVersion = 1.7
 
 type mirrorzSite struct {
@@ -49,50 +54,84 @@ type mirrorzDocument struct {
 	Mirrors []mirrorzMirror `json:"mirrors"`
 }
 
-// MirrorZ status letters.
+// MirrorZ status letters (main status; see the spec notes above).
 const (
-	mirrorzUpToDate = "U"
-	mirrorzSyncing  = "S"
-	mirrorzDown     = "D"
-	mirrorzPaused   = "P"
+	mirrorzSuccess      = "S"
+	mirrorzSyncing      = "Y"
+	mirrorzFailed       = "F"
+	mirrorzPaused       = "P"
+	mirrorzProxyCache   = "C"
+	mirrorzProxyNoCache = "R"
+	mirrorzUnknown      = "U"
 )
 
-// mirrorzStatusForMirrorPhase maps a Mirror status.phase onto the MirrorZ
-// status letter (see the phase enum in api/v1alpha1/mirror_types.go):
-//
-//	Ready                              -> U
-//	Syncing, Publishing, Initializing  -> S
-//	Paused                             -> P
-//	Degraded, Pending (and unknown "") -> D
-func mirrorzStatusForMirrorPhase(phase string) string {
-	switch phase {
-	case "Ready":
-		return mirrorzUpToDate
-	case "Syncing", "Publishing", "Initializing":
-		return mirrorzSyncing
-	case "Paused":
-		return mirrorzPaused
-	default:
-		// Degraded, Pending, "" — treat everything unpublishable as down.
-		return mirrorzDown
+// tsSuffix renders a unix-seconds suffix for a status token ("" when the
+// timestamp is unset — the spec makes the number optional).
+func tsSuffix(t *metav1.Time) string {
+	if t == nil || t.Unix() <= 0 {
+		return ""
 	}
+	return strconv.FormatInt(t.Unix(), 10)
 }
 
-// mirrorzStatusForProxyMirrorPhase maps a ProxyMirror status.phase:
-//
-//	Ready                       -> U
-//	Degraded                    -> D
-//	Pending (and unknown "")    -> S (the proxy is rolling out)
-func mirrorzStatusForProxyMirrorPhase(phase string) string {
-	switch phase {
-	case "Ready":
-		return mirrorzUpToDate
-	case "Degraded":
-		return mirrorzDown
-	default:
-		// Pending, "" — serving is being rolled out.
-		return mirrorzSyncing
+func appendToken(status, token string, timestamp *metav1.Time) string {
+	if suffix := tsSuffix(timestamp); suffix != "" {
+		return status + token + suffix
 	}
+	return status
+}
+
+func appendCreationToken(status string, created metav1.Time) string {
+	if created.IsZero() || created.Unix() <= 0 {
+		return status
+	}
+	return status + "N" + strconv.FormatInt(created.Unix(), 10)
+}
+
+// mirrorzStatusForMirror projects synchronization freshness independently of
+// endpoint health. buildMirrorZ has already established Ready=True before it
+// calls this function. Token order is main, O, X, N.
+func mirrorzStatusForMirror(m *mirrorv1alpha1.Mirror) string {
+	st := &m.Status
+	if st.CurrentSync != nil {
+		status := mirrorzSyncing + tsSuffix(st.CurrentSync.StartedAt)
+		status = appendToken(status, "O", st.LastPublishedAt)
+		return appendCreationToken(status, m.CreationTimestamp)
+	}
+	if m.Spec.Paused {
+		// mirrorz-monitor uses the P timestamp as a freshness fallback. Report
+		// the immutable publication's activation time so a paused but still
+		// usable endpoint is judged by the content it actually serves.
+		status := mirrorzPaused + tsSuffix(st.LastPublishedAt)
+		return appendCreationToken(status, m.CreationTimestamp)
+	}
+	if st.LastSync != nil && st.LastSync.Phase == mirrorv1alpha1.SyncPhaseSucceeded {
+		status := mirrorzSuccess + tsSuffix(st.LastPublishedAt)
+		status = appendToken(status, "X", st.NextSyncAt)
+		return appendCreationToken(status, m.CreationTimestamp)
+	}
+	if st.LastSync != nil && st.LastSync.Phase == mirrorv1alpha1.SyncPhaseFailed {
+		status := mirrorzFailed + tsSuffix(st.LastSync.FinishedAt)
+		status = appendToken(status, "O", st.LastPublishedAt)
+		status = appendToken(status, "X", st.NextSyncAt)
+		return appendCreationToken(status, m.CreationTimestamp)
+	}
+	return appendCreationToken(mirrorzUnknown, m.CreationTimestamp)
+}
+
+// mirrorzStatusForProxyMirror builds the status field of an included proxy.
+// Non-ready proxies are filtered out before this projection.
+func mirrorzStatusForProxyMirror(p *mirrorv1alpha1.ProxyMirror) string {
+	status := mirrorzProxyNoCache
+	if p.Spec.Proxy.Cache.Enabled != nil && *p.Spec.Proxy.Cache.Enabled {
+		status = mirrorzProxyCache
+	}
+	return appendCreationToken(status, p.CreationTimestamp)
+}
+
+func readyForCurrentGeneration(conditions []metav1.Condition, generation int64) bool {
+	condition := meta.FindStatusCondition(conditions, "Ready")
+	return condition != nil && condition.Status == metav1.ConditionTrue && condition.ObservedGeneration == generation
 }
 
 // pickDescription picks the display description from a LocalizedString:
@@ -114,14 +153,14 @@ func hostOnly(hostport string) string {
 }
 
 // reflectedHost matches the request Host (port stripped, case-insensitive)
-// against the serving hostname whitelist. It returns the matched (canonical,
+// against the publish hostname whitelist. It returns the matched (canonical,
 // lowercased request) host and true on a hit.
 func (s *Server) reflectedHost(requestHost string) (string, bool) {
 	host := strings.ToLower(hostOnly(requestHost))
 	if host == "" {
 		return "", false
 	}
-	for _, allowed := range s.ServingHostnames {
+	for _, allowed := range s.PublishHostnames {
 		if strings.ToLower(allowed) == host {
 			return host, true
 		}
@@ -130,7 +169,7 @@ func (s *Server) reflectedHost(requestHost string) (string, bool) {
 }
 
 // siteURLForRequest picks the site base URL for the request: the reflected
-// request host on a serving-hostname hit, the configured site URL otherwise.
+// request host on a publish-hostname hit, the configured site URL otherwise.
 func (s *Server) siteURLForRequest(requestHost string) string {
 	if host, ok := s.reflectedHost(requestHost); ok {
 		// Preserve the scheme of the configured site URL; the host comes from
@@ -198,7 +237,7 @@ func (s *Server) listAll(ctx context.Context) (*mirrorv1alpha1.MirrorList, *mirr
 
 // buildMirrorZ assembles the catalog. requestHost is the raw Host header of
 // the HTTP request (may be empty in tests): when it matches one of the
-// serving hostnames, the site section and every entry URL are reflected with
+// publish hostnames, the site section and every entry URL are reflected with
 // that host, otherwise the configured site URL is used.
 func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorzDocument, error) {
 	mirrors, proxies, err := s.listAll(ctx)
@@ -210,17 +249,17 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 	entries := make([]mirrorzMirror, 0, len(mirrors.Items)+len(proxies.Items))
 	for i := range mirrors.Items {
 		m := &mirrors.Items[i]
-		// Mirrors with nothing reachable are omitted: never-published ones
-		// (no publish PVC derived from a successful snapshot) and sync-only
-		// ones (no spec.services key enabled, so no way to access the
-		// content).
-		if m.Status.ActivePVC == "" || !m.Spec.Services.AnyEnabled() {
+		// The catalog contains only an explicitly requested HTTP endpoint
+		// that the controller has declared Ready for this exact CR
+		// generation. Sync-only, disabled, stale and unhealthy endpoints are
+		// omitted so MirrorZ consumers are never directed to them.
+		if m.Spec.Services.HTTP == nil || !readyForCurrentGeneration(m.Status.Conditions, m.Generation) {
 			continue
 		}
 		entries = append(entries, mirrorzMirror{
 			CName:    m.Name,
 			URL:      entryURL(baseURL, m.Name),
-			Status:   mirrorzStatusForMirrorPhase(m.Status.Phase),
+			Status:   mirrorzStatusForMirror(m),
 			Desc:     pickDescription(m.Spec.Info.Description),
 			Upstream: m.Spec.Info.Upstream,
 			Size:     mirrorzSize(m.Status.SizeBytes),
@@ -228,12 +267,13 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 	}
 	for i := range proxies.Items {
 		p := &proxies.Items[i]
-		// ProxyMirror holds no data locally, so there is no "never published"
-		// notion: every CR is listed.
+		if p.Spec.Services.HTTP == nil || !readyForCurrentGeneration(p.Status.Conditions, p.Generation) {
+			continue
+		}
 		entries = append(entries, mirrorzMirror{
 			CName:    p.Name,
 			URL:      entryURL(baseURL, p.Name),
-			Status:   mirrorzStatusForProxyMirrorPhase(p.Status.Phase),
+			Status:   mirrorzStatusForProxyMirror(p),
 			Desc:     pickDescription(p.Spec.Info.Description),
 			Upstream: p.Spec.Info.Upstream,
 		})

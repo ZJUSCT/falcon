@@ -38,8 +38,7 @@ func TestHandleRepoSpecOnlyYAML(t *testing.T) {
 			},
 		},
 		Status: mirrorv1alpha1.MirrorStatus{
-			Phase:     mirrorv1alpha1.PhaseDegraded, // must never leak
-			ActivePVC: "debian-sync-1",              // must never leak
+			ActivePVC: "debian-sync-1", // must never leak
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()
@@ -70,7 +69,6 @@ func TestHandleRepoJSONExtension(t *testing.T) {
 		Spec: mirrorv1alpha1.MirrorSpec{
 			Info: mirrorv1alpha1.MirrorInfo{Upstream: "rsync://ftp.debian.org/debian/"},
 		},
-		Status: mirrorv1alpha1.MirrorStatus{Phase: mirrorv1alpha1.PhaseReady},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()
 	srv := httptest.NewServer((&Server{Client: c}).Handler())
@@ -152,7 +150,6 @@ func TestHandleRepoProxyMirrorSpec(t *testing.T) {
 		Spec: mirrorv1alpha1.ProxyMirrorSpec{
 			Info: mirrorv1alpha1.ProxyMirrorInfo{Upstream: "https://pypi.org/simple/"},
 		},
-		Status: mirrorv1alpha1.ProxyMirrorStatus{Phase: mirrorv1alpha1.PhaseReady},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(p).Build()
 	srv := httptest.NewServer((&Server{Client: c}).Handler())

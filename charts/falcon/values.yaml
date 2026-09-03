@@ -58,7 +58,7 @@ controller:
     # For every published http service the controller generates an HTTPRoute
     # <name>-publish (PathPrefix /<name> -> Service <name>-publish-http:80);
     # rsync services only get a Service.
-    serving:
+    publish:
       gatewayRef: {}                   # falls back to global.gatewayRef
       hostnames:                       # served hostnames; mirrorz reflects the request Host
         - mirrors.zjusct.io
@@ -144,8 +144,8 @@ admin:
     labels: {}
     annotations: {}
 
-# Catalog hosts serving /mirrorz.json; by convention mirrors
-# controller.config.serving.hostnames.
+# Catalog hosts publishing /mirrorz.json; by convention mirrors
+# controller.config.publish.hostnames.
 catalog:
   enabled: true
   hosts:

@@ -155,13 +155,14 @@ func (s *stubUsageReader) PVCUsedBytes(_ context.Context, node, namespace, pvc s
 }
 
 // runningPublishPod builds the pod publishPVCUsage locates: a Running pod of
-// one publish service entry, carrying the mirror/role labels and a nodeName.
+// one publish service entry, carrying the mirror/component labels and a
+// nodeName.
 func runningPublishPod(mirror *mirrorv1alpha1.Mirror, protocol, nodeName string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: mirror.Namespace,
 			Name:      "smoke-publish-" + protocol + "-abcde",
-			Labels:    map[string]string{MirrorLabel: "smoke", RoleLabel: publishRole(protocol)},
+			Labels:    map[string]string{MirrorLabel: "smoke", ComponentLabel: publishRole(protocol)},
 		},
 		Spec: corev1.PodSpec{NodeName: nodeName},
 		Status: corev1.PodStatus{
@@ -249,7 +250,7 @@ func TestPublishActivationRecordsSizeBytes(t *testing.T) {
 	reconcile(t, ctx, reconciler, request) // sync PVC + Job
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
 	job := &batchv1.Job{}
-	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingJob}, job)
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncJobName(current)}, job)
 	job.Status.Succeeded = 1
 	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
 	if err := fakeClient.Status().Update(ctx, job); err != nil {
@@ -257,7 +258,7 @@ func TestPublishActivationRecordsSizeBytes(t *testing.T) {
 	}
 	reconcile(t, ctx, reconciler, request) // create snapshot
 	snapshot := &snapshotv1.VolumeSnapshot{}
-	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingSnapshot}, snapshot)
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncSnapshotName(current)}, snapshot)
 	ready := true
 	snapshot.Status = &snapshotv1.VolumeSnapshotStatus{ReadyToUse: &ready}
 	if err := fakeClient.Status().Update(ctx, snapshot); err != nil {
@@ -272,7 +273,7 @@ func TestPublishActivationRecordsSizeBytes(t *testing.T) {
 	if err := fakeClient.Status().Update(ctx, deployment); err != nil {
 		t.Fatalf("mark Deployment available: %v", err)
 	}
-	// The rollout is serving: a running publish pod exists on the storage
+	// The publish rollout is available: a running publish pod exists on the storage
 	// node, so activation can resolve the PVC usage.
 	if err := fakeClient.Create(ctx, runningPublishPod(mirror, "http", "s3.mirrors.zjusct.io")); err != nil {
 		t.Fatalf("create publish pod: %v", err)
@@ -280,8 +281,8 @@ func TestPublishActivationRecordsSizeBytes(t *testing.T) {
 
 	reconcile(t, ctx, reconciler, request) // activation
 	current = getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.ActivePVC == "" || current.Status.Phase != mirrorv1alpha1.PhaseReady {
-		t.Fatalf("expected a Ready activation, got %#v", current.Status)
+	if current.Status.ActivePVC == "" {
+		t.Fatalf("expected an activated publication, got %#v", current.Status)
 	}
 	if current.Status.SizeBytes != 640141257728 {
 		t.Fatalf("activation sizeBytes = %d, want 640141257728", current.Status.SizeBytes)
@@ -311,7 +312,6 @@ func TestIdlePathBackfillsSizeBytes(t *testing.T) {
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
 		ActiveSnapshot:     "smoke-snap-1756147200",

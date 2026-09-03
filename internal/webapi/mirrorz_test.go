@@ -28,34 +28,81 @@ func parseMirrorZBody(body []byte) (map[string]any, error) {
 	return doc, nil
 }
 
-func TestMirrorzStatusForMirrorPhase(t *testing.T) {
-	cases := map[string]string{
-		mirrorv1alpha1.PhaseReady:        "U",
-		mirrorv1alpha1.PhaseSyncing:      "S",
-		mirrorv1alpha1.PhasePublishing:   "S",
-		mirrorv1alpha1.PhaseInitializing: "S",
-		mirrorv1alpha1.PhasePaused:       "P",
-		mirrorv1alpha1.PhaseDegraded:     "D",
-		mirrorv1alpha1.PhasePending:      "D",
-		"":                               "D",
+func TestMirrorzStatusForMirror(t *testing.T) {
+	finished := metav1.Unix(1788388984, 0)
+	started := metav1.Unix(1788380000, 0)
+	published := metav1.Unix(1788300000, 0)
+	next := metav1.Unix(1788400000, 0)
+	created := metav1.Unix(1788000000, 0)
+
+	cases := []struct {
+		name   string
+		mirror mirrorv1alpha1.Mirror
+		want   string
+	}{
+		{
+			name: "successful completed transaction",
+			mirror: mirrorv1alpha1.Mirror{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: created}, Status: mirrorv1alpha1.MirrorStatus{
+				LastPublishedAt: &published,
+				NextSyncAt:      &next,
+				LastSync:        &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded, FinishedAt: &finished},
+			}},
+			want: "S1788300000X1788400000N1788000000",
+		},
+		{
+			name: "current transaction has no next-sync token",
+			mirror: mirrorv1alpha1.Mirror{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: created}, Status: mirrorv1alpha1.MirrorStatus{
+				LastPublishedAt: &published,
+				NextSyncAt:      &next,
+				CurrentSync:     &mirrorv1alpha1.MirrorCurrentSyncStatus{StartedAt: &started},
+			}},
+			want: "Y1788380000O1788300000N1788000000",
+		},
+		{
+			name: "paused uses the last publication time for freshness",
+			mirror: mirrorv1alpha1.Mirror{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: created}, Spec: mirrorv1alpha1.MirrorSpec{Paused: true}, Status: mirrorv1alpha1.MirrorStatus{
+				LastPublishedAt: &published,
+				NextSyncAt:      &next,
+			}},
+			want: "P1788300000N1788000000",
+		},
+		{
+			name: "failed transaction carries old success and retry time",
+			mirror: mirrorv1alpha1.Mirror{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: created}, Status: mirrorv1alpha1.MirrorStatus{
+				LastPublishedAt: &published,
+				NextSyncAt:      &next,
+				LastSync:        &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseFailed, FinishedAt: &finished},
+			}},
+			want: "F1788388984O1788300000X1788400000N1788000000",
+		},
+		{
+			name:   "unclassified state is unknown rather than pending",
+			mirror: mirrorv1alpha1.Mirror{},
+			want:   "U",
+		},
 	}
-	for phase, want := range cases {
-		if got := mirrorzStatusForMirrorPhase(phase); got != want {
-			t.Errorf("mirrorzStatusForMirrorPhase(%q) = %q, want %q", phase, got, want)
+	for _, tc := range cases {
+		if got := mirrorzStatusForMirror(&tc.mirror); got != tc.want {
+			t.Errorf("%s: mirrorzStatusForMirror() = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }
 
-func TestMirrorzStatusForProxyMirrorPhase(t *testing.T) {
-	cases := map[string]string{
-		mirrorv1alpha1.PhaseReady:    "U",
-		mirrorv1alpha1.PhaseDegraded: "D",
-		mirrorv1alpha1.PhasePending:  "S",
-		"":                           "S",
+func TestMirrorzStatusForProxyMirror(t *testing.T) {
+	cases := []struct {
+		cache bool
+		want  string
+	}{
+		{true, "CN1788000000"},
+		{false, "RN1788000000"},
 	}
-	for phase, want := range cases {
-		if got := mirrorzStatusForProxyMirrorPhase(phase); got != want {
-			t.Errorf("mirrorzStatusForProxyMirrorPhase(%q) = %q, want %q", phase, got, want)
+	for _, tc := range cases {
+		proxy := &mirrorv1alpha1.ProxyMirror{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.Unix(1788000000, 0)}}
+		if tc.cache {
+			proxy.Spec.Proxy.Cache.Enabled = func() *bool { value := true; return &value }()
+		}
+		if got := mirrorzStatusForProxyMirror(proxy); got != tc.want {
+			t.Errorf("mirrorzStatusForProxyMirror(cache=%t) = %q, want %q", tc.cache, got, tc.want)
 		}
 	}
 }
@@ -75,14 +122,13 @@ func TestHostOnlyStripsPort(t *testing.T) {
 	}
 }
 
-// httpService is the enabled http spec.services key the catalog fixtures
-// declare (a Mirror with every service disabled is sync-only and must be
+// httpService is the enabled (declared) http spec.services key the catalog
+// fixtures use (a Mirror with every key absent is sync-only and must be
 // omitted).
 func httpService() mirrorv1alpha1.MirrorServicesSpec {
 	return mirrorv1alpha1.MirrorServicesSpec{
-		HTTP: mirrorv1alpha1.MirrorHTTPServiceSpec{
+		HTTP: &mirrorv1alpha1.MirrorHTTPServiceSpec{
 			MirrorServiceSpec: mirrorv1alpha1.MirrorServiceSpec{
-				Enable: true,
 				PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
 						Name:  "web",
@@ -96,7 +142,7 @@ func httpService() mirrorv1alpha1.MirrorServicesSpec {
 }
 
 // mirrorzTestServer builds a Server over the standard fixtures with the
-// given serving hostname whitelist.
+// given publish hostname whitelist.
 func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 	t.Helper()
 	// Published and served, with a known on-disk usage.
@@ -109,27 +155,39 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 			},
 			Services: httpService(),
 		},
-		Status: mirrorv1alpha1.MirrorStatus{Phase: mirrorv1alpha1.PhaseReady, ActivePVC: "debian-sync-1", SizeBytes: 640141257728},
+		Status: mirrorv1alpha1.MirrorStatus{
+			ActivePVC:  "debian-sync-1",
+			SizeBytes:  640141257728,
+			LastSync:   &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded},
+			Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)},
+		},
 	}
-	// Never published (no activePVC): must be omitted even though Ready.
-	neverPublished := &mirrorv1alpha1.Mirror{
+	// A current-generation Ready=False endpoint must be omitted.
+	notReady := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "ubuntu", Namespace: "mirrors"},
 		Spec: mirrorv1alpha1.MirrorSpec{
 			Info:     mirrorv1alpha1.MirrorInfo{Upstream: "rsync://archive.ubuntu.com/ubuntu/"},
 			Services: httpService(),
 		},
-		Status: mirrorv1alpha1.MirrorStatus{Phase: mirrorv1alpha1.PhaseSyncing},
+		Status: mirrorv1alpha1.MirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionFalse)}},
 	}
-	// Sync-only (activePVC set but no services): published content exists,
-	// but there is no publish service to access it with — omitted.
+	// A sync-only Mirror has no HTTP endpoint and must be omitted even when
+	// its synchronization state is Ready.
 	syncOnly := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "alpine", Namespace: "mirrors"},
-		Status:     mirrorv1alpha1.MirrorStatus{Phase: mirrorv1alpha1.PhaseReady, ActivePVC: "alpine-sync-3"},
+		Status: mirrorv1alpha1.MirrorStatus{
+			ActivePVC:  "alpine-sync-3",
+			Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)},
+		},
 	}
 	syncing := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "arch", Namespace: "mirrors"},
 		Spec:       mirrorv1alpha1.MirrorSpec{Services: httpService()},
-		Status:     mirrorv1alpha1.MirrorStatus{Phase: mirrorv1alpha1.PhaseSyncing, ActivePVC: "arch-sync-2"},
+		Status: mirrorv1alpha1.MirrorStatus{
+			ActivePVC:   "arch-sync-2",
+			CurrentSync: &mirrorv1alpha1.MirrorCurrentSyncStatus{},
+			Conditions:  []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)},
+		},
 	}
 	proxy := &mirrorv1alpha1.ProxyMirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "pypi-proxy", Namespace: "mirrors"},
@@ -138,16 +196,17 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 				Description: localized("PyPI 缓存代理", "Caching proxy for PyPI"),
 				Upstream:    "https://pypi.org/simple/",
 			},
+			Services: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: &mirrorv1alpha1.ProxyMirrorServiceSpec{}},
 		},
-		Status: mirrorv1alpha1.ProxyMirrorStatus{Phase: mirrorv1alpha1.PhaseReady},
+		Status: mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
 	}
 
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(published, neverPublished, syncOnly, syncing, proxy).Build()
+		WithObjects(published, notReady, syncOnly, syncing, proxy).Build()
 	return &Server{
 		Client:           c,
 		Site:             SiteConfig{URL: "https://mirrors.zjusct.io", Abbr: "ZJU", Name: "Zhejiang University Mirror"},
-		ServingHostnames: hostnames,
+		PublishHostnames: hostnames,
 		CatalogEnabled:   true,
 	}
 }
@@ -166,9 +225,9 @@ func TestBuildMirrorZDocument(t *testing.T) {
 		t.Errorf("unexpected site: %+v", doc.Site)
 	}
 	if doc.Mirrors == nil || len(doc.Mirrors) != 3 {
-		t.Fatalf("got %d mirrors (%v), want 3 (never-published ubuntu and sync-only alpine omitted)", len(doc.Mirrors), doc.Mirrors)
+		t.Fatalf("got %d mirrors (%v), want 3 (not-ready ubuntu and sync-only alpine omitted)", len(doc.Mirrors), doc.Mirrors)
 	}
-	if doc.Mirrors[0].CName != "arch" || doc.Mirrors[0].Status != "S" {
+	if doc.Mirrors[0].CName != "arch" || doc.Mirrors[0].Status != "Y" {
 		t.Errorf("arch entry wrong: %+v", doc.Mirrors[0])
 	}
 	// Unknown usage (sizeBytes unset) omits the size field.
@@ -179,7 +238,7 @@ func TestBuildMirrorZDocument(t *testing.T) {
 	if doc.Mirrors[0].URL != "https://mirrors.zjusct.io/arch" {
 		t.Errorf("arch url = %q", doc.Mirrors[0].URL)
 	}
-	if doc.Mirrors[1].CName != "debian" || doc.Mirrors[1].Status != "U" {
+	if doc.Mirrors[1].CName != "debian" || doc.Mirrors[1].Status != "S" {
 		t.Errorf("debian entry wrong: %+v", doc.Mirrors[1])
 	}
 	// sizeBytes is rendered as the human-readable string the MirrorZ format
@@ -196,7 +255,7 @@ func TestBuildMirrorZDocument(t *testing.T) {
 	if doc.Mirrors[1].Upstream != "rsync://ftp.debian.org/debian/" {
 		t.Errorf("debian upstream = %q", doc.Mirrors[1].Upstream)
 	}
-	if doc.Mirrors[2].CName != "pypi-proxy" || doc.Mirrors[2].Status != "U" {
+	if doc.Mirrors[2].CName != "pypi-proxy" || doc.Mirrors[2].Status != "R" {
 		t.Errorf("pypi-proxy entry wrong: %+v", doc.Mirrors[2])
 	}
 	if doc.Mirrors[2].URL != "https://mirrors.zjusct.io/pypi-proxy" {
@@ -238,7 +297,7 @@ func TestBuildMirrorZDocument(t *testing.T) {
 	}
 }
 
-// TestHostReflectionHit: a request Host on the serving whitelist (port
+// TestHostReflectionHit: a request Host on the publish whitelist (port
 // stripped, case-insensitive) is reflected into the site section and every
 // entry URL.
 func TestHostReflectionHit(t *testing.T) {
@@ -287,13 +346,17 @@ func singleMirrorServer(t *testing.T, hostnames []string) *Server {
 	m := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors"},
 		Spec:       mirrorv1alpha1.MirrorSpec{Services: httpService()},
-		Status:     mirrorv1alpha1.MirrorStatus{Phase: mirrorv1alpha1.PhaseReady, ActivePVC: "debian-sync-1"},
+		Status: mirrorv1alpha1.MirrorStatus{
+			ActivePVC:  "debian-sync-1",
+			LastSync:   &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded},
+			Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)},
+		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()
 	return &Server{
 		Client:           c,
 		Site:             SiteConfig{URL: "https://mirrors.zjusct.io", Abbr: "ZJU"},
-		ServingHostnames: hostnames,
+		PublishHostnames: hostnames,
 		CatalogEnabled:   true,
 	}
 }
@@ -336,7 +399,7 @@ func TestHandleMirrorZ(t *testing.T) {
 		t.Fatalf("mirrors wrong: %v", doc["mirrors"])
 	}
 	entry := mirrors[0].(map[string]any)
-	if entry["cname"] != "debian" || entry["status"] != "U" || entry["url"] != "https://mirrors.zjusct.io/debian" {
+	if entry["cname"] != "debian" || entry["status"] != "S" || entry["url"] != "https://mirrors.zjusct.io/debian" {
 		t.Errorf("mirror entry wrong: %v", entry)
 	}
 	// sizeBytes is unknown (zero): the size field is omitted.

@@ -1,7 +1,7 @@
 {{- /*
 Catalog route: GET /mirrorz.json on catalog.hosts. Convention: use the same
-hosts as controller.config.serving.hostnames — the mirrorz document reflects
-the request Host, so every serving domain can serve its own catalog.
+hosts as controller.config.publish.hostnames — the mirrorz document reflects
+the request Host, so every publish domain can expose its own catalog.
 */ -}}
 {{- if .Values.catalog.enabled }}
 {{- if not .Values.catalog.hosts }}

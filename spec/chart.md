@@ -60,7 +60,7 @@ controller:
     sync.maxConcurrent: 4
     auth:
       github: {clientID: "", clientSecret: "", allowedUserIDs: []}
-    serving:
+    publish:
       gatewayRef: {}              # 空 = 回落 global.gatewayRef
       hostnames: [mirrors.zjusct.io, mirror.zju.edu.cn]
       labels: {}                  annotations: {}
@@ -91,7 +91,7 @@ admin:
   route: {gatewayRef: {}, parentRefs: [], labels: {}, annotations: {}}
 catalog:
   enabled: true
-  hosts: [mirrors.zjusct.io, mirror.zju.edu.cn]   # 惯例与 serving.hostnames 一致
+  hosts: [mirrors.zjusct.io, mirror.zju.edu.cn]   # 惯例与 publish.hostnames 一致
   route: {gatewayRef: {}, parentRefs: [], labels: {}, annotations: {}}
 ```
 
@@ -103,7 +103,7 @@ catalog:
 
 - `replicas = controller.replicaCount`；`revisionHistoryLimit`；SA 为 `falcon.serviceAccountName`；`terminationGracePeriodSeconds: 10`。策略 `Recreate`：旧控制器终止后才启动新控制器，单副本单写者，无滚动重叠窗口。
 - Pod securityContext：`runAsNonRoot: true`、`runAsUser/runAsGroup: 65532`、seccomp `RuntimeDefault`。容器 securityContext：`allowPrivilegeEscalation: false`、`drop: [ALL]`、`readOnlyRootFilesystem: true`。
-- args 仅 `--config=/etc/falcon/config.yaml`；env 注入 `POD_NAMESPACE`（fieldRef `metadata.namespace`）+ `extraEnv`；`zfsAgent.enabled` 时另注入 `ZFS_AGENT_SERVICE = <fullname>-zfs-agent`（webapi /api/usage 的唯一开关，未启用时不注入该变量，见 mirror spec §8.5）。
+- args 仅 `--config=/etc/falcon/config.yaml`；env 注入 `POD_NAMESPACE`（fieldRef `metadata.namespace`）+ `extraEnv`；`zfsAgent.enabled` 时另注入 `ZFS_AGENT_SERVICE = <fullname>-zfs-agent`（webapi /api/usage 的唯一开关，未启用时不注入该变量）。。
 - 容器端口声明（命名）：`metrics: 8080`、`health: 8081`、`webapi: 8082`。liveness GET `/healthz` 端口 health（period 10s、timeout 2s、failure 3）；readiness GET `/readyz` 同参数。
 - `falcon-config` ConfigMap 只读挂载到 `/etc/falcon`；`extraVolumes/extraVolumeMounts`、`nodeSelector/affinity/tolerations`、`global.imagePullSecrets`、`resources`、`podAnnotations/podLabels` 透传。
 - **监听地址 fail-fast**：`config.api.*BindAddress` 经默认补齐后不等于 `:8081`/`:8080`/`:8082` 之一即 `fail` 拒绝渲染——探针端口硬编码 8081，metrics/webapi Service 按端口号转发，改动会失配。
@@ -113,13 +113,13 @@ catalog:
 
 ### 5.1 config.yaml 渲染（falcon.config helper）
 
-`controller.config` 按 `internal/config` 的 schema 原样渲染为 `config.yaml`（schema 与默认值见 mirror spec §10.1）：`log.level`（空补 info）、api 三地址（空补默认）、`site.{url,abbr,name}`、`catalog.enabled`、`sync.maxConcurrent`（空补 0）、`serving.gatewayRef`（合并结果为空则整段省略）、`serving.hostnames`、`serving.labels/annotations`（空 dict 渲染为 `{}`）。
+`controller.config` 按 `internal/config` 的 schema 原样渲染为 `config.yaml`（schema 与默认值见 mirror spec「控制器配置文件」）：`log.level`（空补 info）、api 三地址（空补默认）、`site.{url,abbr,name}`、`catalog.enabled`、`sync.maxConcurrent`（空补 0）、`publish.gatewayRef`（合并结果为空则整段省略）、`publish.hostnames`、`publish.labels/annotations`（空 dict 渲染为 `{}`）。
 
-模板在渲染期复刻 Go 侧校验，以下情况 `fail`（渲染即报错，不部署非法配置）：`log.level` 不在 debug/info/warn/error；`site.url` 为空或不含 `://`；`serving.hostnames` 含空白项或含 `/`；hostnames 非空但合并后的 gatewayRef 无 `name`。
+模板在渲染期复刻 Go 侧校验，以下情况 `fail`（渲染即报错，不部署非法配置）：`log.level` 不在 debug/info/warn/error；`site.url` 为空或不含 `://`；`publish.hostnames` 含空白项或含 `/`；hostnames 非空但合并后的 gatewayRef 无 `name`。
 
 ### 5.2 gatewayRef 合并规则（mergeGatewayRef）
 
-以 `global.gatewayRef` 为底，段内（controller.config.serving / admin.route / catalog.route）出现的键覆盖、**值为空字符串的键删除**（`namespace: ""` 刻意表示"同 namespace"）、未出现的键继承；输出仅保留 name/namespace/sectionName 中的非空值。
+以 `global.gatewayRef` 为底，段内（controller.config.publish / admin.route / catalog.route）出现的键覆盖、**值为空字符串的键删除**（`namespace: ""` 刻意表示"同 namespace"）、未出现的键继承；输出仅保留 name/namespace/sectionName 中的非空值。
 
 `falcon.parentRefs`：段内 `parentRefs` 非空时整段原样渲染（高级逃生口），否则由段 gatewayRef 合并 global 推导一条 `{group: gateway.networking.k8s.io, kind: Gateway, name, namespace?, sectionName?}`；推导结果无 name 时 `fail`。
 
@@ -148,7 +148,7 @@ catalog:
 - `<fullname>-node-stats`（`controller.rbac.nodeStats=true`，默认）：规则仅 `""` 组 `nodes/proxy` 的 `get`。kubelet stats summary 经 API server 节点代理读取（`GET /api/v1/nodes/<node>/proxy/stats/summary`），是 Mirror `status.sizeBytes`（活跃发布 PVC 占用）的数据来源。关闭开关后 sizeBytes 恒不填充，其余功能不受影响。
 - `<fullname>-pv-reader`（随 `rbac.create` 恒渲染，无独立开关）：规则仅 `""` 组 `persistentvolumes` 的 `get`。发布放置由控制器从源 PV 的 nodeAffinity 推导（mirror spec §4.4：`status.workPVC` → volumeName → PV），读 PV 是发布负载创建的前置依赖——只读权限且为核心功能，故不做 opt-out。
 
-`discovery.k8s.io` endpointslices 一行随 `zfsAgent.enabled` 门控（保持 Role 最小化）：webapi 的 /api/usage 聚合器经 zfs-agent headless Service 的 EndpointSlices 发现就绪 agent 端点（mirror spec §8.5）；`zfsAgent.enabled=false` 时不渲染该规则，`/api/usage` 404，其余功能不受影响。
+`discovery.k8s.io` endpointslices 一行随 `zfsAgent.enabled` 门控（保持 Role 最小化）：webapi 的 /api/usage 聚合器经 zfs-agent headless Service 的 EndpointSlices 发现就绪 agent 端点（端点语义见 ui spec「API 字段语义」）；`zfsAgent.enabled=false` 时不渲染该规则，`/api/usage` 404，其余功能不受影响。
 
 CRD 是集群级资源，不进 RBAC；由 `crds/` 目录安装（见 §8）。
 
@@ -169,7 +169,7 @@ GitHub OAuth is configured under `controller.config.auth.github` (`clientID`, `c
 
 ### 7.3 目录 HTTPRoute（catalog）
 
-`catalog.enabled=true`（默认）时渲染 `<fullname>-catalog`：唯一规则 `Exact /mirrorz.json` → Service `<fullname>-webapi` 端口 80；`catalog.hosts` 为空时 `fail`；默认 hosts 与 `serving.hostnames` 惯例一致——mirrorz 内容按请求 Host 动态回显，每个 serving 域名可各自出目录。
+`catalog.enabled=true`（默认）时渲染 `<fullname>-catalog`：唯一规则 `Exact /mirrorz.json` → Service `<fullname>-webapi` 端口 80；`catalog.hosts` 为空时 `fail`；默认 hosts 与 `publish.hostnames` 惯例一致——mirrorz 内容按请求 Host 动态回显，每个发布域名可各自出目录。
 
 ### 7.4 webui 负载
 
@@ -179,7 +179,7 @@ GitHub OAuth is configured under `controller.config.auth.github` (`clientID`, `c
 
 `zfsAgent.enabled=true` 时渲染一对资源（存储后端为 openebs zfs-localpv 的站点才开启）：
 
-- `<fullname>-zfs-agent` DaemonSet：每存储节点一个 Pod，chroot 进宿主机只读执行 zfs/zpool 采集 dataset/快照用量，供控制器 webapi `GET /api/usage` 聚合（mirror spec §8.5）。容器 `privileged: true`（chroot + 宿主设备访问）、`readOnlyRootFilesystem: true`；刻意以 root 运行（不设 `runAsNonRoot`，也不设 `allowPrivilegeEscalation: false`——chroot 需要，privileged 已涵盖）。hostPath `/`（`type: Directory`）只读挂载到 `/host`，传播模式 `HostToContainer`；`automountServiceAccountToken: false`（agent 不访问 K8s API）。探针 GET `/healthz` 端口 zfs-agent：liveness period 10s、timeout 2s、failure 3；readiness period 5s、其余同。`zfsAgent.extraArgs/nodeSelector/tolerations/resources` 与 `global.imagePullSecrets` 透传；nodeSelector/tolerations 须与 openebs zfs-localpv node 的节点集合对齐（agent 只能看到本节点 pool）。
+- `<fullname>-zfs-agent` DaemonSet：每存储节点一个 Pod，chroot 进宿主机只读执行 zfs/zpool 采集 dataset/快照用量，供控制器 webapi `GET /api/usage` 聚合（端点语义见 ui spec「API 字段语义」）。容器 `privileged: true`（chroot + 宿主设备访问）、`readOnlyRootFilesystem: true`；刻意以 root 运行（不设 `runAsNonRoot`，也不设 `allowPrivilegeEscalation: false`——chroot 需要，privileged 已涵盖）。hostPath `/`（`type: Directory`）只读挂载到 `/host`，传播模式 `HostToContainer`；`automountServiceAccountToken: false`（agent 不访问 K8s API）。探针 GET `/healthz` 端口 zfs-agent：liveness period 10s、timeout 2s、failure 3；readiness period 5s、其余同。`zfsAgent.extraArgs/nodeSelector/tolerations/resources` 与 `global.imagePullSecrets` 透传；nodeSelector/tolerations 须与 openebs zfs-localpv node 的节点集合对齐（agent 只能看到本节点 pool）。
 - `<fullname>-zfs-agent` headless Service：`clusterIP: None`，selector 选中上述 Pod，端口 9474 → 命名端口 zfs-agent。
 - **端口不可配置**：9474 是 webapi 聚合器（代码常量）与本模板共同硬编码的约定，与控制器探针端口的 fail-fast 同理。
 - 启用时的联动：控制器 Deployment 注入 `ZFS_AGENT_SERVICE = <fullname>-zfs-agent`（§4）、Role 追加 endpointslices 规则（§6）；关闭则三者皆无，`/api/usage` 404。

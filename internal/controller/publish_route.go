@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -24,7 +24,7 @@ import (
 // Publish service keys allowed under spec.services. Only an enabled "http"
 // service gets a publish HTTPRoute; "rsync" is exposed through its Service
 // only (no route, no TCPRoute). "git" is not a key on purpose: git publishing
-// is HTTP serving (fastcgi-style container) expressed through the "http" key.
+// uses HTTP (a fastcgi-style container) expressed through the "http" key.
 const (
 	PublishProtocolHTTP  = "http"
 	PublishProtocolRsync = "rsync"
@@ -43,7 +43,7 @@ const (
 
 // publishChildName is the deterministic name of one service entry's publish
 // Deployment and Service: <base>-publish-<protocol> (e.g. <base>-publish-http).
-func publishChildName(base, protocol string) (string, error) {
+func publishChildName(base, protocol string) string {
 	return resourceName(base, "publish-"+protocol)
 }
 
@@ -66,15 +66,15 @@ func publishAppProtocol(protocol string) *string {
 // publishHTTPEnabled reports whether the "http" publish service is enabled —
 // the only service that receives a publish HTTPRoute.
 func publishHTTPEnabled(mirror *mirrorv1alpha1.Mirror) bool {
-	return mirror.Spec.Services.HTTP.Enable
+	return mirror.Spec.Services.HTTP != nil
 }
 
 // validatePublishPodTemplate checks the user-written pod template of an
 // enabled publish service: at least one container, whose first declared
 // container port becomes the Service target (the controller renames it to the
 // service key), and no user-declared volume clashing with a volume name the
-// controller injects itself. The CRD additionally enforces the enable-time
-// presence rules (mirrorMountPath / podTemplate.spec) at admission; the
+// controller injects itself. The CRD additionally enforces the
+// declaration-time podTemplate.spec presence rule at admission; the
 // controller-side check keeps the InvalidSpec path complete for specs that
 // bypassed it.
 func validatePublishPodTemplate(template *corev1.PodTemplateSpec, path *field.Path, reservedVolumeNames ...string) field.ErrorList {
@@ -107,38 +107,28 @@ func validatePublishPodTemplate(template *corev1.PodTemplateSpec, path *field.Pa
 //
 //   - ownerReference -> the CR (controller=true), so deleting the CR
 //     garbage-collects the route; no finalizer involved;
-//   - labels: the usual child labels plus config serving.labels;
-//   - annotations: config serving.annotations;
-//   - parentRefs: [config serving.gatewayRef] (namespace omitted when it
+//   - labels: the usual child labels plus config publish.labels;
+//   - annotations: config publish.annotations;
+//   - parentRefs: [config publish.gatewayRef] (namespace omitted when it
 //     equals the CR namespace);
-//   - hostnames: config serving.hostnames;
+//   - hostnames: config publish.hostnames;
 //   - one rule with one PathPrefix match PER public path (canonical first,
 //     then aliases in declaration order — matches within a rule are OR),
 //     all pointing at Service <base>-publish-http port 80.
 //
-// It is the caller's responsibility to only invoke this for CRs in a
-// published state, and only when config.ServingEnabled() is true
-// (with serving disabled existing routes are deliberately left alone).
+// It is the caller's responsibility to invoke this only when HTTP publishing
+// is desired and config.PublishEnabled() is true.
 func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record.EventRecorder, scheme *runtime.Scheme, cfg *config.Config, owner client.Object, pathPrefixes []string) error {
-	base, err := childBase(owner.GetName())
-	if err != nil {
-		return err
-	}
-	routeName, err := resourceName(base, "publish")
-	if err != nil {
-		return err
-	}
+	base := childBase(owner.GetName())
+	routeName := resourceName(base, "publish")
 	routeKey := types.NamespacedName{Namespace: owner.GetNamespace(), Name: routeName}
 	route := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: routeKey.Namespace, Name: routeKey.Name}}
 	// The route always targets the http service: the rsync service is
 	// Service-only and never routed.
-	httpServiceName, err := publishChildName(base, PublishProtocolHTTP)
-	if err != nil {
-		return err
-	}
+	httpServiceName := publishChildName(base, PublishProtocolHTTP)
 
-	labels := objectLabels(base, "publish")
-	maps.Copy(labels, cfg.Serving.Labels)
+	labels := objectLabels(base, publishRole(PublishProtocolHTTP))
+	maps.Copy(labels, cfg.Publish.Labels)
 
 	matches := make([]gatewayv1.HTTPRouteMatch, 0, len(pathPrefixes))
 	for _, prefix := range pathPrefixes {
@@ -152,12 +142,12 @@ func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record
 
 	op, err := controllerutil.CreateOrUpdate(ctx, c, route, func() error {
 		route.Labels = labels
-		route.Annotations = maps.Clone(cfg.Serving.Annotations)
+		route.Annotations = maps.Clone(cfg.Publish.Annotations)
 		route.Spec = gatewayv1.HTTPRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{publishGatewayParentRef(cfg, owner.GetNamespace())},
 			},
-			Hostnames: hostnamesAsGatewayHostnames(cfg.Serving.Hostnames),
+			Hostnames: hostnamesAsGatewayHostnames(cfg.Publish.Hostnames),
 			Rules: []gatewayv1.HTTPRouteRule{{
 				Matches: matches,
 				BackendRefs: []gatewayv1.HTTPBackendRef{{
@@ -180,10 +170,10 @@ func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record
 	if recorder != nil {
 		switch op {
 		case controllerutil.OperationResultCreated:
-			recorder.Eventf(owner, corev1.EventTypeNormal, "ServingRouteCreated",
+			recorder.Eventf(owner, corev1.EventTypeNormal, "PublishRouteCreated",
 				"Created publish HTTPRoute %s/%s (PathPrefix /%s)", routeKey.Namespace, routeKey.Name, owner.GetName())
 		case controllerutil.OperationResultUpdated:
-			recorder.Eventf(owner, corev1.EventTypeNormal, "ServingRouteUpdated",
+			recorder.Eventf(owner, corev1.EventTypeNormal, "PublishRouteUpdated",
 				"Updated publish HTTPRoute %s/%s", routeKey.Namespace, routeKey.Name)
 		}
 	}
@@ -191,18 +181,18 @@ func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record
 }
 
 // publishGatewayParentRef builds the single parentRef pointing at the
-// configured serving Gateway. The parentRef namespace is omitted when it
+// configured publish Gateway. The parentRef namespace is omitted when it
 // equals the CR namespace (same-namespace default of the Gateway API).
 func publishGatewayParentRef(cfg *config.Config, ownerNamespace string) gatewayv1.ParentReference {
 	ref := gatewayv1.ParentReference{
 		Group: ptr.To(gatewayv1.Group("gateway.networking.k8s.io")),
 		Kind:  ptr.To(gatewayv1.Kind("Gateway")),
-		Name:  gatewayv1.ObjectName(cfg.Serving.GatewayRef.Name),
+		Name:  gatewayv1.ObjectName(cfg.Publish.GatewayRef.Name),
 	}
-	if ns := cfg.Serving.GatewayRef.Namespace; ns != "" && ns != ownerNamespace {
+	if ns := cfg.Publish.GatewayRef.Namespace; ns != "" && ns != ownerNamespace {
 		ref.Namespace = ptr.To(gatewayv1.Namespace(ns))
 	}
-	if section := cfg.Serving.GatewayRef.SectionName; section != "" {
+	if section := cfg.Publish.GatewayRef.SectionName; section != "" {
 		ref.SectionName = ptr.To(gatewayv1.SectionName(section))
 	}
 	return ref
@@ -217,24 +207,45 @@ func hostnamesAsGatewayHostnames(hostnames []string) []gatewayv1.Hostname {
 }
 
 // ensurePublishedMirrorRoute guards the Mirror-specific invocation: only
-// published Mirrors (status.activePVC non-empty) get a publish route, serving
+// published Mirrors (status.activePVC non-empty) get a publish route, exposing
 // the canonical /<mirror name> path first and every declared http alias after
 // it (in declaration order).
 func ensurePublishedMirrorRoute(ctx context.Context, r *MirrorReconciler, mirror *mirrorv1alpha1.Mirror) error {
-	if !r.Config.ServingEnabled() {
+	if !r.Config.PublishEnabled() {
 		return nil
 	}
 	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, mirror, mirrorRoutePaths(mirror))
 }
 
-// ensureReadyProxyRoute guards the ProxyMirror-specific invocation: only
-// Ready proxies (deployment available) get a publish route. A proxy has no
-// aliases: its single public path is the canonical /<name>.
+// ensureReadyProxyRoute is the ProxyMirror-specific invocation. The route is
+// created while the Deployment converges so both resources can become ready
+// in parallel. A proxy has no aliases: its single public path is the canonical
+// /<name>.
 func ensureReadyProxyRoute(ctx context.Context, r *ProxyMirrorReconciler, proxy *mirrorv1alpha1.ProxyMirror) error {
-	if !r.Config.ServingEnabled() {
+	if !r.Config.PublishEnabled() {
 		return nil
 	}
 	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, proxy, []string{"/" + proxy.GetName()})
+}
+
+// deletePublishRouteFor removes the deterministic route when HTTP publishing
+// is no longer desired. NotFound is the steady state.
+func deletePublishRouteFor(ctx context.Context, c client.Client, owner client.Object) error {
+	route := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{
+		Namespace: owner.GetNamespace(),
+		Name:      resourceName(childBase(owner.GetName()), "publish"),
+	}}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(route), route); apierrors.IsNotFound(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if metav1.IsControlledBy(route, owner) {
+		if err := c.Delete(ctx, route); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // mirrorRoutePaths returns the public path prefixes a Mirror is served under:
@@ -242,47 +253,96 @@ func ensureReadyProxyRoute(ctx context.Context, r *ProxyMirrorReconciler, proxy 
 // in declaration order. The rsync service has no path representation.
 func mirrorRoutePaths(mirror *mirrorv1alpha1.Mirror) []string {
 	paths := []string{"/" + mirror.Name}
-	if mirror.Spec.Services.HTTP.Enable {
-		for _, alias := range mirror.Spec.Services.HTTP.Aliases {
+	if http := mirror.Spec.Services.HTTP; http != nil {
+		for _, alias := range http.Aliases {
 			paths = append(paths, string(alias))
 		}
 	}
 	return paths
 }
 
-// routePathsOverlap reports whether two Gateway API PathPrefix values can
-// both match the same request path: full equality or a prefix relationship at
-// a path segment boundary (Gateway API PathPrefix is segment-aware — /git
-// matches /git/linux.git but never /gitfoo).
-func routePathsOverlap(a, b string) bool {
-	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
-}
+type publishRouteState int
 
-// publishRouteConflict checks the mirror's public paths against every OTHER
-// Mirror of the namespace and returns a human-readable description of the
-// first conflict, or "" when the route can be generated. A conflicting route
-// is not created or updated (Degraded condition reason RouteConflict); the
-// publish workload is unaffected — only the route generation is withheld.
-// The check needs cluster state, so it runs per reconcile (and self-heals
-// through the caller's requeue) instead of in the spec validation.
-func (r *MirrorReconciler) publishRouteConflict(ctx context.Context, mirror *mirrorv1alpha1.Mirror) (string, error) {
-	paths := mirrorRoutePaths(mirror)
-	var others mirrorv1alpha1.MirrorList
-	if err := r.List(ctx, &others, client.InNamespace(mirror.Namespace)); err != nil {
-		return "", err
+const (
+	publishRoutePending publishRouteState = iota
+	publishRouteReady
+	publishRouteRejected
+)
+
+// publishRouteHealth requires current-generation Accepted=True and
+// ResolvedRefs=True. Explicit False means the desired endpoint is degraded;
+// Unknown, stale, or missing conditions mean the gateway is still converging.
+func publishRouteHealth(ctx context.Context, c client.Client, owner client.Object) (publishRouteState, string, error) {
+	routeName := resourceName(childBase(owner.GetName()), "publish")
+	route := &gatewayv1.HTTPRoute{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: owner.GetNamespace(), Name: routeName}, route); err != nil {
+		if apierrors.IsNotFound(err) {
+			return publishRoutePending, "waiting for HTTPRoute creation", nil
+		}
+		return publishRoutePending, "", err
 	}
-	for i := range others.Items {
-		other := &others.Items[i]
-		if other.Name == mirror.Name {
+	if len(route.Spec.ParentRefs) == 0 {
+		return publishRoutePending, "waiting for HTTPRoute parent reference", nil
+	}
+	desiredParent := route.Spec.ParentRefs[0]
+	for _, parent := range route.Status.Parents {
+		if !sameRouteParent(desiredParent, parent.ParentRef, route.Namespace) {
 			continue
 		}
-		for _, mine := range paths {
-			for _, theirs := range mirrorRoutePaths(other) {
-				if routePathsOverlap(mine, theirs) {
-					return fmt.Sprintf("public path %s overlaps %s of Mirror %q: the publish HTTPRoute would be ambiguous, so it is not created or updated (the publish workload is unaffected; resolve the overlap to restore route generation)", mine, theirs, other.Name), nil
+		accepted := false
+		resolved := false
+		for _, condition := range parent.Conditions {
+			if condition.ObservedGeneration != route.Generation {
+				continue
+			}
+			isAccepted := condition.Type == string(gatewayv1.RouteConditionAccepted)
+			isResolved := condition.Type == string(gatewayv1.RouteConditionResolvedRefs)
+			if !isAccepted && !isResolved {
+				continue
+			}
+			if condition.Status == metav1.ConditionFalse {
+				reason := condition.Reason
+				if reason == "" {
+					reason = "Rejected"
 				}
+				message := fmt.Sprintf("HTTPRoute %s %s=False (%s): %s", routeName, condition.Type, reason, condition.Message)
+				return publishRouteRejected, message, nil
+			}
+			if condition.Status == metav1.ConditionTrue {
+				accepted = accepted || isAccepted
+				resolved = resolved || isResolved
 			}
 		}
+		if accepted && resolved {
+			return publishRouteReady, "HTTPRoute is accepted and all references are resolved", nil
+		}
 	}
-	return "", nil
+	return publishRoutePending, "waiting for HTTPRoute Accepted=True and ResolvedRefs=True", nil
+}
+
+func sameRouteParent(desired, observed gatewayv1.ParentReference, routeNamespace string) bool {
+	group := func(ref gatewayv1.ParentReference) gatewayv1.Group {
+		if ref.Group == nil {
+			return gatewayv1.Group(gatewayv1.GroupName)
+		}
+		return *ref.Group
+	}
+	kind := func(ref gatewayv1.ParentReference) gatewayv1.Kind {
+		if ref.Kind == nil {
+			return "Gateway"
+		}
+		return *ref.Kind
+	}
+	namespace := func(ref gatewayv1.ParentReference) gatewayv1.Namespace {
+		if ref.Namespace == nil {
+			return gatewayv1.Namespace(routeNamespace)
+		}
+		return *ref.Namespace
+	}
+	return group(desired) == group(observed) &&
+		kind(desired) == kind(observed) &&
+		namespace(desired) == namespace(observed) &&
+		desired.Name == observed.Name &&
+		ptr.Deref(desired.SectionName, "") == ptr.Deref(observed.SectionName, "") &&
+		ptr.Deref(desired.Port, 0) == ptr.Deref(observed.Port, 0)
 }

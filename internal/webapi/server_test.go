@@ -17,7 +17,7 @@ import (
 func TestReadOnlyListenerRejectsNonGET(t *testing.T) {
 	m := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors"},
-		Status:     mirrorv1alpha1.MirrorStatus{Phase: mirrorv1alpha1.PhaseReady, ActivePVC: "debian-sync-1"},
+		Status:     mirrorv1alpha1.MirrorStatus{ActivePVC: "debian-sync-1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()
 	srv := httptest.NewServer((&Server{Client: c, Site: SiteConfig{URL: "https://mirrors.zjusct.io", Abbr: "ZJU"}}).Handler())

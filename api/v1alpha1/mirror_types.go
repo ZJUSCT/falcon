@@ -7,6 +7,9 @@ import (
 )
 
 const (
+	// Phase values are retained as the presentation vocabulary of the legacy
+	// /api/jobs endpoint. They are derived from conditions/currentSync and are
+	// no longer persisted in CR status.
 	PhasePending      = "Pending"
 	PhaseInitializing = "Initializing"
 	PhaseSyncing      = "Syncing"
@@ -15,7 +18,6 @@ const (
 	PhasePaused       = "Paused"
 	PhaseDegraded     = "Degraded"
 
-	SyncPhaseRunning   = "Running"
 	SyncPhaseSucceeded = "Succeeded"
 	SyncPhaseFailed    = "Failed"
 )
@@ -34,10 +36,12 @@ type MirrorInfo struct {
 }
 
 // MirrorSyncSpec describes one synchronization run. The Job-level knobs
-// (interval/retry/timeout/limits), the data mount point and the placement are
-// CR fields; everything else about the sync container lives in PodTemplate —
-// the full pod template of the sync Job, symmetric to the publish services'
-// podTemplate.
+// (interval/retry/timeout/limits) are CR fields; everything else about the
+// sync container lives in PodTemplate — the full pod template of the sync
+// Job, symmetric to the publish services' podTemplate. There are no placement
+// fields: sync pods reference the sync PVC, so the scheduler handles locality
+// natively (WaitForFirstConsumer decides the volume's node on first supply;
+// the bound PV's nodeAffinity pins every later sync pod) — see spec/k8s.md.
 type MirrorSyncSpec struct {
 	Interval metav1.Duration `json:"interval"`
 	// RetryInterval is the delay before the next synchronization attempt
@@ -47,17 +51,6 @@ type MirrorSyncSpec struct {
 	// +kubebuilder:default="15m"
 	RetryInterval metav1.Duration `json:"retryInterval"`
 	Timeout       metav1.Duration `json:"timeout"`
-	// DataMountPath is where the controller mounts the WRITABLE sync PVC
-	// (volume name `sync-data`, forced) inside the first container. It is the
-	// exact mount point. Everything else the sync process needs to know
-	// (paths, credentials, tuning) goes through the pod template / explicit
-	// env — the controller injects no implicit environment variables.
-	//
-	// There are no placement fields: sync pods reference the sync PVC, so the
-	// scheduler handles locality natively (WaitForFirstConsumer decides the
-	// volume's node on first supply; the bound PV's nodeAffinity pins every
-	// later sync pod) — see spec/k8s.md.
-	DataMountPath string `json:"dataMountPath,omitempty"`
 	// FailureRetryLimit caps the fast retry cadence: while
 	// status.consecutiveFailures is below this limit a failed run is retried
 	// after retryInterval; afterwards the next attempt waits for the regular
@@ -77,12 +70,14 @@ type MirrorSyncSpec struct {
 	// .spec.template): the user declares every container, image, command,
 	// args, env, probe, volume and so on — ConfigMap/Secret inputs included,
 	// as plain volumes/mounts. The controller forces the sync pipeline
-	// identity (the WRITABLE `sync-data` PVC volume mounted at dataMountPath
-	// into the first container, restartPolicy Never, the sync labels, the Job
-	// deadline) and injects defaults only where the template is silent
-	// (restricted-profile security defaults, a /tmp emptyDir, imagePullPolicy
-	// IfNotPresent). No placement is injected: volume locality is the
-	// scheduler's job.
+	// identity (the WRITABLE `sync-data` PVC volume in spec.volumes —
+	// mounting it, and where, is the user's own declaration —,
+	// restartPolicy Never, the sync labels, the Job deadline) and injects
+	// defaults only where the template is silent (restricted-profile
+	// security defaults, a /tmp emptyDir, imagePullPolicy IfNotPresent). No
+	// probes or environment variables are injected: data location and every
+	// other input the sync process needs are explicit user declarations.
+	// No placement is injected: volume locality is the scheduler's job.
 	// +optional
 	PodTemplate corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
@@ -119,38 +114,28 @@ type MirrorStorageSpec struct {
 
 // MirrorServiceSpec is one publish service of a Mirror, addressed by a fixed
 // key under spec.services ("http" or "rsync"). There is no third "git" key on
-// purpose: git publishing is HTTP serving (a fastcgi-style container behind
-// the web server), so it is expressed through the "http" key. Each enabled
-// service gets a Deployment and a Service named `<mirror>-publish-<key>`; only
-// an enabled "http" service additionally gets the publish HTTPRoute (rsync is
-// Service-only; a future RsyncRoute is out of scope).
-// +kubebuilder:validation:XValidation:rule="!self.enable || (has(self.mirrorMountPath) && self.mirrorMountPath.length() > 0)",message="mirrorMountPath is required when enable is true"
-// +kubebuilder:validation:XValidation:rule="!self.enable || has(self.podTemplate.spec)",message="podTemplate.spec is required when enable is true"
+// purpose: git publishing uses HTTP (a fastcgi-style container behind
+// the web server), so it is expressed through the "http" key. A key that
+// appears under spec.services is ENABLED — a valid enable requires podTemplate.spec (CEL-enforced, an empty block is rejected at admission); an absent
+// key is disabled. Each enabled service gets a Deployment and a Service named
+// `<mirror>-publish-<key>`; only an enabled "http" service additionally gets
+// the publish HTTPRoute (rsync is Service-only; a future RsyncRoute is out of
+// scope).
+// +kubebuilder:validation:XValidation:rule="has(self.podTemplate.spec)",message="podTemplate.spec is required when the service key is declared"
 type MirrorServiceSpec struct {
-	// Enable turns the service on. A key that does not appear in
-	// spec.services is disabled, and so is a key declared with
-	// enable: false — Enable is the single source of truth.
-	Enable bool `json:"enable,omitempty"`
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=3
 	Replicas *int32 `json:"replicas,omitempty"`
-	// MirrorMountPath is where the controller mounts the publish PVC
-	// (read-only) inside the first container when the service is enabled. It
-	// is the exact mount point: the controller does not append the mirror
-	// name (the publish HTTPRoute prefix remains /<mirror name>; point the
-	// web root, rsyncd module path or git http-backend root at this
-	// directory as the image requires).
-	MirrorMountPath string `json:"mirrorMountPath,omitempty"`
 	// PodTemplate is the FULL pod template of the publish Deployment
 	// (Deployment .spec.template): the user declares every container, port,
 	// probe, volume, affinity and so on. The controller forces the
 	// data-integrity constraints (the read-only `mirror-data` publish PVC
-	// volume mounted at mirrorMountPath, pod labels/annotations, placement,
-	// naming/selector identity) and injects defaults only where the template
-	// is silent (TCP readiness probe on the first container port, a /tmp
-	// emptyDir, readOnlyRootFilesystem and the restricted-profile security
-	// defaults).
+	// volume in spec.volumes — mounting it, and where, is the user's own
+	// declaration —, pod labels/annotations, placement, naming/selector
+	// identity) and injects defaults only where the template is silent (TCP
+	// readiness probe on the first container port, a /tmp emptyDir,
+	// readOnlyRootFilesystem and the restricted-profile security defaults).
 	// +optional
 	PodTemplate corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
@@ -163,7 +148,6 @@ type MirrorHTTPAlias string
 
 // MirrorHTTPServiceSpec is the http publish service of a Mirror: the base
 // MirrorServiceSpec plus additional public path prefixes (Aliases).
-// +kubebuilder:validation:XValidation:rule="!has(self.aliases) || self.aliases.all(a, a.matches('^/([^/\\s]+/)*[^/\\s]+$'))",message="each alias must start with '/', must not end with '/', and must not contain '//' or whitespace"
 type MirrorHTTPServiceSpec struct {
 	MirrorServiceSpec `json:",inline"`
 	// Aliases are ADDITIONAL public path prefixes served by the http service
@@ -174,32 +158,35 @@ type MirrorHTTPServiceSpec struct {
 	// portal links, documentation). Each alias gets a PathPrefix match on the
 	// publish HTTPRoute, appended after the canonical path in declaration
 	// order (matches within a rule are OR). Case-sensitive, uppercase
-	// allowed; an alias equal to the canonical path is rejected by the
-	// controller. Conflicts with other Mirrors' paths are detected at route
-	// generation time (RouteConflict condition).
+	// allowed; the syntax rules and the canonical-path/duplicate rules are
+	// enforced by the controller (validateHTTPAliases). Whether the gateway
+	// accepts the resulting routes (including precedence against other
+	// Mirrors' routes) is the Gateway API's own precedence and acceptance
+	// machinery; the controller surfaces an Accepted=False condition as
+	// Degraded instead of pre-filtering.
 	// +kubebuilder:validation:MaxItems=8
 	// +optional
 	Aliases []MirrorHTTPAlias `json:"aliases,omitempty"`
 }
 
 // MirrorServicesSpec holds the fixed publish service keys of a Mirror. An
-// absent key is disabled; a key declared with enable: false is disabled as
-// well.
+// absent key is disabled; a present key — which must carry a valid podTemplate (CEL-enforced); every
+// value at its default — is enabled.
 type MirrorServicesSpec struct {
 	// HTTP is the HTTP publish service (web server, git http-backend via
-	// fastcgi, ...). It owns the publish HTTPRoute when enabled, serving the
+	// fastcgi, ...). It owns the publish HTTPRoute when enabled, publishing the
 	// canonical /<mirror name> path plus any declared aliases.
-	HTTP MirrorHTTPServiceSpec `json:"http,omitempty"`
+	HTTP *MirrorHTTPServiceSpec `json:"http,omitempty"`
 	// Rsync is the rsync publish service. It only gets a Deployment and a
 	// ClusterIP Service — no Gateway API route (a future RsyncRoute is out
 	// of scope), and no path concept, hence no aliases.
-	Rsync MirrorServiceSpec `json:"rsync,omitempty"`
+	Rsync *MirrorServiceSpec `json:"rsync,omitempty"`
 }
 
 // AnyEnabled reports whether at least one publish service key is enabled (a
 // mirror with everything disabled syncs but publishes nothing).
 func (s MirrorServicesSpec) AnyEnabled() bool {
-	return s.HTTP.Enable || s.Rsync.Enable
+	return s.HTTP != nil || s.Rsync != nil
 }
 
 type MirrorSpec struct {
@@ -209,7 +196,7 @@ type MirrorSpec struct {
 	Storage MirrorStorageSpec `json:"storage"`
 	// Services declares how the active snapshot clone is published, through
 	// the fixed keys "http" and "rsync" (see MirrorServicesSpec). With every
-	// key disabled (including an entirely absent services object) the mirror
+	// key absent (including an entirely absent services object) the mirror
 	// is sync-only: the sync/snapshot pipeline still runs and the publish PVC
 	// is still produced, but no publish Deployment/Service/HTTPRoute is
 	// created.
@@ -219,18 +206,25 @@ type MirrorSpec struct {
 
 type MirrorSyncStatus struct {
 	JobName string `json:"jobName"`
-	// +kubebuilder:validation:Enum=Running;Succeeded;Failed
+	// +kubebuilder:validation:Enum=Succeeded;Failed
 	Phase      string       `json:"phase"`
 	StartedAt  *metav1.Time `json:"startedAt,omitempty"`
 	FinishedAt *metav1.Time `json:"finishedAt,omitempty"`
 	Message    string       `json:"message,omitempty"`
 }
 
+// MirrorCurrentSyncStatus is the durable identity of the synchronization
+// transaction currently in progress. Every child name is derived from the
+// Unix seconds of StartedAt, so persisting each deterministic name separately
+// would duplicate the same fact.
+type MirrorCurrentSyncStatus struct {
+	StartedAt   *metav1.Time `json:"startedAt"`
+	SyncRequest string       `json:"syncRequest,omitempty"`
+}
+
 type MirrorStatus struct {
-	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-	// +kubebuilder:validation:Enum=Pending;Initializing;Syncing;Publishing;Ready;Paused;Degraded
-	Phase   string `json:"phase,omitempty"`
-	WorkPVC string `json:"workPVC,omitempty"`
+	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
+	WorkPVC            string `json:"workPVC,omitempty"`
 	// ActivePVC is the name of the publish PVC currently published. Names
 	// embed the sync task's start time as a Unix seconds timestamp, e.g.
 	// `<mirror>-snap-1756158000`; the timestamp is allocated once when the
@@ -238,17 +232,9 @@ type MirrorStatus struct {
 	// VolumeSnapshot and the publish PVC.
 	ActivePVC string `json:"activePVC,omitempty"`
 	// ActiveSnapshot is the VolumeSnapshot the ActivePVC was cloned from.
-	ActiveSnapshot string `json:"activeSnapshot,omitempty"`
-	// PendingSyncTimestamp is the Unix seconds timestamp allocated when the
-	// sync task was created. It is embedded in the pending sync Job's name
-	// and in the pending snapshot and publish PVC names (which share the
-	// same name, `<mirror>-snap-<ts>`).
-	PendingSyncTimestamp int64        `json:"pendingSyncTimestamp,omitempty"`
-	PendingPVC           string       `json:"pendingPVC,omitempty"`
-	PendingSnapshot      string       `json:"pendingSnapshot,omitempty"`
-	PendingJob           string       `json:"pendingJob,omitempty"`
-	PendingSyncRequest   string       `json:"pendingSyncRequest,omitempty"`
-	NextSyncAt           *metav1.Time `json:"nextSyncAt,omitempty"`
+	ActiveSnapshot string                   `json:"activeSnapshot,omitempty"`
+	CurrentSync    *MirrorCurrentSyncStatus `json:"currentSync,omitempty"`
+	NextSyncAt     *metav1.Time             `json:"nextSyncAt,omitempty"`
 	// ConsecutiveFailures counts failed synchronization runs since the last
 	// successful publication. It drives the failure retry cadence (retryInterval
 	// below failureRetryLimit, interval afterwards) and resets to zero on
@@ -263,7 +249,7 @@ type MirrorStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Active PVC",type=string,JSONPath=`.status.activePVC`
 // +kubebuilder:printcolumn:name="Last Sync",type=date,JSONPath=`.status.lastSync.finishedAt`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`

@@ -148,8 +148,8 @@ checksum/config annotation, so any config change rolls the Deployment.
 Mirrors internal/config Config.Validate():
   - site.url is required and must carry a scheme;
   - log.level must be one of debug|info|warn|error;
-  - serving.hostnames entries must be bare, non-empty hostnames;
-  - serving.gatewayRef.name is required when serving.hostnames is set.
+  - publish.hostnames entries must be bare, non-empty hostnames;
+  - publish.gatewayRef.name is required when publish.hostnames is set.
 */}}
 {{- define "falcon.config" -}}
 {{- $cfg := .Values.controller.config -}}
@@ -161,17 +161,17 @@ Mirrors internal/config Config.Validate():
 {{- if not (contains "://" $siteURL) -}}
 {{- fail (printf "controller.config.site.url %q must carry a scheme (e.g. https://...)" $siteURL) -}}
 {{- end -}}
-{{- range $host := $cfg.serving.hostnames | default list -}}
+{{- range $host := $cfg.publish.hostnames | default list -}}
 {{- if eq (trim $host) "" -}}
-{{- fail "controller.config.serving.hostnames must not contain empty entries" -}}
+{{- fail "controller.config.publish.hostnames must not contain empty entries" -}}
 {{- end -}}
 {{- if contains "/" $host -}}
-{{- fail (printf "controller.config.serving.hostnames entry %q must be a bare hostname" $host) -}}
+{{- fail (printf "controller.config.publish.hostnames entry %q must be a bare hostname" $host) -}}
 {{- end -}}
 {{- end -}}
-{{- $gw := fromYaml (include "falcon.mergeGatewayRef" (dict "ctx" $ "section" $cfg.serving.gatewayRef)) -}}
-{{- if and (gt (len ($cfg.serving.hostnames | default list)) 0) (not $gw.name) -}}
-{{- fail "controller.config.serving.gatewayRef.name is required when serving.hostnames is set" -}}
+{{- $gw := fromYaml (include "falcon.mergeGatewayRef" (dict "ctx" $ "section" $cfg.publish.gatewayRef)) -}}
+{{- if and (gt (len ($cfg.publish.hostnames | default list)) 0) (not $gw.name) -}}
+{{- fail "controller.config.publish.gatewayRef.name is required when publish.hostnames is set" -}}
 {{- end -}}
 log:
   level: {{ $logLevel | quote }}
@@ -205,15 +205,15 @@ auth:
       {{- range ($cfg.auth.github.allowedUserIDs | default list) }}
       - {{ . }}
       {{- end }}
-serving:
+publish:
   {{- if $gw }}
   gatewayRef:
 {{ toYaml $gw | indent 4 }}
   {{- end }}
-  {{- with $cfg.serving.hostnames | default list }}
+  {{- with $cfg.publish.hostnames | default list }}
   hostnames:
 {{ toYaml . | indent 4 }}
   {{- end }}
-  labels: {{ toYaml ($cfg.serving.labels | default dict) | trim }}
-  annotations: {{ toYaml ($cfg.serving.annotations | default dict) | trim }}
+  labels: {{ toYaml ($cfg.publish.labels | default dict) | trim }}
+  annotations: {{ toYaml ($cfg.publish.annotations | default dict) | trim }}
 {{- end -}}

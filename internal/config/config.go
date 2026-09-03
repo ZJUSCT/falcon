@@ -2,7 +2,7 @@
 // configuration file (mounted from a ConfigMap at /etc/falcon/config.yaml).
 // It holds the complete runtime configuration: the former Deployment flags
 // (listen addresses, log level) and the behavior knobs
-// (site identity, catalog, sync concurrency, serving route publishing).
+// (site identity, catalog, sync concurrency, publish route generation).
 package config
 
 import (
@@ -13,7 +13,7 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// GatewayRef points at the Gateway that terminates traffic for the serving
+// GatewayRef points at the Gateway that terminates traffic for the publish
 // hostnames. An empty Namespace means "same namespace as the controller".
 type GatewayRef struct {
 	Name        string `json:"name,omitempty"`
@@ -21,11 +21,11 @@ type GatewayRef struct {
 	SectionName string `json:"sectionName,omitempty"`
 }
 
-// ServingConfig describes the publishing topology: which Gateway and
+// PublishConfig describes the publishing topology: which Gateway and
 // hostnames serve the mirrors, plus labels/annotations stamped onto every
-// generated HTTPRoute. An empty Hostnames list disables serving-route
+// generated HTTPRoute. An empty Hostnames list disables publish-route
 // generation (catalog/webapi keep working).
-type ServingConfig struct {
+type PublishConfig struct {
 	GatewayRef  GatewayRef        `json:"gatewayRef,omitempty"`
 	Hostnames   []string          `json:"hostnames,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
@@ -57,7 +57,7 @@ type Config struct {
 
 	Site struct {
 		// URL is the fallback site URL (no trailing slash) used by
-		// /mirrorz.json when the request Host is not in serving.hostnames.
+		// /mirrorz.json when the request Host is not in publish.hostnames.
 		URL  string `json:"url"`
 		Abbr string `json:"abbr,omitempty"`
 		Name string `json:"name,omitempty"`
@@ -74,7 +74,7 @@ type Config struct {
 		MaxConcurrent int `json:"maxConcurrent,omitempty"`
 	} `json:"sync,omitempty"`
 
-	Serving ServingConfig `json:"serving,omitempty"`
+	Publish PublishConfig `json:"publish,omitempty"`
 }
 
 // Default returns a Config filled with the built-in defaults. Load applies the
@@ -129,23 +129,23 @@ func (c *Config) Validate() error {
 	if !strings.Contains(c.Site.URL, "://") {
 		return fmt.Errorf("site.url %q must carry a scheme (e.g. https://...)", c.Site.URL)
 	}
-	if len(c.Serving.Hostnames) > 0 && c.Serving.GatewayRef.Name == "" {
-		return fmt.Errorf("serving.gatewayRef.name is required when serving.hostnames is set")
+	if len(c.Publish.Hostnames) > 0 && c.Publish.GatewayRef.Name == "" {
+		return fmt.Errorf("publish.gatewayRef.name is required when publish.hostnames is set")
 	}
-	for _, host := range c.Serving.Hostnames {
+	for _, host := range c.Publish.Hostnames {
 		if strings.TrimSpace(host) == "" {
-			return fmt.Errorf("serving.hostnames must not contain empty entries")
+			return fmt.Errorf("publish.hostnames must not contain empty entries")
 		}
 		if strings.Contains(host, "/") {
-			return fmt.Errorf("serving.hostnames entry %q must be a bare hostname", host)
+			return fmt.Errorf("publish.hostnames entry %q must be a bare hostname", host)
 		}
 	}
 	return nil
 }
 
-// ServingEnabled reports whether the controller should generate serving
-// HTTPRoutes: it requires at least one serving hostname (a Gateway name is
+// PublishEnabled reports whether the controller should generate publish
+// HTTPRoutes: it requires at least one publish hostname (a Gateway name is
 // guaranteed alongside by Validate).
-func (c *Config) ServingEnabled() bool {
-	return len(c.Serving.Hostnames) > 0
+func (c *Config) PublishEnabled() bool {
+	return len(c.Publish.Hostnames) > 0
 }

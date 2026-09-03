@@ -45,6 +45,10 @@ func mirrorPhase(t *testing.T, start *time.Time, finish *time.Time, phase string
 	return &mirrorv1alpha1.MirrorSyncStatus{JobName: "j", Phase: phase, StartedAt: started, FinishedAt: finished}
 }
 
+func testCondition(conditionType string, status metav1.ConditionStatus) metav1.Condition {
+	return metav1.Condition{Type: conditionType, Status: status, Reason: "Test"}
+}
+
 func TestLegacyStatusForMirrorPhase(t *testing.T) {
 	cases := map[string]string{
 		mirrorv1alpha1.PhasePending:      "Waiting",
@@ -63,6 +67,32 @@ func TestLegacyStatusForMirrorPhase(t *testing.T) {
 	}
 }
 
+func TestMirrorPresentationPhaseDerivesCurrentSyncStage(t *testing.T) {
+	cases := []struct {
+		reason      string
+		progressing metav1.ConditionStatus
+		degraded    metav1.ConditionStatus
+		want        string
+	}{
+		{"SynchronizationStarted", metav1.ConditionTrue, metav1.ConditionFalse, mirrorv1alpha1.PhaseInitializing},
+		{"SyncJobRunning", metav1.ConditionTrue, metav1.ConditionFalse, mirrorv1alpha1.PhaseSyncing},
+		{"Snapshotting", metav1.ConditionTrue, metav1.ConditionFalse, mirrorv1alpha1.PhasePublishing},
+		{"SnapshotTimestampConflict", metav1.ConditionFalse, metav1.ConditionTrue, mirrorv1alpha1.PhaseDegraded},
+	}
+	for _, tc := range cases {
+		mirror := &mirrorv1alpha1.Mirror{Status: mirrorv1alpha1.MirrorStatus{
+			CurrentSync: &mirrorv1alpha1.MirrorCurrentSyncStatus{},
+			Conditions: []metav1.Condition{
+				{Type: "Progressing", Status: tc.progressing, Reason: tc.reason},
+				{Type: "Degraded", Status: tc.degraded, Reason: tc.reason},
+			},
+		}}
+		if got := mirrorPresentationPhase(mirror); got != tc.want {
+			t.Errorf("reason %s: phase = %q, want %q", tc.reason, got, tc.want)
+		}
+	}
+}
+
 func TestListJobsMirrorEntry(t *testing.T) {
 	started := time.Date(2026, 8, 30, 8, 0, 0, 0, time.UTC)
 	finished := started.Add(30 * time.Minute)
@@ -70,10 +100,10 @@ func TestListJobsMirrorEntry(t *testing.T) {
 	m := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors"},
 		Status: mirrorv1alpha1.MirrorStatus{
-			Phase:      mirrorv1alpha1.PhaseReady,
 			ActivePVC:  "debian-sync-1756521600",
 			NextSyncAt: &metav1.Time{Time: finished.Add(6 * time.Hour)},
 			LastSync:   mirrorPhase(t, &started, &finished, mirrorv1alpha1.SyncPhaseSucceeded),
+			Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()
@@ -113,8 +143,8 @@ func TestListJobsFailedSyncMapsLastFailure(t *testing.T) {
 	m := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "arch", Namespace: "mirrors"},
 		Status: mirrorv1alpha1.MirrorStatus{
-			Phase:    mirrorv1alpha1.PhaseDegraded,
-			LastSync: mirrorPhase(t, &started, &finished, mirrorv1alpha1.SyncPhaseFailed),
+			LastSync:   mirrorPhase(t, &started, &finished, mirrorv1alpha1.SyncPhaseFailed),
+			Conditions: []metav1.Condition{testCondition("Degraded", metav1.ConditionTrue)},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()
@@ -140,7 +170,6 @@ func TestListJobsFailedSyncMapsLastFailure(t *testing.T) {
 func TestListJobsUnsyncedMirrorHasZeroTimestamps(t *testing.T) {
 	m := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "fresh", Namespace: "mirrors"},
-		Status:     mirrorv1alpha1.MirrorStatus{Phase: mirrorv1alpha1.PhasePending},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()
 	entries, err := (&Server{Client: c}).listJobs(t.Context())
@@ -164,7 +193,9 @@ func TestListJobsUnsyncedMirrorHasZeroTimestamps(t *testing.T) {
 func TestListJobsIncludesProxyMirror(t *testing.T) {
 	p := &mirrorv1alpha1.ProxyMirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "pypi-proxy", Namespace: "mirrors"},
-		Status:     mirrorv1alpha1.ProxyMirrorStatus{Phase: mirrorv1alpha1.PhaseReady},
+		Status: mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{
+			testCondition("Ready", metav1.ConditionTrue),
+		}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(p).Build()
 	entries, err := (&Server{Client: c}).listJobs(t.Context())
@@ -189,8 +220,8 @@ func TestHandleJobsLegacyFieldNames(t *testing.T) {
 	m := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors"},
 		Status: mirrorv1alpha1.MirrorStatus{
-			Phase:     mirrorv1alpha1.PhaseSyncing,
-			ActivePVC: "debian-sync-1",
+			CurrentSync: &mirrorv1alpha1.MirrorCurrentSyncStatus{},
+			ActivePVC:   "debian-sync-1",
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()

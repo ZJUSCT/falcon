@@ -23,7 +23,7 @@ import (
 // ProxyMirrorReconciler drives publish-only proxy mirrors. Unlike Mirror it
 // has no sync Job, no sync PVC and no snapshot lifecycle: it ensures a cache
 // PVC (optional), the http publish Service and Deployment, the publish
-// HTTPRoute once the proxy is Ready, and reports readiness through conditions.
+// HTTPRoute, and reports their combined readiness through conditions.
 // Cleanup of children relies purely on owner-reference GC, so no finalizer is
 // needed.
 type ProxyMirrorReconciler struct {
@@ -31,8 +31,8 @@ type ProxyMirrorReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 	Now      func() time.Time
-	// Config is the loaded controller configuration (required). The serving
-	// section (config serving.*) gates publish HTTPRoute generation.
+	// Config is the loaded controller configuration (required). The publish
+	// section (config publish.*) gates publish HTTPRoute generation.
 	Config *config.Config
 }
 
@@ -47,7 +47,7 @@ func (r *ProxyMirrorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *ProxyMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *ProxyMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, reconcileErr error) {
 	logger := log.FromContext(ctx)
 	proxy := &mirrorv1alpha1.ProxyMirror{}
 	if err := r.Get(ctx, req.NamespacedName, proxy); err != nil {
@@ -58,61 +58,87 @@ func (r *ProxyMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if !proxy.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil
 	}
+	defer func() {
+		result, reconcileErr = r.handleDerivedResourceInvalid(ctx, proxy, result, reconcileErr)
+	}()
+
+	// Disabling HTTP or cache must take effect even if another field in the
+	// updated spec is invalid.
+	if err := r.cleanupDisabledProxyChildren(ctx, proxy); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	if errs := validateProxyMirror(proxy); len(errs) > 0 {
 		message := errs.ToAggregate().Error()
 		logger.Info("ProxyMirror specification is invalid", "errors", message)
 		return r.patchStatus(ctx, proxy, func() {
 			proxy.Status.ObservedGeneration = proxy.Generation
-			proxy.Status.Phase = mirrorv1alpha1.PhaseDegraded
-			setProxyCondition(proxy, conditionReady, metav1.ConditionFalse, "InvalidSpec", message)
+			setProxyCondition(proxy, conditionReady, conditionStatus(proxy.Spec.Services.HTTP != nil && proxyWasReady(proxy)), "InvalidSpec", message)
 			setProxyCondition(proxy, conditionProgressing, metav1.ConditionFalse, "InvalidSpec", message)
 			setProxyCondition(proxy, conditionDegraded, metav1.ConditionTrue, "InvalidSpec", message)
 		})
 	}
-
-	cachePVC, err := r.ensureCachePVC(ctx, proxy)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// A ProxyMirror has no paused concept: the reconciler always ensures the
-	// declared publish services; to take a proxy mirror offline, delete the
-	// CR.
-	ready, serviceName, err := r.ensureProxyPublish(ctx, proxy)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	// A Ready proxy is published: ensure its publish HTTPRoute, but only when
-	// the http service is enabled and the config enables route generation —
-	// see ServingEnabled.
-	if ready && serviceName != "" {
-		if err := ensureReadyProxyRoute(ctx, r, proxy); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-	persistChildNames := func() {
-		proxy.Status.CachePVC = cachePVC
-		proxy.Status.PublishedServiceName = serviceName
-	}
-	if !ready {
-		return r.patchStatusWithResult(ctx, proxy, ctrl.Result{RequeueAfter: 5 * time.Second}, func() {
-			persistChildNames()
+	if proxy.Spec.Services.HTTP == nil {
+		return r.patchStatus(ctx, proxy, func() {
 			proxy.Status.ObservedGeneration = proxy.Generation
-			proxy.Status.Phase = mirrorv1alpha1.PhasePending
-			setProxyCondition(proxy, conditionReady, metav1.ConditionFalse, "ServingRollout", "waiting for the proxy Deployment to become available")
-			setProxyCondition(proxy, conditionProgressing, metav1.ConditionTrue, "ServingRollout", "updating the proxy Deployment")
-			setProxyCondition(proxy, conditionDegraded, metav1.ConditionFalse, "ServingRollout", "")
+			setProxyCondition(proxy, conditionReady, metav1.ConditionFalse, "HTTPDisabled", "spec.services.http is not configured")
+			setProxyCondition(proxy, conditionProgressing, metav1.ConditionFalse, "HTTPDisabled", "no publish service is requested")
+			setProxyCondition(proxy, conditionDegraded, metav1.ConditionFalse, "HTTPDisabled", "")
+		})
+	}
+	if err := r.ensureCachePVC(ctx, proxy); err != nil {
+		return ctrl.Result{}, err
+	}
+	if !r.Config.PublishEnabled() {
+		return r.patchStatus(ctx, proxy, func() {
+			proxy.Status.ObservedGeneration = proxy.Generation
+			setProxyCondition(proxy, conditionReady, metav1.ConditionFalse, "HTTPRouteDisabled", "HTTP publishing is disabled by controller configuration")
+			setProxyCondition(proxy, conditionProgressing, metav1.ConditionFalse, "HTTPRouteDisabled", "")
+			setProxyCondition(proxy, conditionDegraded, metav1.ConditionTrue, "HTTPRouteDisabled", "HTTP publishing is requested but route generation is disabled")
 		})
 	}
 
+	// A ProxyMirror has no paused concept: the reconciler always ensures the
+	// declared HTTP service; removing services.http takes it offline.
+	deploymentReady, err := r.ensureProxyPublish(ctx, proxy)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := ensureReadyProxyRoute(ctx, r, proxy); err != nil {
+		return ctrl.Result{}, err
+	}
+	routeState, routeMessage, err := publishRouteHealth(ctx, r.Client, proxy)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if routeState == publishRouteRejected {
+		if r.Recorder != nil {
+			r.Recorder.Event(proxy, corev1.EventTypeWarning, "HTTPRouteRejected", routeMessage)
+		}
+		return r.patchStatusWithResult(ctx, proxy, ctrl.Result{RequeueAfter: time.Minute}, func() {
+			proxy.Status.ObservedGeneration = proxy.Generation
+			setProxyCondition(proxy, conditionReady, metav1.ConditionFalse, "HTTPRouteRejected", routeMessage)
+			setProxyCondition(proxy, conditionProgressing, metav1.ConditionFalse, "HTTPRouteRejected", routeMessage)
+			setProxyCondition(proxy, conditionDegraded, metav1.ConditionTrue, "HTTPRouteRejected", routeMessage)
+		})
+	}
+	if !deploymentReady || routeState == publishRoutePending {
+		message := routeMessage
+		if !deploymentReady {
+			message = "waiting for the proxy Deployment to become available"
+		}
+		return r.patchStatusWithResult(ctx, proxy, ctrl.Result{RequeueAfter: 5 * time.Second}, func() {
+			proxy.Status.ObservedGeneration = proxy.Generation
+			setProxyCondition(proxy, conditionReady, metav1.ConditionFalse, "PublishProgressing", message)
+			setProxyCondition(proxy, conditionProgressing, metav1.ConditionTrue, "PublishProgressing", message)
+			setProxyCondition(proxy, conditionDegraded, metav1.ConditionFalse, "PublishRollout", "")
+		})
+	}
 	return r.patchStatus(ctx, proxy, func() {
-		persistChildNames()
 		proxy.Status.ObservedGeneration = proxy.Generation
-		proxy.Status.Phase = mirrorv1alpha1.PhaseReady
-		setProxyCondition(proxy, conditionReady, metav1.ConditionTrue, "Serving", "the proxy Deployment is available")
-		setProxyCondition(proxy, conditionProgressing, metav1.ConditionFalse, "Serving", "the proxy Deployment is available")
-		setProxyCondition(proxy, conditionDegraded, metav1.ConditionFalse, "Serving", "")
+		setProxyCondition(proxy, conditionReady, metav1.ConditionTrue, "Published", "the proxy Deployment and HTTPRoute are available")
+		setProxyCondition(proxy, conditionProgressing, metav1.ConditionFalse, "Published", "the proxy Deployment and HTTPRoute are available")
+		setProxyCondition(proxy, conditionDegraded, metav1.ConditionFalse, "Publish", "")
 	})
 }
 
@@ -142,14 +168,9 @@ func setProxyCondition(proxy *mirrorv1alpha1.ProxyMirror, conditionType string, 
 func validateProxyMirror(proxy *mirrorv1alpha1.ProxyMirror) field.ErrorList {
 	path := field.NewPath("spec")
 	var errs field.ErrorList
-	// publish-http is the longest suffix of any ProxyMirror child name
-	// (<base>-publish-http; the proxy has no rsync key).
-	if err := validateDerivedName(proxy.Name, "publish-http"); err != nil {
-		errs = append(errs, err)
-	}
-	// Only an ENABLED http service is validated (a disabled key may park
-	// anything).
-	if http := proxy.Spec.Services.HTTP; http.Enable {
+	// Only an ENABLED http service is validated (an absent key may park
+	// nothing — absent = disabled).
+	if http := proxy.Spec.Services.HTTP; http != nil {
 		errs = append(errs, validatePublishPodTemplate(&http.PodTemplate,
 			path.Child("services", "http", "podTemplate"), ProxyCacheVolumeName)...)
 	}

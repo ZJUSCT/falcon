@@ -23,15 +23,15 @@ import (
 	"github.com/ZJUSCT/falcon/internal/config"
 )
 
-// testConfig returns a config with serving enabled and an unlimited sync cap.
+// testConfig returns a config with publishing enabled and an unlimited sync cap.
 func testConfig() *config.Config {
 	cfg := config.Default()
 	cfg.Site.URL = "https://mirrors.zjusct.io"
 	cfg.Catalog.Enabled = true
-	cfg.Serving.GatewayRef = config.GatewayRef{Name: "nginx-gateway", SectionName: "https"}
-	cfg.Serving.Hostnames = []string{"mirrors.zjusct.io", "mirror.zju.edu.cn"}
-	cfg.Serving.Labels = map[string]string{"serving.zone": "campus"}
-	cfg.Serving.Annotations = map[string]string{"serving.example.com/note": "stamped"}
+	cfg.Publish.GatewayRef = config.GatewayRef{Name: "nginx-gateway", SectionName: "https"}
+	cfg.Publish.Hostnames = []string{"mirrors.zjusct.io", "mirror.zju.edu.cn"}
+	cfg.Publish.Labels = map[string]string{"publish.zone": "campus"}
+	cfg.Publish.Annotations = map[string]string{"publish.example.com/note": "stamped"}
 	if err := cfg.Validate(); err != nil {
 		panic(err)
 	}
@@ -39,18 +39,18 @@ func testConfig() *config.Config {
 }
 
 // assertPublishRouteShape pins the generated HTTPRoute shape: owner ref,
-// merged labels, stamped annotations, gateway parentRef, serving hostnames,
+// merged labels, stamped annotations, gateway parentRef, publish hostnames,
 // and a single PathPrefix /<name> -> <base>-publish-http:80 rule.
 func assertPublishRouteShape(t *testing.T, route *gatewayv1.HTTPRoute, owner client.Object, wantPath, wantService string) {
 	t.Helper()
 	if len(route.OwnerReferences) != 1 || route.OwnerReferences[0].UID != owner.GetUID() || !ptr.Deref(route.OwnerReferences[0].Controller, false) {
 		t.Fatalf("route must be owned (controller=true) by the CR: %#v", route.OwnerReferences)
 	}
-	if route.Labels["serving.zone"] != "campus" || route.Labels[RoleLabel] != "publish" {
-		t.Errorf("route labels must merge child + serving.labels: %v", route.Labels)
+	if route.Labels["publish.zone"] != "campus" || route.Labels[ComponentLabel] != "publish-http" {
+		t.Errorf("route labels must merge child + publish.labels: %v", route.Labels)
 	}
-	if route.Annotations["serving.example.com/note"] != "stamped" {
-		t.Errorf("route annotations must carry serving.annotations: %v", route.Annotations)
+	if route.Annotations["publish.example.com/note"] != "stamped" {
+		t.Errorf("route annotations must carry publish.annotations: %v", route.Annotations)
 	}
 	if len(route.Spec.ParentRefs) != 1 {
 		t.Fatalf("want exactly one parentRef, got %#v", route.Spec.ParentRefs)
@@ -92,7 +92,6 @@ func TestMirrorPausedKeepsPublishRoute(t *testing.T) {
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
 		ActiveSnapshot:     "smoke-snap-1756147200",
@@ -115,10 +114,6 @@ func TestMirrorPausedKeepsPublishRoute(t *testing.T) {
 	markPublishDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace)
 	reconcile(t, ctx, reconciler, request) // settles into Paused
 
-	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.Phase != mirrorv1alpha1.PhasePaused {
-		t.Fatalf("expected Paused, got %s", current.Status.Phase)
-	}
 	route := &gatewayv1.HTTPRoute{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
 	assertPublishRouteShape(t, route, mirror, "/smoke", "smoke-publish-http")
@@ -126,18 +121,17 @@ func TestMirrorPausedKeepsPublishRoute(t *testing.T) {
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
 }
 
-// TestServingDisabledSkipsRouteGeneration: with empty serving.hostnames no
+// TestPublishDisabledSkipsRouteGeneration: with empty publish.hostnames no
 // route is generated for a published Mirror (and nothing else breaks).
-func TestServingDisabledSkipsRouteGeneration(t *testing.T) {
+func TestPublishDisabledSkipsRouteGeneration(t *testing.T) {
 	ctx := context.Background()
 	cfg := testConfig()
-	cfg.Serving.Hostnames = nil
-	cfg.Serving.GatewayRef = config.GatewayRef{}
+	cfg.Publish.Hostnames = nil
+	cfg.Publish.GatewayRef = config.GatewayRef{}
 	mirror := testMirror()
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
 	}
@@ -160,8 +154,8 @@ func TestServingDisabledSkipsRouteGeneration(t *testing.T) {
 	reconcile(t, ctx, reconciler, request) // idle again
 
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.Phase != mirrorv1alpha1.PhaseReady {
-		t.Fatalf("expected Ready, got %s", current.Status.Phase)
+	if degraded := findCondition(current.Status.Conditions, conditionDegraded); degraded == nil || degraded.Status != metav1.ConditionTrue {
+		t.Fatalf("disabled route generation must report Degraded=True, got %#v", current.Status.Conditions)
 	}
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, &gatewayv1.HTTPRoute{})
 	// The publish workload itself is unaffected.
@@ -201,7 +195,6 @@ func TestMaxConcurrentQueuesSyncJob(t *testing.T) {
 	mirror.Annotations = map[string]string{SyncRequestAnnotation: "run-now"}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
 		LastSync: &mirrorv1alpha1.MirrorSyncStatus{
@@ -227,12 +220,12 @@ func TestMaxConcurrentQueuesSyncJob(t *testing.T) {
 
 	reconcile(t, ctx, reconciler, request) // repair publish workload first
 	markPublishDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace)
-	reconcile(t, ctx, reconciler, request) // startSync persists the pending Job name
+	reconcile(t, ctx, reconciler, request) // startSync persists the transaction identity
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.PendingJob == "" {
-		t.Fatalf("expected a pending Job name, got %#v", current.Status)
+	if currentSyncJobName(current) == "" {
+		t.Fatalf("expected a current Job name, got %#v", current.Status)
 	}
-	jobName := current.Status.PendingJob
+	jobName := currentSyncJobName(current)
 
 	reconcile(t, ctx, reconciler, request) // cap reached: queued, no Job object
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: jobName}, &batchv1.Job{})
@@ -267,17 +260,20 @@ func TestMaxConcurrentQueuesSyncJob(t *testing.T) {
 	}
 }
 
-// TestMirrorMountPathUsedVerbatim: the data PVC is mounted read-only at
-// exactly spec.services.http.mirrorMountPath — the controller no longer
-// appends the mirror name (the user template owns the full path layout).
-func TestMirrorMountPathUsedVerbatim(t *testing.T) {
+// TestMirrorDataVolumeInjectedVolumeOnly: the publish PVC is injected as the
+// reserved mirror-data VOLUME with a read-only volume source; the controller
+// adds no mounts — mounting it, and where, is the user template's own
+// declaration (a user-declared mount is preserved verbatim).
+func TestMirrorDataVolumeInjectedVolumeOnly(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Services.HTTP.MirrorMountPath = "/srv/www/debian"
+	// The user template mounts the injected mirror-data volume itself.
+	mirror.Spec.Services.HTTP.PodTemplate.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
+		{Name: "mirror-data", MountPath: "/srv/www/debian", ReadOnly: true},
+	}
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-sync-1756147200",
 	}
@@ -297,31 +293,49 @@ func TestMirrorMountPathUsedVerbatim(t *testing.T) {
 
 	deployment := &appsv1.Deployment{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
-	mount := findMount(deployment.Spec.Template.Spec.Containers[0], "mirror-data")
-	if mount == nil || mount.MountPath != "/srv/www/debian" {
-		t.Fatalf("mirror-data mount = %#v, want read-only /srv/www/debian (verbatim mirrorMountPath)", mount)
-	}
-	if !mount.ReadOnly {
-		t.Fatal("mirror-data mount must stay read-only")
-	}
 	volume := findVolume(deployment.Spec.Template.Spec.Volumes, "mirror-data")
 	if volume == nil || volume.PersistentVolumeClaim == nil || !volume.PersistentVolumeClaim.ReadOnly {
 		t.Fatalf("mirror-data volume source must be a read-only PVC reference, got %#v", volume)
 	}
-
-	// An enabled http service without mirrorMountPath is invalid: the mount
-	// point is the one thing the user must declare (no default exists any
-	// more).
-	broken := mirror.DeepCopy()
-	broken.Spec.Services.HTTP.MirrorMountPath = ""
-	if errs := validateMirror(broken); len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "mirrorMountPath") {
-		t.Fatalf("enabled service without mirrorMountPath must be InvalidSpec, got %v", errs)
+	// The user-declared mount is preserved verbatim; the controller appended
+	// nothing except the default /tmp emptyDir mount.
+	mount := findMount(deployment.Spec.Template.Spec.Containers[0], "mirror-data")
+	if mount == nil || mount.MountPath != "/srv/www/debian" || !mount.ReadOnly {
+		t.Fatalf("user mirror-data mount = %#v, want preserved read-only /srv/www/debian", mount)
 	}
-	// ... and a relative path is rejected as well.
-	broken = mirror.DeepCopy()
-	broken.Spec.Services.HTTP.MirrorMountPath = "srv/relative"
-	if errs := validateMirror(broken); len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "absolute path") {
-		t.Fatalf("relative mirrorMountPath must be InvalidSpec, got %v", errs)
+	mounts := deployment.Spec.Template.Spec.Containers[0].VolumeMounts
+	if len(mounts) != 2 || mounts[0].MountPath != "/srv/www/debian" || mounts[1].MountPath != "/tmp" {
+		t.Fatalf("the controller must append only the default /tmp mount, got %#v", mounts)
+	}
+
+	// A template silent about mirror-data gets the volume anyway — and no
+	// mount at all.
+	bare := testMirror()
+	bare.Finalizers = []string{MirrorFinalizer}
+	bare.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: bare.Generation,
+		WorkPVC:            "smoke-sync",
+		ActivePVC:          "smoke-sync-1756147200",
+	}
+	scheme = testScheme(t)
+	bareClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
+		WithObjects(bare).
+		Build()
+	addBoundSyncPVC(t, ctx, bareClient, bare, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	bareReconciler := &MirrorReconciler{
+		Client: bareClient, Scheme: scheme,
+		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
+	}
+	reconcile(t, ctx, bareReconciler, request)
+	bareDeployment := &appsv1.Deployment{}
+	get(t, ctx, bareClient, client.ObjectKey{Namespace: bare.Namespace, Name: "smoke-publish-http"}, bareDeployment)
+	if v := findVolume(bareDeployment.Spec.Template.Spec.Volumes, "mirror-data"); v == nil || v.PersistentVolumeClaim == nil || !v.PersistentVolumeClaim.ReadOnly {
+		t.Fatalf("a silent template must still get the read-only mirror-data volume, got %#v", v)
+	}
+	if m := findMount(bareDeployment.Spec.Template.Spec.Containers[0], "mirror-data"); m != nil {
+		t.Fatalf("a silent template must get no mirror-data mount, got %#v", m)
 	}
 }
 
@@ -333,10 +347,8 @@ func TestMirrorMountPathUsedVerbatim(t *testing.T) {
 func TestServicesRenderPerKey(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Services.Rsync = mirrorv1alpha1.MirrorServiceSpec{
-		Enable:          true,
-		Replicas:        ptr.To(int32(2)),
-		MirrorMountPath: "/export/mirror/smoke",
+	mirror.Spec.Services.Rsync = &mirrorv1alpha1.MirrorServiceSpec{
+		Replicas: ptr.To(int32(2)),
 		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
 				Name:  "rsyncd",
@@ -351,7 +363,6 @@ func TestServicesRenderPerKey(t *testing.T) {
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
 	}
@@ -371,7 +382,8 @@ func TestServicesRenderPerKey(t *testing.T) {
 
 	reconcile(t, ctx, reconciler, request) // creates both Service/Deployment pairs and the http route
 
-	// Both deployments exist and carry per-service labels/ports/mounts.
+	// Both deployments exist and carry per-service labels/ports and the
+	// shared read-only mirror-data volume.
 	httpDeployment := &appsv1.Deployment{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, httpDeployment)
 	rsyncDeployment := &appsv1.Deployment{}
@@ -379,17 +391,21 @@ func TestServicesRenderPerKey(t *testing.T) {
 	if got := *rsyncDeployment.Spec.Replicas; got != 2 {
 		t.Fatalf("rsync replicas = %d, want 2", got)
 	}
-	if got := rsyncDeployment.Spec.Selector.MatchLabels[RoleLabel]; got != "publish-rsync" {
-		t.Fatalf("rsync selector role = %q, want publish-rsync (per-service pods)", got)
+	if got := rsyncDeployment.Spec.Selector.MatchLabels[ComponentLabel]; got != "publish-rsync" {
+		t.Fatalf("rsync selector component = %q, want publish-rsync (per-service pods)", got)
 	}
 	rsyncContainer := rsyncDeployment.Spec.Template.Spec.Containers[0]
 	rsyncPorts := rsyncContainer.Ports
 	if len(rsyncPorts) != 2 || rsyncPorts[0].Name != "rsync" || rsyncPorts[0].ContainerPort != 8730 || rsyncPorts[1].Name != "metrics" {
 		t.Fatalf("rsync container ports = %#v; want the first port renamed to rsync and the second kept", rsyncPorts)
 	}
-	rsyncMount := findMount(rsyncContainer, "mirror-data")
-	if rsyncMount == nil || rsyncMount.MountPath != "/export/mirror/smoke" || !rsyncMount.ReadOnly {
-		t.Fatalf("rsync data mount = %#v; want read-only /export/mirror/smoke (same data PVC for every service key)", rsyncMount)
+	// The controller injects the mirror-data volume only: no mount of it is
+	// added to the rsync container either.
+	if rsyncMount := findMount(rsyncContainer, "mirror-data"); rsyncMount != nil {
+		t.Fatalf("the controller must not mount mirror-data itself, got %#v", rsyncMount)
+	}
+	if v := findVolume(rsyncDeployment.Spec.Template.Spec.Volumes, "mirror-data"); v == nil || v.PersistentVolumeClaim == nil || !v.PersistentVolumeClaim.ReadOnly {
+		t.Fatalf("every service key must get the read-only mirror-data volume, got %#v", v)
 	}
 
 	// Both services exist; only the http one is routed and carries appProtocol.
@@ -415,10 +431,11 @@ func TestServicesRenderPerKey(t *testing.T) {
 	// Readiness requires every enabled key: flip both, the Mirror settles Ready.
 	markDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace, "smoke-publish-http")
 	markDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace, "smoke-publish-rsync")
+	markRouteAccepted(t, ctx, fakeClient, mirror.Namespace, "smoke-publish")
 	reconcile(t, ctx, reconciler, request)
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.Phase != mirrorv1alpha1.PhaseReady {
-		t.Fatalf("expected Ready once every service rolled out, got %s (%#v)", current.Status.Phase, current.Status.Conditions)
+	if ready := findCondition(current.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionTrue {
+		t.Fatalf("expected Ready=True once every service and the route are available, got %#v", current.Status.Conditions)
 	}
 }
 
@@ -428,10 +445,8 @@ func TestServicesRenderPerKey(t *testing.T) {
 func TestRsyncOnlyMirrorGetsNoRoute(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Services.HTTP = mirrorv1alpha1.MirrorHTTPServiceSpec{}
-	mirror.Spec.Services.Rsync = mirrorv1alpha1.MirrorServiceSpec{
-		Enable:          true,
-		MirrorMountPath: "/export/mirror/smoke",
+	mirror.Spec.Services.HTTP = nil
+	mirror.Spec.Services.Rsync = &mirrorv1alpha1.MirrorServiceSpec{
 		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
 				Name:  "rsyncd",
@@ -443,7 +458,6 @@ func TestRsyncOnlyMirrorGetsNoRoute(t *testing.T) {
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
 	}
@@ -467,10 +481,10 @@ func TestRsyncOnlyMirrorGetsNoRoute(t *testing.T) {
 }
 
 // TestAbsentOrDisabledServicesCreateNoWorkload: anything that is not an
-// enabled service — an entirely absent services object, a key declared with
-// enable: false, or a Mirror that has never published a snapshot — creates no
-// publish children. All three shapes flow through the same enabled-keys
-// filter, so they are pinned in one place.
+// enabled service — an entirely absent services object, an absent http key
+// (absent = disabled), or a Mirror that has never published a snapshot —
+// creates no publish children. All these shapes flow through the same
+// present-keys filter, so they are pinned in one place.
 func TestAbsentOrDisabledServicesCreateNoWorkload(t *testing.T) {
 	ctx := context.Background()
 
@@ -482,7 +496,6 @@ func TestAbsentOrDisabledServicesCreateNoWorkload(t *testing.T) {
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
 	}
@@ -502,31 +515,31 @@ func TestAbsentOrDisabledServicesCreateNoWorkload(t *testing.T) {
 	reconcile(t, ctx, reconciler, request) // idle path: nothing to publish
 
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.Phase != mirrorv1alpha1.PhaseReady {
-		t.Fatalf("expected Ready, got %s", current.Status.Phase)
+	if ready := findCondition(current.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionTrue {
+		t.Fatalf("expected sync-only Mirror to be Ready, got %#v", current.Status.Conditions)
 	}
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &corev1.Service{})
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, &gatewayv1.HTTPRoute{})
 
-	// A key declared with enable: false is as good as absent — no workload
-	// for it, while the other enabled key still publishes.
+	// An absent key is as good as disabled — no workload for it, while the
+	// present key still publishes.
 	mirror = testMirror()
-	mirror.Spec.Services.Rsync = mirrorv1alpha1.MirrorServiceSpec{
-		Enable:          false,
-		MirrorMountPath: "/export/mirror/smoke",
-		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{
-				Name:  "rsyncd",
-				Image: "docker.io/library/busybox:1.37.0",
-				Ports: []corev1.ContainerPort{{Name: "rsync", ContainerPort: 8730, Protocol: corev1.ProtocolTCP}},
+	mirror.Spec.Services.HTTP = &mirrorv1alpha1.MirrorHTTPServiceSpec{
+		MirrorServiceSpec: mirrorv1alpha1.MirrorServiceSpec{
+			PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  "web",
+					Image: "nginxinc/nginx-unprivileged:1.31.0-alpine",
+					Ports: []corev1.ContainerPort{{Name: "web", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
+				}},
 			}},
-		}},
+		},
 	}
+	mirror.Spec.Services.Rsync = nil
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
 	}
@@ -543,7 +556,7 @@ func TestAbsentOrDisabledServicesCreateNoWorkload(t *testing.T) {
 	}
 	reconcile(t, ctx, reconciler, request)
 
-	// The enabled http key publishes; the disabled rsync key does not.
+	// The present http key publishes; the absent rsync key does not.
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-rsync"}, &appsv1.Deployment{})
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-rsync"}, &corev1.Service{})
@@ -576,7 +589,6 @@ func TestPublishDefaultsInjectedWhereSilent(t *testing.T) {
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
 	}
@@ -639,7 +651,6 @@ func TestPublishDefaultsInjectedWhereSilent(t *testing.T) {
 func TestPublishUserSettingsWin(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Services.HTTP.MirrorMountPath = "/srv/mirror/smoke"
 	mirror.Spec.Services.HTTP.PodTemplate = corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      map[string]string{"pool": "edge"},
@@ -665,7 +676,6 @@ func TestPublishUserSettingsWin(t *testing.T) {
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
 	}
@@ -700,23 +710,19 @@ func TestPublishUserSettingsWin(t *testing.T) {
 	if got := deployment.Spec.Template.Labels["pool"]; got != "edge" {
 		t.Fatalf("user pod label lost: %#v", deployment.Spec.Template.Labels)
 	}
-	if deployment.Spec.Template.Labels[RoleLabel] != "publish-http" {
-		t.Fatalf("forced role label must win: %#v", deployment.Spec.Template.Labels)
+	if deployment.Spec.Template.Labels[ComponentLabel] != "publish-http" {
+		t.Fatalf("forced component label must win: %#v", deployment.Spec.Template.Labels)
 	}
 	if got := deployment.Spec.Template.Annotations["example.com/owner"]; got != "webteam" {
 		t.Fatalf("user pod annotation lost: %#v", deployment.Spec.Template.Annotations)
 	}
-	if got := deployment.Spec.Template.Annotations[ActivePVCAnnotation]; got != "smoke-snap-1756147200" {
-		t.Fatalf("forced active-pvc annotation missing: %#v", deployment.Spec.Template.Annotations)
-	}
 }
 
-// TestMirrorDataMountsAreForcedReadOnly: an extra user mount of the injected
+// TestMirrorDataMountsAreForcedReadOnly: any user mount of the injected
 // mirror-data volume is allowed only read-only; a writable one is InvalidSpec,
 // and a user volume named mirror-data is rejected as reserved.
 func TestMirrorDataMountsAreForcedReadOnly(t *testing.T) {
 	mirror := testMirror()
-	mirror.Spec.Services.HTTP.MirrorMountPath = "/srv/mirror/smoke"
 	mirror.Spec.Services.HTTP.PodTemplate.Spec.Containers = append(mirror.Spec.Services.HTTP.PodTemplate.Spec.Containers, corev1.Container{
 		Name:         "sidecar",
 		Image:        "docker.io/library/busybox:1.37.0",
@@ -730,7 +736,6 @@ func TestMirrorDataMountsAreForcedReadOnly(t *testing.T) {
 
 	// Read-only extra mounts are fine.
 	mirror = testMirror()
-	mirror.Spec.Services.HTTP.MirrorMountPath = "/srv/mirror/smoke"
 	mirror.Spec.Services.HTTP.PodTemplate.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
 		{Name: "mirror-data", MountPath: "/srv/mirror/smoke/index", ReadOnly: true},
 	}
@@ -740,7 +745,6 @@ func TestMirrorDataMountsAreForcedReadOnly(t *testing.T) {
 
 	// A user-declared volume named mirror-data collides with the injection.
 	mirror = testMirror()
-	mirror.Spec.Services.HTTP.MirrorMountPath = "/srv/mirror/smoke"
 	mirror.Spec.Services.HTTP.PodTemplate.Spec.Volumes = []corev1.Volume{{
 		Name:         "mirror-data",
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
@@ -772,18 +776,6 @@ func TestPublishTemplateWithoutPortsOrContainersIsInvalid(t *testing.T) {
 	if len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "containers") {
 		t.Fatalf("an enabled service without containers must be InvalidSpec, got %v", errs)
 	}
-
-	// A DISABLED key may park a template that would not validate.
-	disabled := mirror.DeepCopy()
-	disabled.Spec.Services.Rsync = mirrorv1alpha1.MirrorServiceSpec{
-		Enable: false,
-		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{Name: "x", Image: "img"}},
-		}},
-	}
-	if errs := validateMirror(disabled); len(errs) != 0 {
-		t.Fatalf("a disabled key must not be validated, got %v", errs)
-	}
 }
 
 // publishedMirrorFixture returns a published, Ready Mirror whose http service
@@ -797,30 +789,29 @@ func publishedMirrorFixture(t *testing.T, name string, aliases ...mirrorv1alpha1
 		UID:        types.UID("uid-" + name),
 		Generation: 1,
 	}
-	base, _ := childBase(name)
-	mirror.Spec.Services.HTTP.MirrorServiceSpec = mirrorv1alpha1.MirrorServiceSpec{
-		Enable:          true,
-		MirrorMountPath: "/srv/mirror/" + base,
-		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{
-				Name:  "web",
-				Image: "nginxinc/nginx-unprivileged:1.31.0-alpine",
-				Ports: []corev1.ContainerPort{{Name: "web", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
+	base := childBase(name)
+	mirror.Spec.Services.HTTP = &mirrorv1alpha1.MirrorHTTPServiceSpec{
+		MirrorServiceSpec: mirrorv1alpha1.MirrorServiceSpec{
+			PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  "web",
+					Image: "nginxinc/nginx-unprivileged:1.31.0-alpine",
+					Ports: []corev1.ContainerPort{{Name: "web", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
+				}},
 			}},
-		}},
+		},
 	}
 	mirror.Spec.Services.HTTP.Aliases = aliases
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            base + "-sync",
 		ActivePVC:          base + "-snap-1756147200",
 	}
 	scheme := testScheme(t)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}, &gatewayv1.HTTPRoute{}).
 		WithObjects(mirror).
 		Build()
 	addBoundSyncPVC(t, ctx, fakeClient, mirror, base+"-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
@@ -892,81 +883,281 @@ func TestAliasValidation(t *testing.T) {
 		}
 	}
 
-	// A DISABLED http key may park invalid aliases.
-	disabled := testMirror()
-	disabled.Spec.Services.HTTP = mirrorv1alpha1.MirrorHTTPServiceSpec{}
-	disabled.Spec.Services.HTTP.Aliases = []mirrorv1alpha1.MirrorHTTPAlias{"no-leading-slash", "/smoke"}
-	if errs := validateMirror(disabled); len(errs) != 0 {
-		t.Fatalf("aliases of a disabled http key must not be validated, got %v", errs.ToAggregate())
+	// An ABSENT http key is never validated — and with enable gone, aliases
+	// (which live on the key) simply cannot be parked anywhere else.
+	absent := testMirror()
+	absent.Spec.Services.HTTP = nil
+	if errs := validateMirror(absent); len(errs) != 0 {
+		t.Fatalf("aliases of an absent http key must not be validated, got %v", errs.ToAggregate())
 	}
 }
 
-// TestRouteConflictWithholdsRouteKeepsWorkload: when this Mirror's canonical
-// path or an alias overlaps (equality or segment-boundary prefix) another
-// Mirror's paths in the same namespace, the route is not created/updated and
-// the Mirror degrades with reason RouteConflict — while the publish workload
-// keeps running. Non-overlapping lookalike paths (/gitlinux vs /git) do not
-// conflict.
-func TestRouteConflictWithholdsRouteKeepsWorkload(t *testing.T) {
-	// The "git" Mirror's canonical path /git prefix-overlaps smoke's alias
-	// /git/linux.git (Gateway API PathPrefix is segment-aware).
-	conflicting := testMirror()
-	conflicting.Name = "git"
-	conflicting.UID = types.UID("uid-git")
-	conflicting.Spec.Services.HTTP.MirrorServiceSpec = mirrorv1alpha1.MirrorServiceSpec{
-		Enable:          true,
-		MirrorMountPath: "/srv/mirror/git",
-		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{
-				Name: "web", Image: "nginxinc/nginx-unprivileged:1.31.0-alpine",
-				Ports: []corev1.ContainerPort{{Name: "web", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
-			}},
-		}},
+// routeParentStatus builds HTTPRoute parent status carrying a single
+// Accepted condition with the given verdict.
+func routeParentStatus(route *gatewayv1.HTTPRoute, status metav1.ConditionStatus, reason, message string) []gatewayv1.RouteParentStatus {
+	return []gatewayv1.RouteParentStatus{{
+		ControllerName: gatewayv1.GatewayController("gateway.networking.k8s.io/nginx-gateway"),
+		ParentRef:      route.Spec.ParentRefs[0],
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(gatewayv1.RouteConditionAccepted),
+				Status:             status,
+				ObservedGeneration: route.Generation,
+				LastTransitionTime: metav1.NewTime(time.Date(2026, 9, 3, 8, 0, 0, 0, time.UTC)),
+				Reason:             reason,
+				Message:            message,
+			},
+			{
+				Type:               string(gatewayv1.RouteConditionResolvedRefs),
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: route.Generation,
+				LastTransitionTime: metav1.NewTime(time.Date(2026, 9, 3, 8, 0, 0, 0, time.UTC)),
+				Reason:             "ResolvedRefs",
+			},
+		},
+	}}
+}
+
+func markRouteAccepted(t *testing.T, ctx context.Context, c client.Client, namespace, name string) {
+	t.Helper()
+	route := &gatewayv1.HTTPRoute{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, route); err != nil {
+		routes := &gatewayv1.HTTPRouteList{}
+		_ = c.List(ctx, routes)
+		t.Fatalf("get HTTPRoute %s/%s: %v; existing routes: %#v", namespace, name, err, routes.Items)
 	}
-	conflicting.Finalizers = []string{MirrorFinalizer}
-	conflicting.Status = mirrorv1alpha1.MirrorStatus{
-		ObservedGeneration: conflicting.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
+	route.Status.Parents = routeParentStatus(route, metav1.ConditionTrue, "Accepted", "Route is accepted")
+	if err := c.Update(ctx, route); err != nil {
+		t.Fatalf("mark HTTPRoute accepted: %v", err)
+	}
+}
+
+func TestCurrentSyncObservesActivePublicationWithoutRevertingRollout(t *testing.T) {
+	ctx := context.Background()
+	mirror := testMirror()
+	mirror.Finalizers = []string{MirrorFinalizer}
+	mirror.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: mirror.Generation,
+		WorkPVC:            "smoke-sync",
+		ActivePVC:          "smoke-snap-old",
+		CurrentSync:        &mirrorv1alpha1.MirrorCurrentSyncStatus{StartedAt: timePtr(time.Unix(1788393600, 0))},
+	}
+	scheme := testScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
+		WithObjects(mirror).Build()
+	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	reconciler := &MirrorReconciler{Client: fakeClient, Scheme: scheme, Config: testConfig(), SyncLimiter: NewSyncLimiter(0)}
+	if _, err := reconciler.ensurePublish(ctx, mirror, mirror.Status.ActivePVC); err != nil {
+		t.Fatalf("create active publication: %v", err)
+	}
+	if err := ensurePublishedMirrorRoute(ctx, reconciler, mirror); err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
+	findVolume(deployment.Spec.Template.Spec.Volumes, PublishDataVolumeName).PersistentVolumeClaim.ClaimName = "smoke-snap-new"
+	if err := fakeClient.Update(ctx, deployment); err != nil {
+		t.Fatalf("stage new publication PVC: %v", err)
+	}
+	deployment.Status.ObservedGeneration = deployment.Generation
+	deployment.Status.AvailableReplicas = 1 // old pod remains available during rollout
+	if err := fakeClient.Status().Update(ctx, deployment); err != nil {
+		t.Fatalf("mark old publication available: %v", err)
+	}
+	markRouteAccepted(t, ctx, fakeClient, mirror.Namespace, "smoke-publish")
+
+	health, err := reconciler.reconcileActivePublication(ctx, mirror)
+	if err != nil {
+		t.Fatalf("observe active publication: %v", err)
+	}
+	if !health.ready || !health.progressing {
+		t.Fatalf("rolling publication should remain ready while progressing, got %#v", health)
+	}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: deployment.Name}, deployment)
+	if got := findVolume(deployment.Spec.Template.Spec.Volumes, PublishDataVolumeName).PersistentVolumeClaim.ClaimName; got != "smoke-snap-new" {
+		t.Fatalf("active observation reverted the in-flight PVC to %q", got)
+	}
+}
+
+func TestDisabledChildCleanupPrecedesValidationAndPreservesForeignObjects(t *testing.T) {
+	ctx := context.Background()
+	mirror := testMirror()
+	mirror.Finalizers = []string{MirrorFinalizer}
+	mirror.Spec.Sync.Interval.Duration = 0 // unrelated invalid field
+	mirror.Spec.Services = mirrorv1alpha1.MirrorServicesSpec{}
+	owner := *metav1.NewControllerRef(mirror, mirrorv1alpha1.GroupVersion.WithKind("Mirror"))
+	controlled := []client.Object{
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: mirror.Namespace, Name: "smoke-publish-http", OwnerReferences: []metav1.OwnerReference{owner}}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: mirror.Namespace, Name: "smoke-publish-http", OwnerReferences: []metav1.OwnerReference{owner}}},
+		&gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: mirror.Namespace, Name: "smoke-publish", OwnerReferences: []metav1.OwnerReference{owner}}},
+	}
+	foreign := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: mirror.Namespace, Name: "smoke-publish-rsync"}}
+	objects := []client.Object{mirror, foreign}
+	objects = append(objects, controlled...)
+	scheme := testScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}).WithObjects(objects...).Build()
+	reconciler := &MirrorReconciler{Client: fakeClient, Scheme: scheme, Config: testConfig(), SyncLimiter: NewSyncLimiter(0)}
+	reconcile(t, ctx, reconciler, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mirror)})
+
+	for _, object := range controlled {
+		assertNotFound(t, ctx, fakeClient, client.ObjectKeyFromObject(object), object.DeepCopyObject().(client.Object))
+	}
+	get(t, ctx, fakeClient, client.ObjectKeyFromObject(foreign), &appsv1.Deployment{})
+}
+
+// TestGatewayRejectionDegradesMirrorWithPassthrough: an Accepted=False
+// condition on the controller-owned HTTPRoute degrades the Mirror with the
+// gateway's reason/message passed through VERBATIM (message gets a context
+// prefix); the route and the publish workload are untouched. Overlapping
+// paths (canonical /git vs alias /git/linux.git) coexist — the route is
+// created unconditionally and the gateway, not falcon, adjudicates.
+func TestGatewayRejectionDegradesMirrorWithPassthrough(t *testing.T) {
+	// A second Mirror whose canonical path /git overlaps smoke's alias
+	// /git/linux.git: both routes are generated — falcon has no say.
+	gitMirror := testMirror()
+	gitMirror.Name = "git"
+	gitMirror.UID = types.UID("uid-git")
+	gitMirror.Spec.Services.HTTP = &mirrorv1alpha1.MirrorHTTPServiceSpec{
+		MirrorServiceSpec: mirrorv1alpha1.MirrorServiceSpec{
+			PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name: "web", Image: "nginxinc/nginx-unprivileged:1.31.0-alpine",
+					Ports: []corev1.ContainerPort{{Name: "web", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
+				}},
+			}},
+		},
+	}
+	gitMirror.Finalizers = []string{MirrorFinalizer}
+	gitMirror.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: gitMirror.Generation,
 		WorkPVC:            "git-sync",
 		ActivePVC:          "git-snap-1756147200",
 	}
 
 	mirror, reconciler, fakeClient, request, ctx := publishedMirrorFixture(t, "smoke", "/linux.git", "/git/linux.git")
-	if err := fakeClient.Create(ctx, conflicting); err != nil {
-		t.Fatalf("create conflicting mirror: %v", err)
+	if err := fakeClient.Create(ctx, gitMirror); err != nil {
+		t.Fatalf("create overlapping mirror: %v", err)
 	}
-	reconcile(t, ctx, reconciler, request) // creates the workload, withholds the route
+	reconcile(t, ctx, reconciler, request) // creates the workload AND the route
 	markDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace, "smoke-publish-http")
-	reconcile(t, ctx, reconciler, request) // settles into RouteConflict
+	reconcile(t, ctx, reconciler, request) // settles Ready
 
-	// The route is withheld, the Mirror degrades with RouteConflict...
-	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, &gatewayv1.HTTPRoute{})
+	// The gateway rejects the route: Accepted=False with its own reason.
+	route := &gatewayv1.HTTPRoute{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
+	route.Status.Parents = routeParentStatus(route, metav1.ConditionFalse, "PathConflict", "overlaps with route foo-publish")
+	if err := fakeClient.Status().Update(ctx, route); err != nil {
+		t.Fatalf("set route status: %v", err)
+	}
+	recorder, ok := reconciler.Recorder.(*record.FakeRecorder)
+	if !ok {
+		t.Fatal("recorder must be a FakeRecorder")
+	}
+	reconcile(t, ctx, reconciler, request)
+
+	// The gateway's verdict makes the endpoint unavailable and degraded.
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.Phase != mirrorv1alpha1.PhaseDegraded {
-		t.Fatalf("expected Degraded on route conflict, got %s", current.Status.Phase)
+	wantMessage := "HTTPRoute smoke-publish Accepted=False (PathConflict): overlaps with route foo-publish"
+	degraded := findCondition(current.Status.Conditions, conditionDegraded)
+	if degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason != "HTTPRouteRejected" || degraded.Message != wantMessage {
+		t.Fatalf("expected the route rejection in Degraded, got %#v", current.Status.Conditions)
 	}
-	cond := findCondition(current.Status.Conditions, conditionDegraded)
-	if cond == nil || cond.Reason != "RouteConflict" || !strings.Contains(cond.Message, "/git/linux.git") || !strings.Contains(cond.Message, `"git"`) {
-		t.Fatalf("expected RouteConflict condition naming the overlap, got %#v", cond)
+	// ...while the route and the publish workload are untouched.
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, &gatewayv1.HTTPRoute{})
+	deployment := &appsv1.Deployment{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
+	if got := deployment.Spec.Template.Spec.NodeSelector[corev1.LabelHostname]; got != "s3.mirrors.zjusct.io" {
+		t.Fatalf("publish workload must be unaffected by the route verdict, got %#v", deployment.Spec.Template.Spec)
 	}
-	// ...but the publish workload keeps running.
-	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
-	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &corev1.Service{})
+	waitForEvent(t, recorder, "Warning HTTPRouteRejected "+wantMessage)
+}
 
-	// A non-overlapping alias (/gitlinux does not segment-prefix /git) keeps
-	// the route flowing.
-	other, otherReconciler, otherClient, otherRequest, otherCtx := publishedMirrorFixture(t, "smoke", "/gitlinux")
-	otherConflicting := conflicting.DeepCopy()
-	otherConflicting.ResourceVersion = ""
-	if err := otherClient.Create(otherCtx, otherConflicting); err != nil {
-		t.Fatalf("create conflicting mirror: %v", err)
+// TestGatewayReadinessRequiresAcceptedAndResolvedRefs pins the endpoint
+// contract: both current-generation route conditions are required.
+func TestGatewayReadinessRequiresAcceptedAndResolvedRefs(t *testing.T) {
+	mirror, reconciler, fakeClient, request, ctx := publishedMirrorFixture(t, "smoke")
+	reconcile(t, ctx, reconciler, request)
+	markDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace, "smoke-publish-http")
+	reconcile(t, ctx, reconciler, request) // Ready
+
+	// Accepted=True and ResolvedRefs=True make the endpoint Ready.
+	route := &gatewayv1.HTTPRoute{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
+	route.Status.Parents = routeParentStatus(route, metav1.ConditionTrue, "Accepted", "Route is accepted")
+	if err := fakeClient.Status().Update(ctx, route); err != nil {
+		t.Fatalf("set route status: %v", err)
 	}
-	reconcile(t, otherCtx, otherReconciler, otherRequest)
-	markDeploymentAvailable(t, otherCtx, otherClient, other.Namespace, "smoke-publish-http")
-	reconcile(t, otherCtx, otherReconciler, otherRequest)
-	get(t, otherCtx, otherClient, client.ObjectKey{Namespace: other.Namespace, Name: "smoke-publish"}, &gatewayv1.HTTPRoute{})
-	current = getMirror(t, otherCtx, otherClient, otherRequest.NamespacedName)
-	if current.Status.Phase != mirrorv1alpha1.PhaseReady {
-		t.Fatalf("non-overlapping alias must not degrade, got %s (%#v)", current.Status.Phase, current.Status.Conditions)
+	reconcile(t, ctx, reconciler, request)
+	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
+	cond := findCondition(current.Status.Conditions, conditionReady)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("expected Ready=True for an accepted and resolved route, got %#v", cond)
+	}
+
+	// Conditions from different parent-status entries cannot be combined.
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
+	desiredParent := route.Spec.ParentRefs[0]
+	otherParent := desiredParent
+	otherParent.Name = "another-gateway"
+	route.Status.Parents = []gatewayv1.RouteParentStatus{
+		{ParentRef: desiredParent, Conditions: []metav1.Condition{{
+			Type: string(gatewayv1.RouteConditionAccepted), Status: metav1.ConditionTrue,
+			ObservedGeneration: route.Generation, Reason: "Accepted",
+		}}},
+		{ParentRef: otherParent, Conditions: []metav1.Condition{{
+			Type: string(gatewayv1.RouteConditionResolvedRefs), Status: metav1.ConditionTrue,
+			ObservedGeneration: route.Generation, Reason: "ResolvedRefs",
+		}}},
+	}
+	if err := fakeClient.Status().Update(ctx, route); err != nil {
+		t.Fatalf("set split route status: %v", err)
+	}
+	reconcile(t, ctx, reconciler, request)
+	current = getMirror(t, ctx, fakeClient, request.NamespacedName)
+	ready := findCondition(current.Status.Conditions, conditionReady)
+	progressing := findCondition(current.Status.Conditions, conditionProgressing)
+	if ready == nil || ready.Status != metav1.ConditionFalse || progressing == nil || progressing.Status != metav1.ConditionTrue {
+		t.Fatalf("split parent conditions must be Ready=False/Progressing=True, got %#v", current.Status.Conditions)
+	}
+}
+
+// TestGatewayRejectionSelfHeals: a False->True verdict flip clears the
+// rejection — the Mirror returns to Ready through the normal flow.
+func TestGatewayRejectionSelfHeals(t *testing.T) {
+	mirror, reconciler, fakeClient, request, ctx := publishedMirrorFixture(t, "smoke")
+	reconcile(t, ctx, reconciler, request)
+	markDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace, "smoke-publish-http")
+	reconcile(t, ctx, reconciler, request) // Ready
+
+	route := &gatewayv1.HTTPRoute{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
+	route.Status.Parents = routeParentStatus(route, metav1.ConditionFalse, "PathConflict", "overlaps with route foo-publish")
+	if err := fakeClient.Status().Update(ctx, route); err != nil {
+		t.Fatalf("set route status: %v", err)
+	}
+	reconcile(t, ctx, reconciler, request)
+	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
+	if degraded := findCondition(current.Status.Conditions, conditionDegraded); degraded == nil || degraded.Status != metav1.ConditionTrue {
+		t.Fatalf("expected Degraded=True on rejection, got %#v", current.Status.Conditions)
+	}
+
+	// The gateway flips to Accepted: the next reconcile (Owns(HTTPRoute)
+	// watch in production) self-heals back to Ready.
+	route.Status.Parents = routeParentStatus(route, metav1.ConditionTrue, "Accepted", "Route is accepted")
+	if err := fakeClient.Status().Update(ctx, route); err != nil {
+		t.Fatalf("flip route status: %v", err)
+	}
+	reconcile(t, ctx, reconciler, request)
+	current = getMirror(t, ctx, fakeClient, request.NamespacedName)
+	cond := findCondition(current.Status.Conditions, conditionDegraded)
+	if cond == nil || cond.Status != metav1.ConditionFalse {
+		t.Fatalf("stale rejection condition must be cleared, got %#v", cond)
+	}
+	ready := findCondition(current.Status.Conditions, conditionReady)
+	if ready == nil || ready.Reason != "Published" || ready.Status != metav1.ConditionTrue {
+		t.Fatalf("expected Ready=True/Published after self-heal, got %#v", ready)
 	}
 }

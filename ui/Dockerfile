@@ -19,6 +19,11 @@ RUN npm ci --no-audit --no-fund
 
 COPY . .
 RUN npm run build
+# Public assets may preserve restrictive permissions from the build context
+# (Git does not track the difference between 0644 and 0660). Normalize the
+# complete export so the unprivileged nginx process can read files and
+# traverse directories without making ordinary files executable.
+RUN chmod -R a+rX /src/dist
 
 # --- serve ---
 # nginx unprivileged (uid 101) mainline with the OpenTelemetry module

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	mirrorv1alpha1 "github.com/ZJUSCT/falcon/api/v1alpha1"
@@ -44,8 +45,9 @@ const (
 //     no action history store. The field is kept (always empty) so old UI code
 //     can still index it.
 //   - "updated_at" is best-effort: the controller does not track when the
-//     status was last mutated, so it carries the last sync finish time (falling
-//     back to the last sync start time).
+//     status was last mutated, so an in-flight sync uses currentSync.startedAt;
+//     otherwise it uses the last completed sync's finish time (falling back to
+//     that sync's start time).
 //   - Timestamps are zero (0001-01-01T00:00:00Z) when unknown — the legacy UI
 //     already special-cased the zero time for last_success_at.
 //
@@ -67,13 +69,13 @@ type JobEntry struct {
 	// New fields.
 	Kind           string    `json:"kind"` // "Mirror" or "ProxyMirror"
 	Namespace      string    `json:"namespace,omitempty"`
-	Phase          string    `json:"phase"` // raw CR status.phase
+	Phase          string    `json:"phase"` // presentation state derived from conditions/currentSync
 	ActivePVC      string    `json:"active_pvc,omitempty"`
 	LastFinishedAt time.Time `json:"last_finished_at"`
 }
 
-// legacyStatusForMirrorPhase maps a Mirror status.phase onto the legacy job
-// status vocabulary. See JobEntry for the rationale.
+// legacyStatusForMirrorPhase maps the derived presentation phase onto the
+// legacy job status vocabulary. See JobEntry for the rationale.
 func legacyStatusForMirrorPhase(phase string) string {
 	switch phase {
 	case mirrorv1alpha1.PhaseSyncing, mirrorv1alpha1.PhasePublishing, mirrorv1alpha1.PhaseInitializing:
@@ -86,6 +88,53 @@ func legacyStatusForMirrorPhase(phase string) string {
 		// all behave like the legacy Waiting state.
 		return legacyStatusWaiting
 	}
+}
+
+func mirrorPresentationPhase(m *mirrorv1alpha1.Mirror) string {
+	progressing := meta.FindStatusCondition(m.Status.Conditions, "Progressing")
+	degraded := meta.FindStatusCondition(m.Status.Conditions, "Degraded")
+	if m.Status.CurrentSync != nil {
+		if degraded != nil && degraded.Status == metav1.ConditionTrue && (progressing == nil || progressing.Status != metav1.ConditionTrue) {
+			return mirrorv1alpha1.PhaseDegraded
+		}
+		if progressing != nil && progressing.Status == metav1.ConditionTrue {
+			switch progressing.Reason {
+			case "SynchronizationStarted", "SyncQueued":
+				return mirrorv1alpha1.PhaseInitializing
+			case "Snapshotting", "PublishRollout":
+				return mirrorv1alpha1.PhasePublishing
+			case "SyncJobRunning":
+				return mirrorv1alpha1.PhaseSyncing
+			}
+		}
+		return mirrorv1alpha1.PhaseSyncing
+	}
+	if m.Spec.Paused {
+		return mirrorv1alpha1.PhasePaused
+	}
+	if degraded != nil && degraded.Status == metav1.ConditionTrue {
+		return mirrorv1alpha1.PhaseDegraded
+	}
+	if progressing != nil && progressing.Status == metav1.ConditionTrue {
+		return mirrorv1alpha1.PhasePublishing
+	}
+	if readyForCurrentGeneration(m.Status.Conditions, m.Generation) {
+		return mirrorv1alpha1.PhaseReady
+	}
+	return mirrorv1alpha1.PhasePending
+}
+
+func proxyPresentationPhase(p *mirrorv1alpha1.ProxyMirror) string {
+	if condition := meta.FindStatusCondition(p.Status.Conditions, "Degraded"); condition != nil && condition.Status == metav1.ConditionTrue {
+		return mirrorv1alpha1.PhaseDegraded
+	}
+	if condition := meta.FindStatusCondition(p.Status.Conditions, "Progressing"); condition != nil && condition.Status == metav1.ConditionTrue {
+		return mirrorv1alpha1.PhasePublishing
+	}
+	if readyForCurrentGeneration(p.Status.Conditions, p.Generation) {
+		return mirrorv1alpha1.PhaseReady
+	}
+	return mirrorv1alpha1.PhasePending
 }
 
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
@@ -128,22 +177,32 @@ func (s *Server) listJobs(ctx context.Context) ([]JobEntry, error) {
 
 // mirrorJobEntry maps a Mirror CR onto the legacy job shape.
 func mirrorJobEntry(m *mirrorv1alpha1.Mirror) JobEntry {
+	phase := mirrorPresentationPhase(m)
 	entry := JobEntry{
 		ID:            m.Name,
-		Status:        legacyStatusForMirrorPhase(m.Status.Phase),
+		Status:        legacyStatusForMirrorPhase(phase),
 		Kind:          "Mirror",
 		Namespace:     m.Namespace,
-		Phase:         m.Status.Phase,
+		Phase:         phase,
 		ActivePVC:     m.Status.ActivePVC,
 		Actions:       []string{}, // legacy field, no action history anymore
 		NextAttemptAt: timeOrZero(m.Status.NextSyncAt),
 	}
+	if current := m.Status.CurrentSync; current != nil {
+		started := timeOrZero(current.StartedAt)
+		entry.LastAttemptAt = started
+		entry.UpdatedAt = started
+		entry.LastActionStatus = "Running"
+	}
 	if last := m.Status.LastSync; last != nil {
 		started := timeOrZero(last.StartedAt)
 		finished := timeOrZero(last.FinishedAt)
-		entry.LastAttemptAt = started
+		if m.Status.CurrentSync == nil {
+			entry.LastAttemptAt = started
+			entry.UpdatedAt = started
+			entry.LastActionStatus = last.Phase
+		}
 		entry.LastFinishedAt = finished
-		entry.LastActionStatus = last.Phase
 		switch last.Phase {
 		case mirrorv1alpha1.SyncPhaseSucceeded:
 			entry.LastSuccessAt = finished
@@ -151,10 +210,8 @@ func mirrorJobEntry(m *mirrorv1alpha1.Mirror) JobEntry {
 			entry.LastFailureAt = finished
 		}
 		// updated_at is best-effort: last known sync finish, else start.
-		if !finished.IsZero() {
+		if m.Status.CurrentSync == nil && !finished.IsZero() {
 			entry.UpdatedAt = finished
-		} else {
-			entry.UpdatedAt = started
 		}
 	}
 	return entry
@@ -162,15 +219,17 @@ func mirrorJobEntry(m *mirrorv1alpha1.Mirror) JobEntry {
 
 // proxyJobEntry maps a ProxyMirror CR onto the job shape. ProxyMirror is a new
 // concept with no legacy equivalent: there is no sync job, so every timestamp
-// is zero and `status` carries the raw CR phase (Ready/Pending/Degraded)
-// instead of the legacy sync vocabulary — the frontend can branch on `kind`.
+// is zero and `status` carries the derived Ready/Pending/Degraded presentation
+// state instead of the legacy sync vocabulary — the frontend can branch on
+// `kind`.
 func proxyJobEntry(p *mirrorv1alpha1.ProxyMirror) JobEntry {
+	phase := proxyPresentationPhase(p)
 	return JobEntry{
 		ID:        p.Name,
-		Status:    p.Status.Phase,
+		Status:    phase,
 		Kind:      "ProxyMirror",
 		Namespace: p.Namespace,
-		Phase:     p.Status.Phase,
+		Phase:     phase,
 		Actions:   []string{},
 	}
 }

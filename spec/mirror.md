@@ -1,113 +1,440 @@
 # mirror：镜像约定
 
-本文描述镜像 CRD 的定义和 Falcon Controller 的主要业务逻辑。Agent 应当将本文的标准对齐到代码实现。
+本文描述镜像 CRD 的定义和 Falcon 的主要逻辑。Agent 应当将代码对齐到本文，如有不一致应当向维护者报告。
 
-## CRD schema
+## CRD
 
-API 组 `mirrors.zjusct.io`，版本 `v1alpha1`，kind `Mirror`（复数 `mirrors`，无短名） 和 `ProxyMirror`（复数 `proxymirrors`，无短名），均为 namespaced。CRD 由 controller-gen 生成到 `charts/falcon/crds/`。
-
-下文 spec 字段与默认值用 YAML 展示，status 字段由控制器填充用表格展示。
+API 组 `mirrors.zjusct.io`，版本 `v1alpha1`，kind `Mirror`（复数 `mirrors`，无短名） 和 `ProxyMirror`（复数 `proxymirrors`，无短名），均为 namespaced。
 
 ### Mirror
 
+镜像 CRD 回答四个问题：
+
+- 怎么存储
+- 怎么同步
+- 怎么服务
+- 其他信息
+
+自然产生了 `spec` 中的 `storage`、`sync`、`services`、`info` 四个 map。
+
 ```yaml
+metadata:
+  name: <base>
+  # string：镜像唯一标识符
+  # 必填
+  # 校验（K8s 内置）：符合 RFC 1123 subdomain，允许 [a-z0-9]、[-.]
 spec:
-  paused: false                # 暂停新同步（§4.7）
-
-  info:                        # 公开目录元数据；刻意无 URL 字段——公开路径恒为 CR 名（§6.3）
-    name:                      # 本地化名称；map 每项至少 1 条目
+  paused: false
+  # bool：不再发起新的同步
+  # 可选
+  info:
+    # 必填
+    name:
       zh: Debian
-    description: {}            # 同 name
-    upstream: rsync://...      # 上游来源描述
-
+    # LocalizedString（map<string, string>）：本地化名称
+    # 必填；至少 1 条目
+    # 校验（schema）：MinProperties=1
+    description: {}
+    # LocalizedString（map<string, string>）：本地化描述，同 name
+    # 必填；至少 1 条目
+    # 校验（schema）：MinProperties=1
+    upstream: rsync://...
+    # string：上游来源描述
+    # 必填
   sync:
-    interval: 6h               # 必填，> 0
-    retryInterval: 15m         # 默认 15m，> 0；失败重试间隔（§6.2）
-    timeout: 24h               # 必填，> 0；转 Job activeDeadlineSeconds
-    dataMountPath: /data       # 缺省 /data（控制器补默认）；可写同步 PVC 的挂载点
-                               # 无放置字段：同步 Pod 引用同步 PVC，局部性由调度器原生
-                               # 处理（WFFC 首次定落点，绑定 PV 的 affinity 自动约束，
-                               # 见 spec/k8s.md 与 §4.4）
-    failureRetryLimit: 3       # 默认 3，最小 0；0 = 无快速重试（§6.2）
-    keepFailedJobs: 1          # 默认 1，最小 0；保留的最近失败 Job 数（§4.6）
-    podTemplate: {}            # 完整同步 Job .spec.template（corev1 PodTemplateSpec）；
-                               # 镜像/imagePullPolicy/command/args/env/envFrom/输入卷
-                               # （ConfigMap/Secret 直接声明为普通卷与挂载）/resources
-                               # 等全部用户声明；控制器叠加强制项并注入默认值（§4.5）；
-                               # 放置不注入（交调度器）
-
+    # 必填
+    interval: 6h
+    # duration：同步周期
+    # 必填
+    # 校验（控制器）：> 0
+    retryInterval: 15m
+    # duration：快速重试间隔
+    # 可选：默认 15m
+    # 校验（控制器）：> 0
+    timeout: 24h
+    # duration：单次同步超时
+    # 必填
+    # 对应：同步 Job spec.activeDeadlineSeconds
+    # 校验（控制器）：> 0
+    failureRetryLimit: 3
+    # int32：快速重试次数上限；0 = 无快速重试
+    # 可选：默认 3
+    # 校验（schema）：Minimum=0
+    keepFailedJobs: 1
+    # int32：按创建时间保留的最近失败 Job 数
+    # 可选：默认 1
+    # 校验（schema）：Minimum=0
+    podTemplate:
+      # PodTemplateSpec：同步容器的完整声明，控制器管理部分字段
+      # 挂载与否、挂载路径由用户自行声明
+      # 可选
+      # 对应：同步 Job spec.template
+      # 校验（控制器）：至少一个容器且第一个容器 image 非空；volumes 不得使用保留卷名 sync-data
+      # 强制覆盖（每次 reconcile 覆写/叠加）：
+      spec:
+        restartPolicy: Never
+        terminationGracePeriodSeconds: 30
+      spec.volumes:
+        - name: sync-data
+          persistentVolumeClaim:
+            claimName: <base>-sync
+      #   模板 labels 叠加同步标签（component: sync，含 sync-timestamp 标签）
+      #   放置不注入（WFFC + 绑定 PV affinity 原生约束，见「存储局部性」）
+      # 默认注入（模板 silent 才注入，写了以用户为准）：
+      spec.automountServiceAccountToken: false
+      spec.securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers[].securityContext（未设字段）:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities.drop: [ALL]
+      containers[0].imagePullPolicy: IfNotPresent
+      # 另注入 /tmp emptyDir 卷 + 挂载；不注入任何探针与环境变量
+      # （数据位置外的输入由用户 env 显式传入）
   storage:
-    storageClassName: ...      # 必填；同步 PVC 使用
+    # 必填
+    storageClassName: ...
+    # string：同步 PVC 使用的 SC
+    # 必填
+    # 对应：同步 PVC spec.storageClassName
+    # 校验（控制器）：非空
+    # 备注：建议 reclaimPolicy: Retain 以避免误删导致的数据丢失
     publishStorageClassName: ...
-                               # 可选；快照克隆发布 PVC 用（缺省回落
-                               # storageClassName；2026-09 由 servingStorageClassName
-                               # 改名）；须与快照/StorageClass 同后端同拓扑（本地 PV
-                               # 语义下即同节点），惯用 reclaimPolicy: Delete 以便
-                               # 清理时真正回收后端卷
-    capacity: 500Gi            # 必填，> 0
-    accessMode: ReadWriteOnce  # 默认 RWO；枚举 RWO/RWX/ROX/RWOP
+    # string：快照克隆得到的发布 PVC 用的 SC
+    # 可选：缺省回落 storageClassName
+    # 对应：发布 PVC spec.storageClassName
+    # 备注：建议 reclaimPolicy: Delete 以及时清理快照；须与快照/StorageClass 同后端同拓扑
+    # （本地 PV 语义下即同节点）
+    capacity: 500Gi
+    # Quantity：同步 PVC 容量
+    # 必填
+    # 对应：同步 PVC spec.resources.requests.storage
+    # 校验（控制器）：> 0
+    accessMode: ReadWriteOnce
+    # string：PVC accessMode
+    # 可选：默认 ReadWriteOnce
+    # 对应：同步 PVC spec.accessModes
+    # 校验（schema）：K8s 内置枚举
     volumeSnapshotClassName: ...
-                               # 必填，无默认值（原子发布依赖）；须由同一存储后端提供
+    # string：快照用的 VolumeSnapshotClass（原子发布依赖），须由同一存储后端提供
+    # 必填，无默认值
+    # 对应：VolumeSnapshot spec.volumeSnapshotClassName
+    # 校验（schema）：非空（MinLength=1）
+    # 校验（控制器）：非空
     retention:
-      previousSnapshots: 1     # 默认 1，范围 1–10
-
-  services:                    # 固定 key：http / rsync；全禁用 = 纯同步镜像
-                               # （同步/快照/发布 PVC 照常，但不部署发布负载）
+      # 可选
+      previousSnapshots: 1
+      # int32：保留的历史快照代数
+      # 可选：默认 1
+      # 校验（schema）：1–10
+  services:
+    # 可选；固定 key：http / rsync；key 出现 = 启用，不出现 = 禁用；
+    # 全禁用 = 纯同步镜像（同步/快照/发布 PVC 照常，但不部署发布负载）
     http:
-      enable: true             # 唯一开关：key 未出现 = 禁用，enable: false 亦禁用
-      replicas: 1              # 默认 1，范围 1–3
-      mirrorMountPath: /srv/www/debian
-                               # enable 时必填（CEL + 控制器双校验），绝对路径；
-                               # 发布 PVC 只读挂载于该路径本身（不追加 CR 名，路由前缀
-                               # 仍 /<CR名>；web 根、rsyncd 模块路径、git http-backend
-                               # 根由用户在 podTemplate 里指向该目录）
-      aliases:                 # 额外公开路径前缀（可选，最多 8 项，每项 ≤200 字符）；
-                               # 例：/linux.git 与 /git/linux.git 指向同一内容
-                               # （Git smart HTTP 前缀不透明，多路径零语义差异）。
-                               # 大小写敏感且允许大写（CR 名受 DNS 限制而路径不受）；
-                               # 每项以 / 开头、不以 / 结尾、不含 //、不含空白
-                               # （CEL 拦截）；不得等于规范路径 /<CR名>、不得与其他
-                               # Mirror 的路径相等或分段前缀重叠（控制器校验，
-                               # 冲突落 RouteConflict，见 §5.3）。仅是额外路由：
-                               # 规范路径恒为 CR 名，mirrorz/门户/文档只用规范路径
-      podTemplate: {}          # 完整发布 Deployment .spec.template（corev1 PodTemplateSpec）；
-                               # 容器/端口/探针/卷/亲和性等全部用户声明；
-                               # 控制器叠加强制项并注入默认值（§5.2）
-    rsync: {}                  # 形状同 http 但无 aliases（rsync 无路径概念）。
-                               # 没有 git key：git 发布 = http + fastcgi 容器
+      # 形状 = MirrorServiceSpec + aliases
+      replicas: 1
+      # int32：发布副本数
+      # 可选：默认 1
+      # 对应：发布 Deployment spec.replicas
+      # 校验（schema）：1–3
+      aliases:
+        - /git/debian
+      # []MirrorHTTPAlias：额外路由，用于补充 CR 名无法表达的合法路由，例如：
+      # 大写字母（AOSP）、多层路径（/git/linux.git）
+      # 可选
+      # 校验（schema）：最多 8 项、每项 ≤200 字符
+      # 校验（控制器）：无重复、不等于规范路径 /<CR名>、逐项语法（/ 开头、不以 / 结尾、
+      # 无 //、无空白；大小写敏感、允许大写）
+      podTemplate:
+        # PodTemplateSpec：发布容器的完整声明；控制器仅向 volumes 注入 mirror-data 卷
+        # （只读卷源），挂载与否、挂载路径由用户自行声明
+        # 可选
+        # 对应：发布 Deployment spec.template
+        # 校验（CEL）：key 出现时 podTemplate.spec 存在
+        # 校验（控制器）：至少一容器、第一容器至少一个 containerPort；volumes 不得含
+        # 保留卷名 mirror-data，对其挂载必须 readOnly
+        # 强制覆盖（每次 reconcile 覆写/叠加）：
+        spec.volumes:
+          - name: mirror-data
+            persistentVolumeClaim:
+              claimName: <所服务 PVC>
+              readOnly: true
+        #   （只读卷源；保留卷名，用户不得声明同名 volume；挂载与否、挂载路径由用户自行声明）
+        #   模板 labels 叠加 {mirror: <base>, component: publish-<key>}（用户同名 label 被覆写）
+        #   节点放置见「存储局部性」：hostname selector 强制合入（该 key 用户不可覆盖）；
+        #     非 hostname 拓扑拷入 affinity（用户自带时 falcon 项优先并发 Warning）；
+        #     共享存储不注入；源 PVC/PV 不可读时本 reconcile 不创建 Deployment
+        # 默认注入（模板 silent 才注入，写了以用户为准）：
+        spec.automountServiceAccountToken: false
+        spec.securityContext:
+          runAsNonRoot: true
+          seccompProfile: { type: RuntimeDefault }
+        containers[].securityContext（未设字段）:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities.drop: [ALL]
+        containers[0].readinessProbe（未设时）:
+          tcpSocket: { port: <key> }
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        # 另注入 /tmp emptyDir 卷 + 挂载
+    rsync:
+      # 合法启用至少需 podTemplate.spec（空块会被 CEL 拒绝）。
+      # 形状同 http 但无 aliases（rsync 无路径概念）
+      # 没有 git key：git 发布 = http + fastcgi 容器
+      podTemplate:
+        spec:
+          containers:
+            - name: rsyncd
+              ports:
+                - containerPort: 873
+status:
+  observedGeneration: 1
+  # int64：已观察到的 generation
+  # 写入点：InvalidSpec、DerivedResourceInvalid、startSync、paused、空闲等状态 Patch 时置当前 generation
+  workPVC: <base>-sync
+  # string：同步 PVC 名
+  # 写入点：首次 startSync 定名 <base>-sync（固定名，无时间戳；字段名沿用历史 work），
+  # 此后复用，终生活在
+  activePVC: <base>-snap-<ts>
+  # string：当前对外提供内容的发布 PVC 名
+  # 写入点：仅发布激活写入；失败与暂停不清除；名内嵌的时间戳是同步任务的开始时间
+  # （任务创建时分配一次，与 Job/快照/发布 PVC 共享）
+  activeSnapshot: <base>-snap-<ts>
+  # string：当前发布 PVC 克隆自的 VolumeSnapshot 名
+  # 写入点：仅发布激活写入；失败与暂停不清除
+  currentSync:
+    startedAt: ...
+    # Time：当前同步事务的开始时刻；其 Unix 秒时间戳唯一派生 Job
+    # `<base>-sync-<ts>`、VolumeSnapshot 与发布 PVC `<base>-snap-<ts>` 的名字
+    syncRequest: ...
+    # string：本次事务关联的手动同步注解值；可选
+  # 当前没有同步事务时整个字段为空。startSync 一次写入；发布成功或失败时清空。
+  nextSyncAt: ...
+  # Time：下一次同步时刻
+  # 写入点：startSync 清空；发布激活（now + interval）与失败路径
+  # （now + retryInterval 或 now + interval，见「触发与调度」）重新写入
+  consecutiveFailures: 0
+  # int32：自上次成功发布起连续失败的同步次数，驱动「触发与调度」所述重试节奏
+  # 写入点：失败路径上低于 failureRetryLimit 时 +1（快速重试），达到后冻结；发布激活清零
+  lastPublishedAt: ...
+  # Time：上次发布激活时刻
+  # 写入点：仅发布激活写
+  lastHandledSyncRequest: ...
+  # string：最近已处理的手动同步注解值
+  # 写入点：仅发布激活与失败路径写
+  sizeBytes: 0
+  # int64：活跃发布 PVC 的 kubelet 上报占用（该节点 stats summary 中此 PVC 卷的
+  # usedBytes，字节）；发布 PVC 内容不可变，该值一次计算即永久准确，无需周期刷新
+  # 写入点：发布激活时 best-effort 随激活 Patch 写入；未取到则由空闲路径回填
+  # （activePVC 非空且 sizeBytes 为 0 时）；取不到时（纯同步镜像无发布 Pod、发布 Pod
+  # 尚未运行、节点 summary 未报该卷等）保持为空，失败只记日志
+  lastSync:
+    jobName: ...
+    # string：同步 Job 名
+    # 必填
+    phase: Succeeded
+    # string：本次同步结果
+    # 校验（schema）：枚举 Succeeded;Failed
+    startedAt: ...
+    # Time：同步开始时刻
+    # 可选
+    finishedAt: ...
+    # Time：同步结束时刻
+    # 可选
+    message: ...
+    # string：附加信息
+    # 可选
+  # MirrorSyncStatus：最近一次已经结束的同步事务；运行中的事务只由 currentSync 表示
+  # 写入点：发布成功或失败时整体替换
+  conditions: []
+  # []Condition：Ready / Progressing / Degraded 三条，见「状态与可观测性」
 ```
 
-- `sync.podTemplate`：镜像/`imagePullPolicy`/command/args/env/envFrom/resources 与输入卷全部在模板内声明——输入卷（ConfigMap/Secret）就是普通 volume + volumeMount（挂载只读与否由用户声明）。控制器注入可写 `sync-data` 卷挂 `dataMountPath`（`sync-data` 为保留卷名，用户不得声明同名 volume）。
-- 服务对象上的 CEL 均为标量/存在性规则（`!enable || mirrorMountPath 非空`；`!enable || podTemplate.spec 存在`；http 的 `aliases` 逐项语法正则 `^/([^/\s]+/)*[^/\s]+$`），不迭代 podTemplate 的容器/卷列表以避开 CRD cost budget；**禁用的 key 不做任何校验**（可随意停放模板）。podTemplate 内容级约束（容器非空、第一容器有端口/镜像、保留卷名、mirror-data 只读挂载、别名等于规范路径）由控制器校验（§4.2）。
-
-| 字段 | 含义与写入点 |
-| --- | --- |
-| `observedGeneration` | InvalidSpec、startSync、paused、空闲四处 Patch 时置当前 generation |
-| `phase` | 枚举 `Pending;Initializing;Syncing;Publishing;Ready;Paused;Degraded`；Pending 仅在空闲路径且 phase 为空时写入一次（首见标记） |
-| `workPVC` | 同步 PVC 名：首次 startSync 定名 `<base>-sync`（固定名，无时间戳；字段名沿用历史 `work`），此后复用，终生活在 |
-| `activePVC` / `activeSnapshot` | 仅发布激活写入；失败与暂停不清除。`activePVC` 名内嵌的时间戳是同步任务的开始时间（任务创建时分配一次） |
-| `pendingSyncTimestamp` / `pendingPVC` / `pendingSnapshot` | startSync 一次写入：时间戳在任务创建时分配（`pendingSyncTimestamp`），并据此派生 `pendingSnapshot = pendingPVC = <base>-snap-<ts>`（发布 PVC 与快照同名，类型不同）；Job 成功后直接复用，不再二次分配；发布或失败时清空 |
-| `pendingJob` | startSync 写入，发布或失败时清空 |
-| `pendingSyncRequest` | startSync 写入手动注解值，发布或失败时搬入 `lastHandledSyncRequest` 后清空 |
-| `nextSyncAt` | 仅发布激活（`now + interval`）与失败路径（`now + retryInterval` 或 `now + interval`，见 §6.2）写入，其余路径不动 |
-| `consecutiveFailures` | 自上次成功发布起连续失败的同步次数：失败路径上低于 `failureRetryLimit` 时 +1（快速重试），达到后冻结；发布激活清零。驱动 §6.2 的重试节奏 |
-| `lastPublishedAt` | 仅发布激活写 |
-| `lastHandledSyncRequest` | 仅发布激活与失败路径写 |
-| `sizeBytes` | 活跃发布 PVC 的 kubelet 上报占用（该节点 stats summary 中此 PVC 卷的 usedBytes，字节）。发布激活时 best-effort 随激活 Patch 写入；未取到则由空闲路径回填（`activePVC` 非空且 `sizeBytes` 为 0 时）。发布 PVC 内容不可变，该值一次计算即永久准确，无需周期刷新；取不到时（纯同步镜像无发布 Pod、发布 Pod 尚未运行、节点 summary 未报该卷等）保持为空，失败只记日志 |
-| `lastSync` | `{jobName, phase(Running/Succeeded/Failed), startedAt, finishedAt, message}`；startSync 整体替换，发布/失败时只改 phase/finishedAt/message（jobName、startedAt 保留） |
-| `conditions` | Ready / Progressing / Degraded 三条，见 §8.2 |
-
-打印列：Phase、Active PVC、Last Sync（`.status.lastSync.finishedAt`）、Age。
+打印列：Ready condition、Active PVC、Last Sync（`.status.lastSync.finishedAt`）、Age。
 
 ### ProxyMirror
 
-- `spec.info`：`name`/`description`（同 Mirror）+ `upstream`（后端源，如 `https://pypi.org/simple/`）。
-- `spec.proxy.cache`：`enabled`（默认 false）、`storageClassName`、`size`（缓存启用时两者必填，控制器校验）。
-- `spec.services`：仅 `http` 一个 key（代理即 HTTP 发布者），字段 `enable`/`replicas`/`podTemplate`——**没有 `mirrorMountPath`**（代理无数据卷可挂），**暂无 `aliases`**（代理单路径即够，未来按需添加）。key 未出现或 `enable: false` = 不部署负载，代理不对外发布。podTemplate 上的强制/默认注入与 Mirror 相同（§5.2），另加：缓存启用时控制器照常注入 `proxy-cache` PVC 卷并挂载到 `/var/cache/nginx/proxy`（用户 template 不得声明同名 volume，控制器校验拒绝；可在其他路径额外挂载注入的卷）。启用的 http 服务得到 Deployment/Service `<base>-publish-http` 与发布 HTTPRoute（就绪后）。
-- `status`：`observedGeneration`、`phase`（枚举仅 `Pending;Ready;Degraded`）、`publishedServiceName`（http 服务启用时为 `<base>-publish-http`；禁用时为空——该代理不部署任何负载）、`cachePVC`（仅缓存启用时为 `<base>-cache`，否则空）、`conditions`。
-- 没有 paused、没有同步、没有 finalizer：删除 CR 即靠 owner-reference GC 回收全部子对象。
+`spec` 中 `sync` 替换为 `proxy`，此外大部分字段与 Mirror 相同：
 
-打印列：Phase、Cache PVC、Age。
+- `services.http` 字段形状同 Mirror 但**暂无 `aliases`**（代理单路径即够，未来按需添加）
+- 没有 paused、没有同步、没有 finalizer，删除 CR 时靠 owner-reference GC 回收全部子资源；移除 `services.http` 可在保留 CR 的同时停止发布
+
+```yaml
+spec:
+  proxy:
+    cache:
+      enabled: false
+      # bool：是否启用缓存
+      # 可选：默认 false
+      storageClassName: ...
+      # string：缓存 PVC 用的 SC
+      # 可选；缓存启用时必填
+      # 校验（控制器）：缓存启用时非空
+      size: ...
+      # Quantity：缓存 PVC 容量
+      # 可选；缓存启用时必填
+      # 对应：缓存 PVC spec.resources.requests.storage
+      # 校验（控制器）：缓存启用时 > 0
+  services:
+    # 仅 http 一个 key（代理即 HTTP 发布者）；key 未出现 = 不部署负载，代理不对外发布
+    http:
+      replicas: 1
+      # 同 Mirror（略）
+      podTemplate:
+        # PodTemplateSpec：发布容器的完整声明
+        # 可选
+        # 对应：发布 Deployment spec.template
+        # 校验（控制器）：至少一容器、第一容器至少一个 containerPort
+        # 强制覆盖（每次 reconcile 覆写/叠加）：
+        spec.volumes:
+          - name: proxy-cache
+            persistentVolumeClaim:
+              claimName: <base>-cache
+        #   （仅缓存启用时注入；可写卷源——缓存本身就是写入目标；保留卷名，
+        #   用户不得声明同名 volume；挂载与否、挂载路径由用户自行声明）
+        # 模板 labels 叠加 {mirror: <base>, component: publish-http}
+        # 节点放置不注入（代理无数据卷，局部性无从推导，调度由用户决定）
+        # 默认注入（模板 silent 才注入，写了以用户为准）：
+        #   同 Mirror 发布侧（安全默认、/tmp emptyDir、readinessProbe）
+        # 备注：nginx proxy_cache 惯用缓存目录 /var/cache/nginx/proxy，
+        #   由用户在 template 中自行挂载，控制器不注入挂载
+status:
+  observedGeneration: 1
+  conditions: []
+  # Ready / Progressing / Degraded；派生资源名均可由 CR 名与 spec 确定，不重复写入 status
+```
+
+打印列：Ready condition、Age。
+
+### 校验
+
+各字段的校验规则已在上文 YAML 注释中描述，这里对相关机制和设计意图进行说明：
+
+- **schema**：kubebuilder 标记（必填/枚举/范围/数量），apiserver 写入时拦截。
+- **CEL**：准入求值，与 schema 同层拦截。CEL 不应编写复杂规则，因其难以在编写时发现错误。
+- **控制器校验**：覆盖 Falcon 自身语义中需迭代列表的规则（如保留卷名）；失败状态置 `Degraded`。
+
+Falcon 仅对 CRD 做基础校验，派生资源的校验由其他组件负责，Falcon 消费相关事件。例如：
+
+- Falcon 不对 `spec.services.http.aliases` 与其他 Mirror 路径的重叠做校验，而是交给 Gateway 规范和具体实现。HTTPRoute 明确报告 `Accepted=False` 或 `ResolvedRefs=False` 时，Falcon 设置 `Degraded=True/HTTPRouteRejected` 并保留网关的 reason/message 上下文。
+- Falcon 不预检派生资源名长度。创建或更新派生资源被 apiserver 以 `Invalid` 拒绝时，Falcon 将原始错误转述到父 CR 的 `Degraded/DerivedResourceInvalid` condition，并记录同名 Warning Event。
+
+### 相关资源的名称、label 与 annotation
+
+子资源名字后缀表：
+
+| 子资源 | 名字 |
+| --- | --- |
+| 同步 PVC | `<base>-sync` |
+| 同步 Job | `<base>-sync-<Unix秒>` |
+| VolumeSnapshot | `<base>-snap-<Unix秒>` |
+| 快照克隆发布 PVC | `<base>-snap-<Unix秒>` |
+| 发布 Deployment、Service | `<base>-publish-<key>`（`publish-http`/`publish-rsync`） |
+| 发布 HTTPRoute | `<base>-publish` |
+| ProxyMirror 缓存 PVC | `<base>-cache` |
+
+- 时间戳是**控制器创建同步 Job 时**的 UNIX 时间戳，并传播到同步 Job、快照、发布 PVC 的名字与标签。
+- Service 名和 label 值受最长 63 字符的 DNS label 约束，超长会被 K8s 拒绝。
+
+子资源 Label：
+
+- `app.kubernetes.io/name: falcon`
+- `app.kubernetes.io/managed-by: falcon-controller`
+- `mirrors.zjusct.io/mirror: <base>`
+- `app.kubernetes.io/component: <sync|snapshot|publish-data|publish-http|publish-rsync|proxy-cache>`：用于 Service 选 Pod
+
+快照代次子资源（发布 PVC、VolumeSnapshot、同步 Job）另带
+
+- `mirrors.zjusct.io/sync-timestamp: <Unix秒>`：用于排序、批量选择等
+
+发布 Pod 模板不注入代次注解。发布 PVC 名内嵌时间戳，代次信息由其唯一承载；切换发布代次时，`mirror-data` 卷的 `claimName` 变化会改变 Pod 模板并触发 Deployment 滚动。
+
+### 与 MirrorZ 数据格式的关联
+
+`GET /mirrorz.json` 的输出按 [mirrorz-org/mirrorz](https://github.com/mirrorz-org/mirrorz) 构造。开关：`catalog.enabled`（chart 默认 true）；关闭时 404 `{"error": "mirrorz catalog is disabled"}`。无鉴权。
+
+格式字段到 Falcon 字段的对应（转换用自然语言标注）：
+
+```jsonc
+// 收录：Mirror 与 ProxyMirror 统一要求 spec.services.http 已配置，且当前
+// metadata.generation 对应的 Ready condition 为 True。
+// 排序：按 cname 字典序。
+{
+  "version": 1.7,
+  "site": {
+    // 请求 Host 命中 publish.hostnames 时逐字段回显该 Host，否则回落配置值
+    "url": "controller.config.site.url（去末尾 /）",
+    "abbr": "controller.config.site.abbr",
+    "name": "controller.config.site.name"
+    // logo/homepage/issue/request/email/group/disk/note/big/disable：
+    // Falcon 不输出，字段省略
+  },
+  "info": [],   // 分类视图，Falcon 恒为空数组（规范允许）
+  "mirrors": [
+    // Mirror 与 ProxyMirror 各产生一个条目，形状相同：
+    {
+      "cname": "metadata.name",
+      "desc": "spec.info.description（zh 优先，无 zh 回落其他语言，皆无则省略）",
+      "url": "site.url + \"/\" + metadata.name（同样受 Host 回显影响）",
+      "status": "状态按 v1.7 约定编码为 [A-Z](\\d+)? 令牌（主状态 + 辅助时间戳），见下表",
+      "upstream": "spec.info.upstream",
+      "size": "status.sizeBytes 字节转可读格式（1024 进制，两位小数）；未知则省略"
+    }
+    // "help" 与 "disable" 字段 Falcon 不输出，字段省略
+  ]
+}
+```
+
+status 字母按 mirrorz-org/mirrorz README 的约定编码，固定顺序为「主状态、O、X、N」。目录收录表示 HTTP endpoint 可用；status 表示同步新鲜度。`mirrorz-monitor` 按 `S → O → F → P` 选择新鲜度时间戳，因此 endpoint 不可用时必须直接不收录，不能靠 `F` 或 `U` 表示下线。
+
+| 条件 | status |
+| --- | --- |
+| Mirror：`currentSync != nil` | `Y<currentSync.startedAt>` + 可选 `O<lastPublishedAt>` + `N<creationTimestamp>`；事务期间不输出 X |
+| Mirror：Paused | `P<lastPublishedAt>` + `N<creationTimestamp>` |
+| Mirror：最近完成同步成功 | `S<lastPublishedAt>` + 可选 `X<nextSyncAt>` + `N<creationTimestamp>` |
+| Mirror：最近完成同步失败 | `F<lastSync.finishedAt>` + 可选 `O<lastPublishedAt>` + 可选 `X<nextSyncAt>` + `N<creationTimestamp>` |
+| Mirror：其他但 endpoint 可用 | `U` + `N<creationTimestamp>` |
+| ProxyMirror：缓存启用 | `C` + `N<creationTimestamp>` |
+| ProxyMirror：无缓存 | `R` + `N<creationTimestamp>` |
+
+Falcon 不输出 `D`：首次成功前 Ready=False，条目不会进入目录；周期同步的等待态则用上一笔已完成结果 `S` 或 `F` 表达，比 `D` 更准确。同步或失败期间的 `O` 让 monitor 使用旧的成功发布时间判断仍在服务的 immutable snapshot 是否新鲜。
+
+其余机制：条目 url 恒为规范路径——`services.http.aliases` 别名不出现在 mirrorz 输出中（别名仅是额外路由，内容与协商行为完全一致）；通用 GET/JSON 约束见「Web API」。
+
+## 控制器配置文件（/etc/falcon/config.yaml）
+
+唯一 flag 为 `--config`（默认 `/etc/falcon/config.yaml`），无业务 flag。schema 与 `internal/config` 结构体一一对应；Load 先以 Default() 为底再 Unmarshal，稀疏文件产生可用配置。
+
+```yaml
+log:
+  level: info                      # debug | info | warn | error（zap）；空补 info
+api:
+  metricsBindAddress: ":8080"
+  healthProbeBindAddress: ":8081"
+  webapiBindAddress: ":8082"       # "0" 关闭 webapi
+site:
+  url: https://mirrors.example.org # 必填，必须带 scheme；mirrorz site 段与回落 baseURL
+  abbr: ""                         # 可选
+  name: ""                         # 可选
+catalog:
+  enabled: false                   # /mirrorz.json 开关（chart 默认 true）
+sync:
+  maxConcurrent: 0                 # 全局同步并发上限；<= 0 = 不限
+publish:
+  gatewayRef:                      # hostnames 非空时 name 必填
+    name: ""
+    namespace: ""
+    sectionName: ""
+  hostnames: []                    # 空 ⇒ HTTPRoute 生成整体关闭；裸主机名（无 / 与空白）
+  labels: {}                       # 盖到每条发布 HTTPRoute
+  annotations: {}
+```
+
+fail-fast 校验（启动时，非法拒绝启动）：归一化（site.url TrimSpace 去末尾 `/`；log.level 空补 info）后检查——log.level 枚举；site.url 非空且含 `://`；hostnames 非空时 gatewayRef.name 必填；hostnames 不含空白项、不含 `/`（裸主机名）。文件不可读/非法 YAML 报错（前缀 `read config` / `parse config`），stderr + 退出码 1。
 
 ## 同步
 
@@ -130,390 +457,218 @@ tunasync-scripts 的主镜像是全家桶打包，使用需要斟酌。还有一
 
 ## 发布
 
----
+Falcon 将“同步”与“发布”分离：同步 Job 始终写入可变的工作 PVC，读流量则始终来自某一代不可变的快照克隆。这样，同步过程中的半成品不会暴露给用户；一次同步失败也不会破坏上一代仍可用的内容。
 
-以下为待整理内容
+### 原子发布模型
 
-## 3. 命名、标签与常量
+每次同步事务使用 `status.currentSync.startedAt` 作为唯一身份。该时间的 Unix 秒值同时派生同步 Job `<base>-sync-<ts>`、VolumeSnapshot `<base>-snap-<ts>` 和同名发布 PVC。同步 PVC `<base>-sync` 不属于任何一代，会在各次同步间复用。
 
-时间戳是**同步开始时**的 UNIX 时间戳，控制器创建同步任务时生成一次，并传播到同步 Job、快照、发布 PVC 的名字与标签。
+一代内容按以下顺序产生：
 
-### 3.1 确定性命名
+1. 同步 Job 更新工作 PVC；
+2. Job 成功后，CSI 为工作 PVC 创建 VolumeSnapshot；
+3. Falcon 从快照克隆出只读发布 PVC；
+4. 各发布 Deployment 滚动到新的 PVC；
+5. 所有启用的发布负载就绪后，Falcon 将该 PVC 写入 `status.activePVC`，完成原子切换。
 
-- `childBase(CR名)`：**原样返回 CR 名，不做任何转换**（2026-09 决策：CR 名已被 apiserver 强制为 RFC 1123 subdomain——小写字母/数字/`-`/`.`，点号合法；点号在 DNS subdomain 形式的子对象名（如 `linux.git-sync-<ts>`）与 label 值中都合法，早期的"小写化/`.`→`-`/修剪/空回退 mirror"对合法 CR 名本就不可达，已删除）。
-- `resourceName(base, suffix)`：`base + "-" + suffix` 去首尾 `-`。
-- **超过 63 字符（DNS-1123 label 上限）是显式错误**：不截断、不加哈希。childBase 对 >63 的 CR 名直接报错（base 同时作为 label 值），resourceName 对拼接结果同样检查。校验阶段用最长后缀预检——Mirror 用同步 Job 后缀 `sync-` + 10 个字符（十进制 Unix 秒时间戳上限 10 位，覆盖至 2286 年），ProxyMirror 用 `publish-http`（`publish-<key>` 中最长）；超限落 Degraded/InvalidSpec。
-- 公开路径别名（`services.http.aliases`）**不受 DNS 限制**：大小写敏感、允许大写与多段点号路径——这正是别名机制的设计目的之一（CR 名受 DNS 约束而服务路径不受）。
+发布 PVC 的名字及 Deployment 中 `mirror-data` 卷的 `claimName` 唯一标识发布代次。切换 `claimName` 自然改变 Pod 模板并触发滚动，因此 Falcon 不再注入额外的代次注解。成功激活前，`activePVC` 仍指向旧代次，已有 Pod 可继续服务。
 
-子对象名字后缀表：
+### 发布负载
 
-| 子对象 | 名字 |
-| --- | --- |
-| 同步 PVC | `<base>-sync`（固定名，无时间戳） |
-| 同步 Job | `<base>-sync-<Unix秒>`（时间戳 = 任务创建时刻） |
-| VolumeSnapshot | `<base>-snap-<Unix秒>`（同一时间戳） |
-| 快照克隆发布 PVC | `<base>-snap-<Unix秒>`（与其快照**同名**，kind 不同：PVC ↔ VolumeSnapshot 一一对应） |
-| 发布 Deployment、发布 Service（每个启用的 services key 一对） | `<base>-publish-<key>`（`publish-http`/`publish-rsync`） |
-| 发布 HTTPRoute（仅 `http` 项） | `<base>-publish` |
-| ProxyMirror 缓存 PVC | `<base>-cache` |
+`spec.services` 中出现的每个 key 都对应一组同名的 Deployment 和 Service：`<base>-publish-<key>`。HTTP 和 rsync 的 Pod 彼此独立，但挂载同一个只读发布 PVC。Deployment 使用 `RollingUpdate`，`maxUnavailable: 0`、`maxSurge: 1`，以便新代次启动期间尽量保留旧代次的服务能力。
 
-### 3.2 统一标签与注解
+用户提供完整的 Pod 模板；控制器只负责 CRD 章节列出的强制字段与默认值。特别地，Falcon 只注入 `mirror-data` volume，不替用户决定挂载路径；任何容器或 init container 对该卷的挂载都必须为只读。Service 将端口 80 转发到第一个容器的第一个端口，该端口由控制器命名为服务 key。
 
-所有子对象带：`app.kubernetes.io/name: falcon`、`app.kubernetes.io/managed-by: falcon-controller`、`mirrors.zjusct.io/mirror: <base>`、`mirrors.zjusct.io/role: <sync|snapshot|publish-data|publish-http|publish-rsync|proxy-cache>`（同步 PVC 与同步 Job 共用 role `sync`——同为同步流水线子对象；发布子对象的 role 按其服务 key 后缀区分，Service 因此只选中自己的 Pod）。
+一个发布 Deployment 只有在控制器观察到当前 generation，且期望数量的副本都已更新并可用时才算收敛。滚动过程中只要仍有可用副本，Mirror 可以同时处于 `Ready=True` 和 `Progressing=True`。
 
-快照代次子对象（发布 PVC、VolumeSnapshot、同步 Job——Job 创建时即带标签）另带 `mirrors.zjusct.io/sync-timestamp: <Unix秒>`（0 不写）。发布 Pod 模板注解：`mirrors.zjusct.io/active-pvc: <所服务 PVC>`，传入时间戳 > 0 时另含 `mirrors.zjusct.io/sync-timestamp`。
+### HTTPRoute
 
-### 3.3 稳定接口常量（不改名）
+启用 HTTP 服务且全局 `publish.hostnames` 非空时，Falcon 创建 `<base>-publish` HTTPRoute。它包含规范路径 `/<CR 名>`，Mirror 还会按声明顺序追加 `services.http.aliases`；这些 PathPrefix match 共同指向 `<base>-publish-http` Service。路由的 Gateway、hostnames、labels 和 annotations 来自控制器的 `publish` 配置。
 
-- finalizer：`mirrors.zjusct.io/storage-cleanup`
-- 手动同步注解：`mirrors.zjusct.io/sync-request`
-- label/annotation/finalizer/API 组用站点域名 `mirrors.zjusct.io` 而非项目名
+Falcon 不自行裁决不同 HTTPRoute 之间的路径冲突，而是消费 Gateway API 状态。只有期望 parent 对当前 HTTPRoute generation 同时报告 `Accepted=True` 与 `ResolvedRefs=True` 时，HTTP 发布才可用；明确的 `False` 表示发布故障，缺失、`Unknown` 或旧 generation 的 condition 表示仍在收敛。
 
-## 4. Mirror 生命周期
+移除某个 service key 会删除 Falcon 所属的对应 Deployment 和 Service；移除 HTTP 服务或关闭全局 HTTP 发布还会删除所属 HTTPRoute。清理发生在其余 spec 校验之前，因此即使一次编辑还包含其他无效字段，停服请求仍会生效。确定性名字被非所属对象占用时，Falcon 不会删除该对象。
 
-### 4.1 Reconcile 前置门槛（固定顺序）
+### 存储局部性
 
-1. `deletionTimestamp` 非零 → 进入删除清理（§4.8）。
-2. 缺 finalizer → Patch 补加并立即 Requeue。
-3. `validateMirror` 失败 → 状态 Patch：`phase=Degraded`、`observedGeneration=generation`、`Ready=False / Progressing=False / Degraded=True`（reason 均 `InvalidSpec`，message 为校验错误聚合文本）；不发 Event、不 Requeue；已存在的 `pendingJob` 不清除，spec 修复后从 pending 流水线继续。
-4. `pendingJob` 非空 → 进入 pending 快照流水线（§4.5），跳过其余判定（含 paused）。
-5. `activePVC` 非空且有启用的 `spec.services` key → 确保发布负载，并在 `http` key 启用时确保发布 HTTPRoute（路由仅 http 获得；配置总开关另见 §5.3）+ 以 `(activePVC, 0)` 调用 ensurePublish（稳态修复；发生在 paused 检查之前，Paused 的已发布 Mirror 保留服务）。未就绪：`phase=Publishing`、`Ready=False/ServingRollout`、`Progressing=True/ServingRollout`，RequeueAfter 5 秒。
-6. `spec.paused=true` → Paused 稳态（§4.7）。
-7. 四个触发条件（§4.2）任一成立 → startSync。
-8. 空闲路径：`activePVC` 非空时执行保留修剪（§6），然后写空闲状态并按 `nextSyncAt` 重排。
+同步 Pod 直接引用工作 PVC，首次供给时由 WFFC 决定落点，后续由已绑定 PV 的 node affinity 约束；Falcon 不写 `pod.spec.nodeName`，也不额外提供放置字段。
 
-### 4.2 控制器侧 spec 校验（validateMirror）
+快照克隆的来源链对调度器不可见，因此发布 Pod 的放置由 Falcon 从工作 PVC 所绑定的 PV 推导：
 
-按序检查，错误聚合为 InvalidSpec：
+- 常见的 `kubernetes.io/hostname In [...]` 约束转换为强制 `nodeSelector`；
+- 其他 required node affinity 原样复制，并在与用户约束冲突时以卷局部性为准；
+- 没有 node affinity 的共享存储不注入约束，可自由部署多个副本；
+- 工作 PVC 或 PV 尚不可解析时不创建发布 Deployment，以免 Pod 在错误节点启动。
 
-1. 派生子对象名超长（childBase + 最长后缀超 63 字符；Mirror 最长后缀为 `sync-` + 10 位时间戳，错误含派生名与长度）。
-2. `sync.interval <= 0`；`sync.retryInterval <= 0`；`sync.timeout <= 0`。
-3. `sync.podTemplate`：至少一个容器（即 `podTemplate.spec` 必存在）；第一个容器 `image` 非空；pod volumes 不得含保留名 `sync-data`（控制器注入的可写同步 PVC 卷）。
-4. `storage.storageClassName` 为空。
-5. `storage.capacity` 为零或负。
-6. `storage.volumeSnapshotClassName` 为空。
-7. `spec.services` 逐个**启用**的 key（禁用 key 完全不校验）：`mirrorMountPath` 非空且为绝对路径；podTemplate 至少一个容器，第一个容器至少声明一个 containerPort（第一个端口是 Service 目标，被改名为服务 key）；pod volumes 不得含保留名 `mirror-data`；所有容器与 init 容器对 `mirror-data` 的挂载必须 readOnly（CRD 层另有 enable 时 mirrorMountPath/podTemplate.spec 存在性 CEL）。
-8. 启用 http 的 `aliases`（禁用 key 不校验）：无重复项；不等于规范路径 `/<CR名>`；语法规则（以 `/` 开头、不以 `/` 结尾、不含 `//`、不含空白）由 CEL 在 admission 拦截，控制器侧镜像保留 InvalidSpec 路径完整。别名与**其他 Mirror** 路径的重叠是运行时状态，不走 spec 校验——路由生成时检测，落 RouteConflict（§5.3）。
+该约束会在每次 reconcile 重新推导，但内容不变时不会触发额外滚动。具体的 Kubernetes 行为与版本边界见 [Kubernetes 约定](k8s.md)。
 
-（无放置校验：节点局部性同步侧由 K8s 原生处理（WFFC + 绑定 PV 的 nodeAffinity），发布侧由控制器从 PV 推导（§4.4）；多副本发布在共享（RWX）存储上是合法扩展，不再有 replicas 相关的放置门槛。）
+### ProxyMirror 的发布
 
-### 4.3 同步 PVC
+ProxyMirror 没有同步、快照和代次切换：Falcon 直接维护 HTTP Deployment、Service 和 HTTPRoute。启用 cache 时另建 `<base>-cache` PVC，并以可写的 `proxy-cache` volume 注入 Pod；挂载路径仍由用户模板声明。关闭 cache 或 HTTP 服务会删除所属缓存 PVC，关闭 HTTP 服务也会删除发布负载和路由。
 
-- 首次同步定名 `<base>-sync`（固定名、无时间戳）写入 `status.workPVC`，此后复用；用 `storageClassName`、`accessMode`（缺省 ReadWriteOnce）、`capacity`，role `sync` 标签 + controller ownerRef。
-- 容量只增不减：requests 小于声明值时 Patch 扩容；调小不生效也不报错。
-- 已存在但 Terminating → 返回错误 "sync PVC %s is still terminating"（指数退避重试，不改状态）。
+ProxyMirror 不使用 finalizer，删除 CR 后由 owner-reference garbage collection 回收所有子资源。
 
-### 4.4 节点放置（K8s 原生 + 发布侧 PV 推导）
+## Mirror 生命周期
 
-Falcon 不再有任何显式放置字段（2026-09 删除 `sync.nodeName`/`sync.nodeSelector`/`storage.nodeName`/`storage.nodeSelector`）：
+Mirror 的长期状态由活跃发布、最近一次已完成同步和下一次调度共同描述；正在进行的同步事务则单独保存在 `status.currentSync`。它们互不覆盖：例如新同步失败时，旧发布可以继续可用；新代次滚动时，旧 Pod 也可以继续处理请求。
 
-- **同步 Pod**：引用同步 PVC，局部性由调度器原生处理——WFFC 让首次供给的落点由 Pod 调度决定；绑定后 PV 的 nodeAffinity 由调度器自动约束后续同步 Pod。控制器不做任何注入（`pod.spec.nodeName` 恒为空——刻意不绕过调度器）。机制细节见 spec/k8s.md。
-- **发布 Pod**：调度器不追 PVC→dataSource→VolumeSnapshot 链，快照克隆的局部性是空白，由控制器补——ensurePublish 前从**源 PV** 推导约束（`status.workPVC` → `.spec.volumeName` → PV `.spec.nodeAffinity.required`）：
-    - PV 有 `kubernetes.io/hostname` In 表达式（OpenEBS zfs local PV 形态）→ 写入发布 Pod `nodeSelector["kubernetes.io/hostname"]`（与用户 podTemplate nodeSelector 合并，该 key 用户不可覆盖，覆写时发 Warning 事件 `PublishNodeSelectorOverridden`）；
-    - PV 有 nodeAffinity 但提取不出 hostname（其他拓扑形态）→ required terms 原样拷入 pod `affinity.nodeAffinity.required`（仅当用户未自带 nodeAffinity；用户自带时 falcon 项优先并发 Warning 事件 `PublishNodeAffinityOverridden`——两套 Required terms 是 AND 关系、无法合并，卷局部性权威优先）；
-    - PV 无 nodeAffinity（共享存储）→ 不注入任何约束，replicas 自由调度（RWX 下多副本是合法扩展）。
-    - 源 PVC/PV 不可读（未绑定等异常时序）→ 本 reconcile **不创建发布 Deployment**（绝不在无约束下创建 Pod），Warning 事件 `PublishPlacementPending`，落入既有的 Publishing 等待重试。
-    - 推导每次 reconcile 重算：CreateOrUpdate 幂等，同一节点不触发无谓滚动。
-- 推导的依据事实与版本边界（调度器不追 dataSource 链等）见 spec/k8s.md。容量/流量感知的镜像调度是未来高级话题，不在当前设计内。
+### 创建与首次发布
 
-### 4.5 同步 Job 构造与 pending 流水线
+Falcon 首次观察到 Mirror 时先添加 `mirrors.zjusct.io/storage-cleanup` finalizer。只要该 Mirror 从未完成过同步，且当前没有事务，控制器就会自动开始首次同步。
 
-startSync（见 §6.1）分配时间戳并写入 pending 四元组；Job 由 pending 流水线创建，Job 级规格固定，Pod 模板来自用户 `sync.podTemplate`：
+事务开始时，Falcon 一次性写入：
 
-- Job 级（强制）：`backoffLimit: 0`；`activeDeadlineSeconds = int64(timeout 秒)`（不足 1 取 1）。
-- Pod 级强制：`restartPolicy: Never`；`terminationGracePeriodSeconds: 30`；模板 labels 叠加同步 role 标签（含 sync-timestamp）。放置不注入（§4.4：调度器经卷 affinity 原生约束）。
-- 卷强制：`sync-data` = 可写同步 PVC（保留卷名，volume 源与 mount 均**不带** ReadOnly——它是同步输出卷），挂载**第一个容器**的 `dataMountPath`（缺省 `/data`，原样使用）。
-- 默认注入（模板 silent 才注入，写了以用户为准）：`automountServiceAccountToken: false`；Pod `runAsNonRoot: true`、`runAsUser: 65532`（镜像仓统一 uid，同步数据目录对其可写）、seccompProfile `RuntimeDefault`；各容器 securityContext 未设字段的 `allowPrivilegeEscalation: false`、`readOnlyRootFilesystem: true`、`capabilities.drop: [ALL]`；第一个容器 `imagePullPolicy` 缺省补 `IfNotPresent`；`/tmp` emptyDir 卷 + 挂载（ftpsync 类脚本 HOME=/tmp 依赖可写 /tmp，emptyDir 在 readOnlyRootFilesystem 下仍可写）。不注入任何探针（同步容器无服务端口）。不注入任何环境变量：数据位置由 `dataMountPath` 配置，其余由用户 env 显式传入（2026-08 决策不变）。
-- 用户模板内容（容器/镜像/command/args/env/envFrom/输入卷 ConfigMap-Secret/资源/探针/亲和性）原样保留。
-- Job 与 Pod 模板带 role `sync` 标签；controller ownerRef；控制器 Owns watch 该 Job。
+- `status.workPVC`：固定为 `<base>-sync`，以后一直复用；
+- `status.currentSync.startedAt`：本事务及其派生资源的唯一时间身份；
+- `status.currentSync.syncRequest`：若由手动请求触发，则保存请求值；
+- `status.nextSyncAt`：清空，避免同一事务被定时器重复触发。
 
-pending 流水线阶段（`pendingJob/pendingPVC/pendingSnapshot/pendingSyncTimestamp` 精确编码进度）：
+`lastSync` 只记录已经结束的尝试，因此事务运行期间仍保留上一笔 `Succeeded` 或 `Failed` 结果。是否正在运行由 `currentSync` 表示，不使用持久化的 phase。
 
-1. **创建（含排队）**：Job 不存在时先向全局信号量申请配额；满则不创建 Job，`Progressing=True` reason `SyncQueued`（message 含上限数值），RequeueAfter 5 秒。配额申请成功后、创建 Job 前执行**时间戳冲突检查**（见第 5 步之前的说明），通过后创建 Job（创建失败或冲突释放配额；冲突交由冲突分支处理）。
-2. **运行中**：信号量以 `existing=true` 补登记（绕过上限判定）；`phase=Syncing`、`Progressing=True/SyncJobRunning`（"Job %s is running"），RequeueAfter 5 秒。
-3. **终态释放配额**：判定 Complete（条件 `Complete=True` 或 `succeeded > 0`）或 Failed（条件 `Failed=True` 或 `failed > 0 && active == 0`）即 `Release`（幂等）；后续发布阶段的重复 Reconcile 不会重新占用。
-4. **Job 失败** → 失败路径（§4.6），reason `SyncJobFailed`，message 取 Failed 条件 message（空则 reason，再空则 "Job %s failed"）。
-5. **时间戳冲突检查（Job 创建时）**：时间戳已在 startSync 分配并写进 status（`pendingSyncTimestamp`，同时派生 `pendingSnapshot = pendingPVC = <base>-snap-<ts>`）。创建 Job 前检查该时间戳是否已被占用：本 namespace 内带 mirror 标签的 Job/PVC/VolumeSnapshot 已有同值 sync-timestamp 标签，或 `<base>-snap-<ts>` 按名 Get 命中（覆盖无标签残留）→ 冲突（**冲突即错误，不逐秒递增**）。Job 创建时即带与名字一致的 sync-timestamp 标签。
-6. **时间戳冲突分支**：Warning 事件 `SnapshotTimestampConflict`（message 含冲突详情并提示检查同秒残留对象）；`phase=Degraded`、`Ready=(activePVC 非空)`、`Progressing=False`、`Degraded=True`（reason 均 `SnapshotTimestampConflict`）；**pending 流水线字段不清空**，RequeueAfter 1 分钟重试——不风暴重排也不丢弃本次同步；冲突不消解（残留对象未删除）则每分钟重复。
-7. **VolumeSnapshot**（Job 成功后；时间戳与名字直接复用 status 中的 pending 值，无二次分配）：不存在则创建 `<base>-snap-<ts>`（source = 同步 PVC、class = `volumeSnapshotClassName`、role `snapshot` + 时间戳标签、ownerRef）；已存在且 `status.error` 非空 → 失败路径 reason `SnapshotFailed`（message 用 CSI 报错文本，空则 "the CSI snapshot controller reported an error"）；未 readyToUse 期间 `phase=Publishing`、`Progressing=True/Snapshotting`（"snapshotting completed sync PVC <workPVC>"），RequeueAfter 5 秒。
-8. **克隆发布 PVC**：快照 ready 后创建 `<base>-snap-<ts>`——**与其快照同名，kind 不同**，`dataSource = {apiGroup: snapshot.storage.k8s.io, kind: VolumeSnapshot, name: <pendingSnapshot>}`；StorageClass 用 `publishStorageClassName`（缺省回落 `storageClassName`）；accessMode/capacity/role `publish-data`/时间戳标签/ownerRef 同规则；Terminating 时报 "publish PVC %s is still terminating"。
-9. **发布滚动**：克隆 PVC 创建请求被接受即视为就绪（不等 Bound）。有启用的 services key 时维护负载并等滚动完成（未完成 `phase=Publishing`、`Progressing=True/ServingRollout`、5 秒重查）；全部禁用时跳过，直接激活（纯同步镜像）。
+### 一次同步事务
 
-### 4.6 发布激活与失败路径
+同步事务依次经过以下阶段：
 
-**发布激活**（一次 Patch 完成）：Normal 事件 `SnapshotPublished`（"Published PVC <pendingPVC>"）；`activePVC/activeSnapshot` 写入，清空全部 pending 字段，`lastHandledSyncRequest = pendingSyncRequest 原值`，`phase=Ready`，`lastPublishedAt=now`，`nextSyncAt = now + interval`；`lastSync` 置 `Succeeded/finishedAt/message="published PVC <pvc>"`；条件 `Ready=True/Published`（"PVC <pvc> is published"）、`Progressing=False/Published`、`Degraded=False`；RequeueAfter = interval。
-
-**失败路径**（`failPendingSnapshot`，reason 为 `SyncJobFailed` 或 `SnapshotFailed`）：Warning 事件（message "Synchronization run failed: <失败信息>"）；清空全部 pending 字段；`lastHandledSyncRequest` 同上；`phase=Degraded`；重试调度（§6.2）：`consecutiveFailures < failureRetryLimit` 时计数 +1、`nextSyncAt = now + retryInterval`（快速重试，RequeueAfter 同步缩短），否则计数冻结、`nextSyncAt = now + interval`；`lastSync` 置 `Failed/finishedAt/<失败信息>`；条件 `Ready=(activePVC 非空)`、`Degraded=True`（reason 为失败 reason）、`Progressing=False` 且 message 追加重试信息（"<失败信息>; N consecutive failure(s); retry queued for <时刻>"，达到上限时为 "... retry limit <L> reached after N consecutive failure(s); next attempt scheduled for <时刻>"）；RequeueAfter = 距 `nextSyncAt`。已发布的 `activePVC/activeSnapshot` 与发布负载不受影响。
-
-**失败 Job 保留**（keepFailedJobs）：每次同步到达终态（发布激活与失败路径均会执行）后，控制器按创建时间保留最新的 `spec.sync.keepFailedJobs` 个失败 Job（Background 传播删除其余及其 Pod）；成功 Job 不由该路径触及（带 sync-timestamp 标签，随快照代次由 pruneOldSnapshots 清理，见 §7）。
-
-发布激活的 Patch 同时 best-effort 携带 `sizeBytes`（见 §1.2）：控制器按标签定位任一 Running 发布 Pod 取其节点，再读该节点 kubelet stats summary 中此 PVC 的 usedBytes。计算不成功不影响激活的任何语义。
-
-失败代谢物：同步 PVC 里的半成品数据不被清理；极端时序下可能留下孤儿快照（见 limitations）。
-
-### 4.7 paused 语义
-
-`spec.paused=true` 只阻止新同步启动：
-
-- 仅在无 pendingJob、无校验错误时判定；状态 Patch 为 `phase=Paused`、`observedGeneration=generation`、`Ready=(activePVC 非空)` reason `Paused`、`Progressing=False/Paused`、`Degraded=False/Paused`。
-- 同步进行中设置 paused：流水线照常执行到发布激活（激活不受 paused 影响），之后才落 Paused 稳态。
-- 暂停期间已发布 Mirror 的发布负载与 HTTPRoute 照常维护（服务确保在 paused 检查之前）；到期 `nextSyncAt` 不触发同步。
-
-### 4.8 删除与 finalizer（顺序固定）
-
-1. 列出本 namespace 内带 `mirrors.zjusct.io/mirror=<base>` 标签的**全部 PVC**（同步 PVC + 全部发布克隆；只按标签、不校验 ownerRef——与 Mirror 同 base 的 ProxyMirror 缓存 PVC 会被一并删除），逐个 Delete（NotFound 忽略）；列表非空 RequeueAfter 2 秒。
-2. PVC 清空后对同标签 VolumeSnapshot 同样删除与重排。
-3. 两者清空后移除 finalizer 放行 API 删除。
-4. Job/Service/Deployment/HTTPRoute 不由该流程删除——owner-reference GC 回收。PVC 底层 PV 回收由 StorageClass reclaimPolicy 决定（Retain 下数据保留）。
-
-`spec.services` 为空（纯同步镜像）的 Mirror：存储侧流水线照常（快照、克隆发布 PVC 照常产生），跳过发布负载与 HTTPRoute，直接发布激活；webapi 目录不收录——没有发布服务就无从访问（见 §8.2）。
-
-## 5. 发布 Service / Deployment / HTTPRoute
-
-`spec.services` 全部禁用（纯同步镜像）的 Mirror：存储侧流水线照常（快照、克隆发布 PVC 照常产生），跳过发布负载与 HTTPRoute，直接发布激活；webapi 目录不收录——没有发布服务就无从访问（见 §8.2）。
-
-至少一个 `spec.services` key 启用时，控制器为**每个启用的 key**维护一对 Deployment/Service（名 `<base>-publish-<key>`，role 标签 `publish-<key>` 保证每个 Service 只选中自己的 Pod），全部只读挂载同一发布 PVC；只有启用的 `http` key 额外获得发布 HTTPRoute。**路由矩阵：http → Deployment+Service+HTTPRoute；rsync → Deployment+ClusterIP Service（无 HTTPRoute、无 TCPRoute；未来 RsyncRoute 不在范围内）**。ProxyMirror 同构，但只有 `http` key 且没有数据卷（挂可选缓存 PVC）。
-
-### 5.1 发布 Service（每个启用的 key 一个）
-
-`<base>-publish-<key>`（`publish-http`/`publish-rsync`）：CreateOrUpdate；role `publish-<key>` 标签；selector `{mirrors.zjusct.io/mirror: <base>, mirrors.zjusct.io/role: publish-<key>}`；单端口 `{name: <key>, port: 80, targetPort: <key>（命名端口）, protocol: TCP, appProtocol: http 为 "http"、rsync 缺省}`（ClusterIP，控制器不设 type）；controller ownerRef。
-
-### 5.2 发布 Deployment（每个启用的 key 一个）
-
-`<base>-publish-<key>`（CreateOrUpdate）。用户 podTemplate 是完整的 `.spec.template`，控制器在其上按三类行为合并：
-
-**强制项（数据完整性与身份，每次 reconcile 覆写/叠加，用户设置不生效）**：
-
-- `mirror-data` 卷：发布 PVC 的**只读**卷源（`readOnly: true`）注入 pod volumes；并在**第一个容器**的 `mirrorMountPath` 处只读挂载（若用户已在同路径同名挂载，readOnly 被强制回 true）。用户声明名为 `mirror-data` 的 volume 是 InvalidSpec（保留名）；任何容器/init 容器对 `mirror-data` 的额外挂载必须 readOnly=true，否则 InvalidSpec（§4.2 第 7 条；刻意用控制器校验而非 CEL 迭代 podTemplate 列表，避免 CRD cost budget）。
-- 身份与放置：Deployment/Service 名、labels、selector；pod 模板 labels 叠加 `{mirror: <base>, role: publish-<key>}`（用户同名 label 被覆写），注解叠加 `mirrors.zjusct.io/active-pvc: <claimName>`（时间戳 > 0 时另含 sync-timestamp，= 0 时删除该注解，用户其余注解保留）；`replicas = spec.replicas`；滚动策略 `RollingUpdate` 且 `maxUnavailable: 0`、`maxSurge: 1`；**节点放置 = §4.4 的 PV 推导结果**（hostname selector 强制合入且该 key 用户不可覆盖；非 hostname 拓扑拷入 affinity；共享存储不注入；源 PVC/PV 不可读时本 reconcile 不创建 Deployment）。
-- 端口约定（沿用旧形状）：第一个容器的**第一个 containerPort** 被改名为服务 key，即 Service 的命名 targetPort 与默认探针引用的端口；启用的服务因此必须至少一个容器、第一个容器至少一个端口。
-
-**默认注入（用户没写才注入，写了以用户为准）**：
-
-- readinessProbe：第一个容器未设时注入 TCP 探针（命名端口 `<key>`，period 5s、timeout 2s、failureThreshold 3）。
-- `/tmp` emptyDir：pod 无 `tmp` 卷且第一个容器无 `/tmp` 挂载时注入卷 + 挂载（readOnlyRootFilesystem 下 nginx 等需要可写 /tmp）。
-- 各容器 securityContext 未设的字段：`readOnlyRootFilesystem: true`、`allowPrivilegeEscalation: false`、`capabilities.drop: [ALL]`（显式 `readOnlyRootFilesystem: false` 被尊重）。
-- pod 级未设的字段：`automountServiceAccountToken: false`、`runAsNonRoot: true`、`seccompProfile: RuntimeDefault`。
-
-**移除（旧形状的隐式行为，不再注入）**：
-
-- livenessProbe（改由用户在 podTemplate 自行声明）；HTTP GET 探针默认（旧 `readinessPath` 语义废除）。
-- 旧单容器构造（容器名 `server`/`proxy`、`image`/`imagePullPolicy`/`command`/`args`/`ports`/`resources` 字段）整体废除——容器完全由 podTemplate 声明。
-
-Pod 模板注解 `active-pvc`/sync-timestamp 的稳态修复语义：ensurePublish 以 `(activePVC, 0)` 调用时删除 sync-timestamp 注解（若原含该注解会触发一次额外滚动，见 §9.3）。就绪判定：`generation != observedGeneration` 未就绪；否则 `availableReplicas >= replicas && updatedReplicas >= replicas`。**Mirror 整体发布就绪要求所有启用的 key 均就绪**。
-
-### 5.3 发布 HTTPRoute 生成
-
-生成条件：
-
-- Mirror：`status.activePVC` 非空、`spec.services.http` 启用（从未发布不产生路由；rsync-only 不产生路由）；发生在 paused 检查之前（Paused 已发布 Mirror 保留路由）。
-- **跨 Mirror 路径冲突检查**（生成前，每次 reconcile）：列出本 namespace 全部 Mirror，取各自公开路径集合（规范路径 `/<CR名>` + 启用 http 的全部 aliases），与本 Mirror 集合两两比较——**相等或分段前缀重叠即冲突**（Gateway API PathPrefix 按段匹配：`/git` 匹配 `/git/linux.git` 但不匹配 `/gitfoo`；例：本 Mirror 别名 `/git/linux.git` 与另一 CR 名 `git` 的规范路径 `/git` 冲突）。冲突时本 Mirror **不创建也不更新** HTTPRoute，落 Degraded 条件（reason `RouteConflict`，message 含冲突双方路径与对方 CR 名），负载不受影响，RequeueAfter 1 分钟（对方删除或改别名后自动恢复路由生成）。冲突前已存在的旧路由不删除（与配置禁用同策略，由操作者处理）。该检查依赖集群状态，故在路由生成时逐次执行而非 spec 校验。
-- ProxyMirror：Deployment 就绪判定为 Ready 且 `spec.services.http` 启用（无 aliases，不参与上述冲突集合的别名部分，仅规范路径）。
-- 配置总开关：`serving.hostnames` 为空 ⇒ 所有路由确保直接跳过——不创建、不更新、也**不删除**已存在路由（禁用后旧路由留在集群）；启动时记一次日志 "serving-route generation disabled: serving.hostnames is empty"。
-
-路由形状：
-
-- 名 `<base>-publish`，CR 的 namespace；ownerReferences 恰一条 controller=true 指向 CR；无 finalizer，删 CR 即 GC。
-- labels = 统一子对象标签（role `publish`）+ 配置 `serving.labels`；annotations = 配置 `serving.annotations` 的克隆；CreateOrUpdate 每次整体覆写（配置移除的键同步移除）。
-- parentRefs 恰一条：`group: gateway.networking.k8s.io, kind: Gateway, name: <serving.gatewayRef.name>`；namespace 仅在配置非空且 ≠ CR namespace 时写入；sectionName 非空时写入。
-- hostnames = 配置 `serving.hostnames`（顺序保持）。
-- **恰一条规则，多个 match**：规范路径 `PathPrefix /<CR名>`（CR 原名，非 base）在前，`services.http.aliases` 按声明顺序逐项追加 `PathPrefix` match（规则内多 match 为 OR 语义），全部指向同一 backendRef `group: ""`、`kind: Service`、`name: <base>-publish-http`、`port: 80`。规范路径恒为公开主路径：mirrorz 输出、门户链接、文档只用规范路径；别名仅是额外路由，内容与协商行为完全一致。
-- 事件：创建发 Normal `ServingRouteCreated`（"Created publish HTTPRoute <ns>/<name> (PathPrefix /<cr名>)"），更新发 Normal `ServingRouteUpdated`；无变化不发（事件 reason 名沿用）。
-- 控制器没有删除路由的逻辑：CR 删除走 GC；发布状态消失、配置禁用或 RouteConflict 时路由保留，由操作者处理。
-
-## 6. 调度与并发
-
-### 6.1 四种同步触发条件
-
-通过全部门槛后，仅在以下之一成立时 startSync：
-
-| 条件 | 判定 |
-| --- | --- |
-| 手动 | 注解 `mirrors.zjusct.io/sync-request` 非空且 ≠ `status.lastHandledSyncRequest` |
-| spec 变更 | `activePVC` 非空且 `observedGeneration != generation` |
-| 首次引导 | `activePVC` 为空且 `lastSync == nil` |
-| 定时到期 | `nextSyncAt` 非空且 ≤ 当前控制器时间（UTC） |
-
-startSync：Normal 事件 `SynchronizationStarted`（"Starting synchronization run with Job <jobName>"）；**在此分配 Unix 秒时间戳（任务创建时刻）并派生全部名字**——Job 名 `<base>-sync-<ts>`、快照与发布 PVC 名 `<base>-snap-<ts>`（同名）；同步 PVC 名固定 `<base>-sync`（复用或定名，无时间戳）。一次 Patch 写 `observedGeneration`、`phase=Initializing`、`workPVC`（复用或定名）、pending 四元组（`pendingSyncTimestamp=<ts>`、`pendingPVC=pendingSnapshot=<base>-snap-<ts>`、`pendingJob=<base>-sync-<ts>`）、`pendingSyncRequest=<注解值>`、`lastSync={jobName, Running, startedAt=now}`；条件 `Ready=(activePVC 非空)`、`Progressing=True`、`Degraded=False`（reason 均 `SynchronizationStarted`）；立即 Requeue。**不修改 `nextSyncAt`**（保持上一次到期时刻，直到发布或失败重置）。时间戳是否可用（无同秒残留 Job/PVC/VolumeSnapshot）在 Job 创建时检查（§4.5 第 5/6 步）。
-
-手动触发的值先存 `pendingSyncRequest`，发布或失败时搬入 `lastHandledSyncRequest`——同一注解值不会触发第二次。spec 变更触发只对已发布 Mirror 生效（避免半初始化状态反复重启）；同步进行中的 spec 变更不打断流水线（startSync 已推进 observedGeneration），落定后再触发一轮。
-
-### 6.2 interval / retryInterval 与 RequeueAfter 调度链
-
-- 空闲重排：`nextSyncAt` 非空时 `RequeueAfter = time.Until(nextSyncAt)`（< 1 秒强制 1 秒）；为空不重排。
-- **成功后**：`nextSyncAt = now + interval`（发布激活路径），`consecutiveFailures` 清零。
-- **失败后**（快速重试语义）：`consecutiveFailures < failureRetryLimit` 时 `nextSyncAt = now + retryInterval` 且计数 +1——失败被快速重试；达到 `failureRetryLimit` 后计数冻结、`nextSyncAt = now + interval`（退回常规节奏）。`failureRetryLimit = 0` 表示没有快速重试，失败一律等 `interval`。`retryInterval` 默认 `15m`（控制器校验 > 0；代码防御分支：<= 0 时回落 `interval`，避免调度塌缩到"立即"）。`consecutiveFailures` 持久化在 status，重启后重试节奏不丢。
-- **没有周期性 resync 兜底**：某次 RequeueAfter 丢失且无任何 watch 事件时该 Mirror 调度可能停摆（代码现状，见 limitations）。
-- 重启恢复：informer 首次 List 为每个 Mirror 触发一次 Reconcile，空闲 Mirror 按持久化 `nextSyncAt` 重算；已到期的立即满足定时条件启动同步。
-
-### 6.3 全局并发信号量（sync.maxConcurrent）
-
-- `<= 0` 不限。新 Job 创建前 `Acquire(name, existing=false)`：已持有槽数 ≥ max 时失败 → SyncQueued 排队（不创建 Job，5 秒重试）；排队同步因此可能晚于 `nextSyncAt` 启动——per-Mirror 的 interval 调度不受影响，配额在其上额外生效。
-- Job 终态 `Release(name)`；释放幂等（未知名字 no-op）；同名重复 Acquire 是 no-op 返回成功。
-- 重启后信号量为空，Reconcile 到已存在的非终态 Job 时以 `existing=true` 补登记（绕过上限，保证其终态能释放槽位）——重启瞬间可能短暂超限。
-- **信号量是纯内存态**，不持久化（见 limitations）。
-
-## 7. 快照保留（pruneOldSnapshots）
-
-- 执行前提：空闲路径且 `activePVC` 非空；pending 流水线期间不执行；从未成功发布的 Mirror 永不清理。
-- 保留窗口 `keep = previousSnapshots + 1`（CRD 约束下 2–11；计算结果 < 1 钳为 1，防御分支）。
-- 参与统计的克隆发布 PVC：带 mirror 标签、带可解析 sync-timestamp 标签、`metav1.IsControlledBy` 该 Mirror；按时间戳**数值降序**排序（时间戳冲突在 Job 创建时即拒绝，故标签值唯一）。保留前 keep 个，其余 Delete。
-- floor = 保留集中最旧者时间戳（数量 ≤ keep 时 floor = 0，不做下界清理）。
-- VolumeSnapshot 滞后删除：`ts >= floor` 保留；`ts < floor` 但仍存在同时间戳克隆 PVC 的保留（PVC 数据源引用）；仅当 `ts < floor` 且同时间戳克隆 PVC 完全消失时删除——克隆 PVC 先于快照消失。
-- Job 清理：带时间戳标签、`ts < floor`、IsControlledBy 的 Job 删除，`DeletePropagationBackground`；不检查同时间戳 PVC 是否存在。
-- 失败 Job（无时间戳标签）不被该路径触及——它们由 keepFailedJobs 机制按数量保留/清理（§4.6）。极端时序下（快照已建但克隆 PVC 从未创建）可能留下孤儿快照。
-
-## 8. webapi（:8082，只读 HTTP API）
-
-单一监听，默认 `:8082`，`api.webapiBindAddress` 为 `"0"` 时整体关闭。作为 manager Runnable 运行（`ReadHeaderTimeout` 10 秒，manager 退出时 5 秒超时优雅关闭）。无鉴权：内容为公开目录或 spec-only 数据。
-
-### 8.1 通用约束
-
-- **GET-only**：非 GET 一律 405，响应头 `Allow: GET`，body `{"error": "method not allowed: this endpoint is read-only (GET)"}`；检查先于路由匹配。
-- 未注册路径 404 `{"error": "not found"}`。
-- JSON 输出 `Content-Type: application/json`、2 空格缩进；错误一律 `{"error": <message>}`。
-- 数据经 manager 缓存 client 读取（不直连 API server）；cache 以 `DefaultNamespaces` 限定到 `POD_NAMESPACE`，故 List 实际只见本 namespace。List 失败 500。
-
-### 8.2 GET /mirrorz.json（MirrorZ 1.7 目录）
-
-- 开关：`catalog.enabled`（Go 侧默认 false，chart 默认 true）；关闭时 404 `{"error": "mirrorz catalog is disabled"}`。
-- 文档骨架：`{version: 1.7, site: {url, abbr, name}, info: [], mirrors: [...]}`；abbr/name 空则省略；info 恒为空数组；Mirror 与 ProxyMirror 条目合并后按 `cname` 升序。
-- 条目映射：`cname = metadata.name`；`url = <baseURL>/<CR名>`（无末尾斜杠；**恒为规范路径——`services.http.aliases` 别名不出现在 mirrorz 输出中**，别名仅是额外路由）；`upstream = spec.info.upstream`（空省略）；`desc` 取 `description` 的 `zh`（非空），否则 `en`（皆缺省略）；`size` 为 `status.sizeBytes` 格式化的人类可读字符串（MirrorZ 的 size 是字符串而非字节数：1024 进位、两位小数，如 `596.18G`），未知（0）时省略；不输出 `help`。
-- 状态字母（`status.phase` → 单字母）：
-
-| Mirror | 字母 | ProxyMirror | 字母 |
-| --- | --- | --- | --- |
-| Ready | U | Ready | U |
-| Syncing / Publishing / Initializing | S | Pending / ""（未知） | S（滚动中） |
-| Paused | P | — | |
-| Degraded / Pending / "" | D | Degraded | D |
-
-- 未发布（`activePVC` 空，即从未产生过发布 PVC）或未启用任何发布服务（`spec.services` 无启用的 key——没有发布服务就无从访问，不该进公开目录）的 Mirror 不出现；ProxyMirror 无此概念，全部列出。
-- **Host 回显算法**：请求 Host 去端口（`net.SplitHostPort` 成功取 host）→ 转小写 → 与 `serving.hostnames` 逐项（小写化）比较；命中时 `baseURL = <site.url 的 scheme>://<回显host>`（端口不保留，scheme 缺省 https）；Host 空或未命中回落 `site.url`（去末尾 `/`）。site.url 与全部条目 url 用同一 baseURL。
-
-### 8.3 GET /api/jobs（legacy 兼容任务列表）
-
-字段名保持旧 Docker 时代 `shared.Job` 兼容，附新字段 `kind/namespace/phase/active_pvc/last_finished_at`。不受 `catalog.enabled` 影响。
-
-Mirror 条目映射：
-
-- `id = metadata.name`；`status` 归一到旧词汇表：`Initializing/Syncing/Publishing→Running`、`Paused→Paused`、`Ready/Pending/Degraded/""→Waiting`（旧 `Scheduled`/`Orphan` 在新系统永不出现）。
-- `last_attempt_at = lastSync.startedAt`；`next_attempt_at = nextSyncAt`；`last_action_status = lastSync.phase`（Running/Succeeded/Failed）。
-- `last_finished_at = lastSync.finishedAt`；`last_success_at` 仅 Succeeded 时 = finishedAt 否则零值；`last_failure_at` 仅 Failed 时。
-- `updated_at` 尽力而为：finishedAt 非零取之，否则 startedAt，再否则零值；`actions` 恒 `[]`。
-- 时间戳未知时输出零值 `0001-01-01T00:00:00Z`。
-
-ProxyMirror 条目：`id/namespace/kind/phase` 照常；`status` 直接取原始 phase（Ready/Pending/Degraded），不映射旧词汇表；全部时间戳零值；`actions: []`。
-
-排序：`kind` 升序（Mirror 在 ProxyMirror 前）→ `namespace` → `id`；无 CR 输出 `[]`。
-
-### 8.4 GET /api/repos/\<name\>（spec-only 单仓视图）
-
-- 格式协商：`.json` → JSON；`.yaml`/`.yml` → YAML；无后缀默认 YAML（Content-Type `application/x-yaml`）。名字先 TrimSpace 再去后缀。
-- 恰一个 Mirror 或 ProxyMirror 匹配（跨 namespace、跨 kind）→ 200，body 为其 `spec` 序列化；**status、metadata 永不出现**。
-- 无匹配 → 404 `{"error": "repo not found: <name>"}`；多于一个（不同 namespace 或 Mirror 与 ProxyMirror 重名——不同资源类型 API 层允许）→ 409 `{"error": "ambiguous repo name: <name>"}`；名字为空（`/api/repos`、`/api/repos/`）→ 404 `{"error": "missing repo name: use /api/repos/<name>"}`（旧版整表 JSON 列表端点不再存在）。
-
-### 8.5 GET /api/usage（ZFS 用量聚合）
-
-- 开关：仅环境变量 `ZFS_AGENT_SERVICE`（非空 = 启用，值为 zfs-agent headless Service 名）；没有 config 字段。未启用时 404 `{"error": "usage aggregation is disabled"}`。
-- 数据源：chart 部署的 zfs-agent DaemonSet（每存储节点一个，chroot 进宿主机只读执行 zfs/zpool，见 chart spec §7.5）。控制器用 client-go clientset 列出本 ns 的 `discovery.k8s.io` EndpointSlices（label `kubernetes.io/service-name=<service>`），取 ready 端点地址并去重（Ready 条件缺省按 API 语义视为 ready），并发 `GET http://<ip>:9474/v1/zfs` 拉取各节点的 ZFS 用量报告。agent 端口 9474、单请求超时 5s、聚合缓存 TTL 30s 均为代码常量，不可配置。
-- 聚合与降级：单节点失败（网络错误/超时/非 200/解码失败）不阻塞其余节点；错误记为 `<节点名>: <错误>`（节点名取 EndpointSlice 的 nodeName，缺失时用地址），并使本次聚合 `complete=false`。失败/降级结果与成功结果同样进缓存，TTL 到期重算；无 ready 端点同样 `complete=false`（错误 "no ready zfs-agent endpoints ..."）。EndpointSlices 列取失败则整体 500，且不缓存（下次请求重试）。
-- 响应形状：`{"generatedAt": <聚合时刻>, "mirrors": [...]}`；mirrors 按名升序，**收录本 ns 全部 Mirror**（含从未同步的）。每项 `{name, sync, snapshots, totalBytes, complete, errors}`：
-    - join：同步 PVC 名优先取 `status.workPVC`，为空时按 childBase 规则派生 `<base>-sync`；在聚合数据中按 `pvc.name` 匹配（namespace 须为本 ns）→ `sync: {pvc, referencedBytes, writtenBytes}`。
-    - `snapshots` = 该 dataset 的全部快照按 `createdAt` 降序 `{name, writtenBytes, referencedBytes, createdAt}`；`name` 优先用 userprop `openebs.io:vs-name`（即 VolumeSnapshot 对象名），缺失时回退 ZFS 快照名；最老快照在 UI 中使用其 `referencedBytes` 基线，后续快照使用相对上一快照的 `writtenBytes` 增量。
-    - `sync.writtenBytes` 为同步 dataset 自最近快照以来的增量（无快照时回退 `referencedBytes`）；`totalBytes` 直接采用 ZFS dataset `usedBytes`，包含快照占用，避免重复计算。
-    - 无 agent 数据匹配的 Mirror：`sync: null`、`snapshots: []`、`totalBytes: 0`；`complete`/`errors` 为全局聚合结果（任一 agent 失败，所有 Mirror 同值）。
-- agent 报告中匹配不到任何 Mirror 的 dataset（其他系统的卷、无 openebs userprop 的残留 dataset）被忽略；`mirrorz.json` 的 `size` 与 `status.sizeBytes`（kubelet 口径）不受影响。
-
-## 9. 可观测性
-
-### 9.1 条件（Conditions）reason 枚举
-
-Mirror 每次状态 Patch 维护 Ready / Progressing / Degraded 三条（`meta.SetStatusCondition` 幂等，携带 observedGeneration/reason/message）：
-
-| reason | Ready | Progressing | Degraded | 备注 |
-| --- | --- | --- | --- | --- |
-| InvalidSpec | False | False | True | message 为校验错误聚合 |
-| SynchronizationStarted | (activePVC 非空) | True | False | |
-| SyncQueued | — | True（含上限数值） | — | 其余两条不动 |
-| SyncJobRunning | — | True | — | "Job \<job\> is running" |
-| Snapshotting | — | True | — | "snapshotting completed sync PVC \<pvc\>" |
-| ServingRollout | False（稳态等待时） | True | — | 流水线滚动等待时仅 Progressing=True（"publishing PVC \<pvc\>"）；reason 名沿用（条件 reason 词汇表不改名） |
-| Published | True | False（激活）/Idle（空闲） | False | "PVC \<pvc\> is published" |
-| Pending | False | — | — | "waiting for the initial synchronization"（仅首见） |
-| Paused | (activePVC 非空) | False | False | |
-| SyncJobFailed / SnapshotFailed | (activePVC 非空) | False（message 追加重试队列信息） | True | message 为失败信息；Progressing message 另含 consecutiveFailures 与下次尝试时刻（§4.6） |
-| SnapshotTimestampConflict | (activePVC 非空) | False | True | phase 置 Degraded，pending 保留，1 分钟重试；冲突在同步 Job 创建时检查（时间戳 = 任务创建时刻） |
-| RouteConflict | False | False | True | 跨 Mirror 公开路径（规范路径/别名）相等或分段前缀重叠：路由不创建/不更新，负载不受影响，phase 置 Degraded，1 分钟重查；见 §5.3 |
-
-ProxyMirror 只有三个 reason：`InvalidSpec`（False/False/True）、`ServingRollout`（False/True/False）、`Serving`（True/False/False，"the proxy Deployment is available"）。
-
-### 9.2 Events（EventRecorder 名 `falcon-controller`）
-
-| 事件 | 类型 | 对象 | 触发点 |
-| --- | --- | --- | --- |
-| SynchronizationStarted | Normal | Mirror | startSync |
-| SnapshotPublished | Normal | Mirror | 发布激活 |
-| SyncJobFailed | Warning | Mirror | Job 失败 |
-| SnapshotFailed | Warning | Mirror | CSI 快照报错 |
-| SnapshotTimestampConflict | Warning | Mirror | 同秒时间戳冲突 |
-| ServingRouteCreated | Normal | Mirror + ProxyMirror | 发布 HTTPRoute 创建（reason 名沿用） |
-| ServingRouteUpdated | Normal | Mirror + ProxyMirror | 发布 HTTPRoute 更新（reason 名沿用） |
-
-InvalidSpec、SyncQueued、SyncJobRunning、Snapshotting 等中间进度不发事件（仅状态/日志）。
-
-### 9.3 指标与探针
-
-- 指标仅 controller-runtime 内建（Go 运行时/workqueue/rest-client 等），无任何 Mirror 业务指标；`:8080/metrics`，chart 经 metrics Service + ServiceMonitor 暴露。
-- 控制器探针：liveness GET `:8081/healthz`、readiness GET `:8081/readyz`（controller-runtime healthz.Ping，manager 运行即 200）；period 10s、timeout 2s、failureThreshold 3。探针端口在 chart 模板硬编码（见 chart spec 的 fail-fast）。
-- UI 探针：见 ui spec。
-
-## 10. 控制器配置与进程装配
-
-### 10.1 配置文件 schema（/etc/falcon/config.yaml）
-
-唯一 flag 为 `--config`（默认 `/etc/falcon/config.yaml`），无业务 flag。schema 与 `internal/config` 结构体一一对应；Load 先以 Default() 为底再 Unmarshal，稀疏文件产生可用配置。
-
-| 字段 | 默认 | 说明 |
+| 阶段 | 行为 | 等待或完成条件 |
 | --- | --- | --- |
-| `log.level` | `info` | 枚举 debug/info/warn/error（zap） |
-| `api.metricsBindAddress` | `:8080` | |
-| `api.healthProbeBindAddress` | `:8081` | |
-| `api.webapiBindAddress` | `:8082` | `"0"` 关闭 webapi |
-| `site.url` | 无（必填） | 必须带 scheme；mirrorz site 段与回落 baseURL |
-| `site.abbr` / `site.name` | 空 | 可选 |
-| `catalog.enabled` | `false` | `/mirrorz.json` 开关（chart 默认 true） |
-| `sync.maxConcurrent` | `0`（不限） | 全局同步并发上限 |
-| `serving.gatewayRef.{name,namespace,sectionName}` | 空 | |
-| `serving.hostnames[]` | 空 | 空 ⇒ serving 路由生成整体关闭 |
-| `serving.labels` / `serving.annotations` | 空 | 盖到每条发布 HTTPRoute |
+| 排队 | 申请全局同步配额，尚不创建 Job | 有配额后继续；无配额时以 `SyncQueued` 每 5 秒重试 |
+| 同步 | 确保工作 PVC 与同步 Job 存在 | Job 成功或失败；运行中以 `SyncJobRunning` 每 5 秒观察 |
+| 快照 | 为成功完成的工作 PVC 创建 VolumeSnapshot | `readyToUse=true`；等待时为 `Snapshotting` |
+| 克隆 | 从快照创建同名发布 PVC | apiserver 接受创建请求后继续，绑定与放置由后续发布处理 |
+| 发布 | 将所有启用的 Deployment 滚动到新 PVC | 各 Deployment 收敛；等待时为 `PublishRollout` |
+| 激活 | 更新 `activePVC`、`activeSnapshot` 和同步结果 | 清除 `currentSync`，事务结束 |
 
-fail-fast 校验（启动时，非法拒绝启动）：归一化（site.url TrimSpace 去末尾 `/`；log.level 空补 info）后检查——log.level 枚举；site.url 非空且含 `://`；hostnames 非空时 gatewayRef.name 必填；hostnames 不含空白项、不含 `/`（裸主机名）。文件不可读/非法 YAML 报错（前缀 `read config` / `parse config`），stderr + 退出码 1。
+同步 Job 强制使用 `backoffLimit: 0`，其 `activeDeadlineSeconds` 来自 `spec.sync.timeout`。Pod 模板、工作卷和安全默认值以 CRD 章节为准。Job 进入终态后立即释放并发配额；快照、克隆和发布阶段不占用该配额。
 
-### 10.2 进程装配
+时间戳以秒为精度。创建 Job 前，Falcon 会确认本 Mirror 没有同一时间戳的 Job、PVC 或 VolumeSnapshot；冲突时保留 `currentSync`，报告 `SnapshotTimestampConflict`，每分钟以同一事务身份重试，而不会静默改用另一时间戳。
 
-- `POD_NAMESPACE` 环境变量必填（空则报错退出码 1）：manager cache `DefaultNamespaces` 限定该 namespace（只 watch 本 ns）。
-- 注册 scheme：client-go 全量、snapshot.storage.k8s.io v1、gateway.networking.k8s.io v1、mirrors.zjusct.io v1alpha1。
-- Mirror 控制器 watch：For Mirror + Owns PVC/VolumeSnapshot/Job/Service/Deployment/HTTPRoute；ProxyMirror 控制器：For ProxyMirror + Owns PVC/Service/Deployment/HTTPRoute。
-- 控制器另持一个 kubelet stats summary 读取器（经 API server 节点代理 `GET /api/v1/nodes/<node>/proxy/stats/summary`，client-go v0.36.1 无类型化方法；按节点 60s TTL 内存缓存，请求 10s 超时），支撑 `status.sizeBytes` 的 best-effort 统计；需要 `nodes/proxy` get（chart 的 node-stats ClusterRole，见 chart spec §6）。
-- `ZFS_AGENT_SERVICE` 环境变量非空时，webapi 另构造 zfs-agent 聚合器（`/api/usage` 的数据源；agent 地址经本 ns EndpointSlices 发现，需 `discovery.k8s.io` endpointslices get/list——chart 仅在 `zfsAgent.enabled` 时渲染该规则，见 chart spec §6）；为空则不构造，`/api/usage` 404（见 §8.5）。
-- 健康检查 healthz/readyz 均为 ping；serving.hostnames 为空时启动记一次禁用日志。
+发布激活通过一次 status patch 完成：新代次成为 `activePVC` 和 `activeSnapshot`，`lastSync` 更新为 `Succeeded`，`lastPublishedAt` 记为当前时间，`nextSyncAt` 安排到一个 `interval` 之后，连续失败计数清零，手动请求值移入 `lastHandledSyncRequest`。若这是第一个 HTTP 发布，Deployment 激活后还需要等待 HTTPRoute 获得 Gateway 接受，Mirror 才会进入公开目录。
 
-## 11. 重启与中间态恢复
+`status.sizeBytes` 是激活时尽力获取的发布 PVC 用量。控制器从任一 Running 发布 Pod 找到节点，再读取该节点 kubelet stats summary 中的 `usedBytes`；暂时获取不到时不影响发布，空闲 reconcile 会继续尝试回填。发布 PVC 内容不可变，成功记录后无需周期刷新。
 
-状态全部持久化在 CR 与子对象中；重启后的首轮 Reconcile（informer List 触发）按同一套门槛与流水线继续：
+### 触发与调度
 
-- **调度**：从持久化 `nextSyncAt` 恢复（已到期立即触发；未到期重算 RequeueAfter）；Paused/InvalidSpec Mirror 落回原稳态。无 resync 兜底。
-- **并发信号量**：从空 map 开始；非终态 Job 被 Reconcile 时 `existing=true` 补登记；重启瞬间可能短暂超限。
-- **pending 流水线**（四元组精确编码进度）：
-  1. Job 未创建（含排队态）→ 有配额则**同名**重建（时间戳仍在 `pendingSyncTimestamp`，不重新生成，`lastSync.startedAt` 仍是原值）；满配额回 SyncQueued；创建前照常执行时间戳冲突检查。
-  2. Job 运行中 → 补登记信号量，落回 Syncing 轮询；Job 不受重启影响。
-  3. Job 成功 → 直接进入快照/克隆/发布阶段（快照与发布 PVC 名已在 startSync 持久化到 status，无二次分配）。
-  4. 快照/克隆/发布阶段 → ensureSnapshot（ready 则跳过）→ ensurePublishPVC（存在则跳过）→ ensurePublish（未就绪则 Publishing 等待）→ 发布激活；已存在子对象直接复用。
-  5. Job 已失败 → SyncJobFailed 失败路径，与不重启一致。
-  6. pending 期间 spec 失效 → 校验先于 pending 检查，落 Degraded/InvalidSpec，pendingJob 保留，修复后原阶段继续。
-- **已发布负载**：Service/Deployment/HTTPRoute 丢失或被改 → CreateOrUpdate 重建/纠正（Owns watch 使删除事件立即触发）。ensurePublish 以 `(activePVC, 0)` 调用：Pod 模板 sync-timestamp 注解被移除，若原含该注解会触发一次额外滚动（短暂 Publishing 后恢复 Ready）。
-- **发布 PVC 被外部删除**：无重建逻辑，控制器不检测已发布 PVC 存在性；Pod 因卷挂载失败无法就绪，状态保持 Ready 直到人工介入（代码现状）。
-- **同步 PVC 被外部删除**：下一次 pending 流水线按 `status.workPVC` 原名重建空 PVC；原数据不可恢复。
-- **finalizer/删除**：finalizer 被外部移除会重新补加；删除清理中重启则从头按标签列出继续删，每轮 2 秒重排。
-- **ProxyMirror**：无持久化流水线，重启后 CreateOrUpdate 直接向期望负载收敛。
+没有事务且未暂停时，以下任一条件会开始新同步：
+
+| 触发来源 | 条件 |
+| --- | --- |
+| 首次引导 | 尚无活跃发布，也没有已完成的同步记录 |
+| 周期调度 | `nextSyncAt` 已到期 |
+| 手动请求 | `mirrors.zjusct.io/sync-request` 注解非空且不同于 `lastHandledSyncRequest` |
+| spec 更新 | Mirror 已发布，且 `status.observedGeneration` 落后于 `metadata.generation` |
+
+手动请求采用任意非空字符串作为幂等键；同一个值在事务成功或失败后都不会再次触发。同步期间的 spec 更新不取消现有事务，当前事务结束后仍会由 generation 差异触发下一次同步。
+
+成功发布后，下一次同步安排在 `interval` 之后。失败后，前 `failureRetryLimit` 次连续失败各在 `retryInterval` 后快速重试；达到上限后恢复为 `interval`。成功会将 `consecutiveFailures` 清零，`failureRetryLimit: 0` 表示完全禁用快速重试。调度时刻与失败计数都持久化在 status 中。
+
+`sync.maxConcurrent` 是所有 Mirror 共用的 Job 并发上限；小于等于 0 表示不限。该信号量只存在于控制器内存中。重启后，控制器会把已经存在的非终态 Job 重新登记，因此短时间内可能超过配置上限，但不会中断已经运行的任务。
+
+### 失败与继续服务
+
+同步 Job 失败或 CSI 明确报告快照错误时，本次事务结束：`lastSync` 更新为 `Failed`，`currentSync` 清空，并按快速重试规则更新 `nextSyncAt`。工作 PVC 中的半成品不会被自动清理，下一次同步脚本负责在同一工作目录上恢复或覆盖它。
+
+同步失败只说明新内容没有产生，并不等于旧内容不可用。若旧发布的 Deployment 和路由仍然健康，Mirror 会同时报告 `Ready=True` 与 `Degraded=True`。同理，发布或路由故障不会阻止后续同步事务继续产生新的快照。
+
+若创建或更新派生资源被 apiserver 以 `Invalid` 拒绝，Falcon 保留当前事务和最近观测到的可用性，设置 `Degraded=True/DerivedResourceInvalid`，并通过 condition 与 Warning Event 转述原始错误。此类确定性错误不会主动高频重排，等待 CR 修改或其他 watch 事件再次触发 reconcile。
+
+### 暂停与配置变更
+
+`spec.paused` 只禁止接受新的同步事务，不表示停止发布：
+
+- 已经接受的事务会继续完成，包括创建快照和激活新代次；
+- 已发布的 Deployment、Service 和 HTTPRoute 仍会被维护；
+- 已到期的 `nextSyncAt` 在暂停期间不会启动 Job；
+- Ready、Progressing 和 Degraded 仍反映真实的发布、事务和故障状态。
+
+Falcon 会先处理 service 的关闭请求，再校验完整 spec；随后才处理现有事务和暂停状态。无效 spec 会报告 `InvalidSpec`，但不会丢弃 `currentSync`，修复后从原阶段继续。
+
+`spec.services` 全为空时，Mirror 仍会同步、快照、克隆并激活发布 PVC，只是不创建任何对外负载，也不会被 `mirrorz.json` 收录。
+
+### 重启与自愈
+
+事务身份、调度时刻和同步结果都在 CR status 中，Job、快照和 PVC 又使用确定性名字，因此控制器重启后可以幂等地恢复：已有阶段直接复用，缺少的后续资源继续创建。空闲 Mirror 会重新按持久化的 `nextSyncAt` 排队，已经到期的任务立即启动。
+
+空闲时，Falcon 会持续将发布 Deployment、Service 和 HTTPRoute 收敛到 `activePVC` 和当前 spec。进行新事务时，它只观察旧发布的健康状态，而不会重新写入旧 `claimName`，以免撤销正在进行的新代次滚动。
+
+自愈有两个明确边界：外部删除活跃发布 PVC 后，Falcon 不会重建其中的不可变数据，只会在发布 Pod 失去可用性后将 Ready 置为 False；外部删除工作 PVC 后，下一次事务会以原名创建空 PVC，但原有同步数据无法恢复。
+
+当前没有周期性 resync 兜底；若某次 `RequeueAfter` 丢失且没有任何资源事件，定时同步可能停摆。该限制另见 [已知限制](limitations.md)。
+
+### 保留与删除
+
+Mirror 空闲且已有活跃发布时，Falcon 保留当前代次及 `spec.storage.retention.previousSnapshots` 个历史代次。控制器先删除超出窗口的发布 PVC；当相应 PVC 完全消失后，再删除其来源 VolumeSnapshot，避免提前移除仍被克隆引用的快照。早于保留窗口的成功 Job 随代次清理。
+
+失败 Job 不属于成功发布代次，另按 `spec.sync.keepFailedJobs` 保留最近若干个。该清理在每次同步进入终态时执行。
+
+删除 Mirror 时，`mirrors.zjusct.io/storage-cleanup` finalizer 保证先删除同 namespace、同 mirror label 的全部 PVC，再删除 VolumeSnapshot，最后才允许 CR 消失。清理范围按 label 而非 owner reference 选择，因此同 namespace 内的 Mirror 与 ProxyMirror 不应使用同一个名字。其余 Job、Deployment、Service 和 HTTPRoute 由 owner-reference garbage collection 回收。底层 PV 是否保留由 StorageClass 的 reclaim policy 决定。
+
+## 状态与可观测性
+
+Mirror 和 ProxyMirror 都不保存单一 `phase`。`Ready`、`Progressing` 和 `Degraded` 是三个彼此正交的事实，可以同时为 True：
+
+| Condition | 回答的问题 | 典型情形 |
+| --- | --- | --- |
+| `Ready` | 当前活跃数据及请求的发布服务是否可用？ | 活跃 PVC 存在；所有启用的 Deployment 有可用副本，HTTPRoute 已被当前 Gateway 接受 |
+| `Progressing` | 是否有事务或派生资源正在收敛？ | Job 排队或运行、快照创建、Deployment 滚动、HTTPRoute 等待状态 |
+| `Degraded` | 是否存在阻止期望状态实现的已知故障？ | spec 无效、同步失败、派生资源被拒绝、HTTPRoute 明确拒绝 |
+
+因此，常见组合具有直接含义：
+
+- `Ready=True, Progressing=True`：旧代次可用，新同步或发布正在进行；
+- `Ready=True, Degraded=True`：旧代次可用，但最近同步失败或其他非致命故障仍未恢复；
+- `Ready=False, Progressing=True`：尚无可用 endpoint，相关资源仍在正常收敛；
+- `Ready=False, Degraded=True`：endpoint 不可用，且已经确认存在故障。
+
+所有 condition 都携带对应 CR generation 的 `observedGeneration`、机器可判断的 reason 和供人阅读的 message。路由的 condition 缺失、`Unknown` 或 generation 过旧只表示 Progressing；只有当前 generation 的 `Accepted=False` 或 `ResolvedRefs=False` 才表示 `HTTPRouteRejected`。
+
+Mirror 的常见同步 reason 为 `SynchronizationStarted`、`SyncQueued`、`SyncJobRunning`、`Snapshotting`、`PublishRollout`、`SyncJobFailed`、`SnapshotFailed` 和 `SnapshotTimestampConflict`；发布 reason 为 `Published`、`PublishUnavailable`、`HTTPRoutePending`、`HTTPRouteRejected` 和 `HTTPRouteDisabled`。`InvalidSpec` 与 `DerivedResourceInvalid` 分别表示父 CR 语义校验失败和派生资源被 apiserver 拒绝。
+
+ProxyMirror 使用相同的三个 condition。没有 `services.http` 时，它以 `Ready=False, Progressing=False, Degraded=False` 表示主动停服；Deployment 或路由尚未收敛时为 Progressing；派生资源无效、全局 HTTP 发布关闭或路由明确拒绝时为 Degraded。
+
+### Events
+
+Event recorder 名为 `falcon-controller`。Falcon 只为生命周期节点和需要操作者注意的问题发 Event，普通轮询进度只写 condition 或日志。
+
+| Event reason | 类型 | 对象 | 含义 |
+| --- | --- | --- | --- |
+| `SynchronizationStarted` | Normal | Mirror | 接受一笔新同步事务 |
+| `SnapshotPublished` | Normal | Mirror | 新发布代次已激活 |
+| `SyncJobFailed` | Warning | Mirror | 同步 Job 失败 |
+| `SnapshotFailed` | Warning | Mirror | CSI 报告快照错误 |
+| `SnapshotTimestampConflict` | Warning | Mirror | 事务时间戳已被同名或同标签资源占用 |
+| `DerivedResourceInvalid` | Warning | Mirror、ProxyMirror | apiserver 拒绝派生资源 |
+| `PublishRouteCreated` | Normal | Mirror、ProxyMirror | 创建 HTTPRoute |
+| `PublishRouteUpdated` | Normal | Mirror、ProxyMirror | 更新 HTTPRoute |
+| `HTTPRouteRejected` | Warning | Mirror、ProxyMirror | Gateway 明确拒绝路由或引用 |
+| `PublishPlacementPending` | Warning | Mirror | 尚无法从工作 PV 推导发布位置 |
+
+发布位置覆盖用户约束时还会发 `PublishNodeSelectorOverridden` 或 `PublishNodeAffinityOverridden`。`InvalidSpec`、`SyncQueued`、`SyncJobRunning` 和 `Snapshotting` 等普通状态变化不发 Event。
+
+### 指标、探针与容量
+
+控制器只暴露 controller-runtime 内建指标，没有 Mirror 专用指标。metrics 默认监听 `:8080`，健康探针默认监听 `:8081`：`/healthz` 与 `/readyz` 都使用 controller-runtime ping，表示 manager 进程可用，不表示所有 Mirror 健康。
+
+Mirror 的 `status.sizeBytes` 来自 kubelet stats summary。读取通过 API server 的节点代理完成，单次请求超时 10 秒，并按节点缓存 60 秒；读取失败只影响容量展示，不影响同步或发布。
+
+## Web API
+
+只读 Web API 默认监听 `:8082`；`api.webapiBindAddress: "0"` 时关闭。服务无鉴权，随 manager 启停，读取同 namespace 的 informer cache，而不直接查询 apiserver。
+
+所有 endpoint 只接受 GET。其他方法返回 405 和 `Allow: GET`；未知路径返回 JSON 404；JSON 正常响应和错误响应都使用一致的 JSON content type。
+
+| 端点 | 用途 |
+| --- | --- |
+| `GET /mirrorz.json` | 公开 MirrorZ 1.7 目录；收录与字段映射见「与 MirrorZ 数据格式的关联」 |
+| `GET /api/jobs` | 为 UI 提供由 conditions 和 `currentSync` 派生的兼容任务视图 |
+| `GET /api/repos/<name>` | 以 YAML 或 JSON 返回单个 Mirror / ProxyMirror 的 spec，不暴露 status |
+| `GET /api/usage` | 聚合 zfs-agent 上报的 ZFS 用量；仅在 `ZFS_AGENT_SERVICE` 非空时启用 |
+
+`/api/jobs` 的 phase 是展示层派生值，不是 CR 的权威状态；调用方应使用 conditions 判断自动化逻辑。其详细字段以及 `/api/usage` 的聚合语义见 [UI 约定](ui.md)。
+
+## 控制器进程
+
+`POD_NAMESPACE` 环境变量必填，manager cache 仅观察该 namespace。Mirror 控制器 watch Mirror 及其 PVC、VolumeSnapshot、Job、Service、Deployment 和 HTTPRoute；ProxyMirror 控制器 watch ProxyMirror 及其 PVC、Service、Deployment 和 HTTPRoute。
+
+发布位置推导还需要集群级读取 PersistentVolume，容量统计需要读取 `nodes/proxy`。启用 zfs-agent 聚合时，Web API 还需要读取本 namespace 的 EndpointSlice。相应 RBAC 由 chart 按功能开关渲染，详见 [Chart 约定](chart.md)。
+
+进程注册 Kubernetes、VolumeSnapshot、Gateway API 和 Falcon CRD scheme。HTTP 服务随 manager 优雅关闭；`publish.hostnames` 为空时，进程仍正常启动，但记录 HTTPRoute 生成功能已关闭。

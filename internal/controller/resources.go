@@ -38,15 +38,16 @@ var errSnapshotTimestampConflict = errors.New("snapshot timestamp conflict")
 
 const (
 	// SyncDataVolumeName is the reserved name of the WRITABLE sync PVC volume
-	// the controller injects into every sync pod (mounted at
-	// spec.sync.dataMountPath). Users must not declare a volume of this name
-	// themselves. Unlike the publish-side mirror-data it has no read-only
-	// constraint — it is the sync Job's output volume.
+	// the controller injects into every sync pod's spec.volumes. Users must
+	// not declare a volume of this name themselves; mounting it, and where,
+	// is the user's own declaration. Unlike the publish-side mirror-data it
+	// has no read-only constraint — it is the sync Job's output volume.
 	SyncDataVolumeName = "sync-data"
 	// PublishDataVolumeName is the reserved name of the read-only publish PVC
-	// volume the controller injects into every Mirror publish pod (volume
-	// source and mount are both read-only). Users must not declare a volume
-	// of this name themselves, and any extra mount of it must be read-only.
+	// volume the controller injects into every Mirror publish pod (a
+	// read-only volume source in spec.volumes). Users must not declare a
+	// volume of this name themselves, and any mount of it — declared entirely
+	// by the user — must be read-only.
 	PublishDataVolumeName = "mirror-data"
 	// PublishTmpVolumeName is the name of the default /tmp emptyDir the
 	// controller injects into a publish pod only when the user template does
@@ -55,20 +56,22 @@ const (
 )
 
 func (r *MirrorReconciler) ensureSnapshot(ctx context.Context, mirror *mirrorv1alpha1.Mirror) (bool, string, error) {
-	key := types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Status.PendingSnapshot}
+	snapshotName := currentSyncSnapshotName(mirror)
+	timestamp := currentSyncTimestamp(mirror)
+	key := types.NamespacedName{Namespace: mirror.Namespace, Name: snapshotName}
 	snapshot := &snapshotv1.VolumeSnapshot{}
 	if err := r.Get(ctx, key, snapshot); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return false, "", err
 		}
-		labels, err := childLabels(mirror, mirror.Status.PendingSyncTimestamp, "snapshot")
+		labels, err := childLabels(mirror, timestamp, "snapshot")
 		if err != nil {
 			return false, "", err
 		}
 		snapshot = &snapshotv1.VolumeSnapshot{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: mirror.Namespace,
-				Name:      mirror.Status.PendingSnapshot,
+				Name:      snapshotName,
 				Labels:    labels,
 			},
 			Spec: snapshotv1.VolumeSnapshotSpec{
@@ -126,7 +129,9 @@ func (r *MirrorReconciler) ensureSyncPVC(ctx context.Context, mirror *mirrorv1al
 }
 
 func (r *MirrorReconciler) ensurePublishPVC(ctx context.Context, mirror *mirrorv1alpha1.Mirror) error {
-	key := types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Status.PendingPVC}
+	snapshotName := currentSyncSnapshotName(mirror)
+	timestamp := currentSyncTimestamp(mirror)
+	key := types.NamespacedName{Namespace: mirror.Namespace, Name: snapshotName}
 	claim := &corev1.PersistentVolumeClaim{}
 	if err := r.Get(ctx, key, claim); err == nil {
 		if claim.DeletionTimestamp.IsZero() {
@@ -137,14 +142,14 @@ func (r *MirrorReconciler) ensurePublishPVC(ctx context.Context, mirror *mirrorv
 		return err
 	}
 
-	claim, err := newDataClaim(mirror, mirror.Status.PendingPVC, mirror.Status.PendingSyncTimestamp, "publish-data")
+	claim, err := newDataClaim(mirror, snapshotName, timestamp, "publish-data")
 	if err != nil {
 		return err
 	}
 	claim.Spec.DataSource = &corev1.TypedLocalObjectReference{
 		APIGroup: stringPtr(snapshotv1.GroupName),
 		Kind:     "VolumeSnapshot",
-		Name:     mirror.Status.PendingSnapshot,
+		Name:     snapshotName,
 	}
 	if err := controllerutil.SetControllerReference(mirror, claim, r.Scheme); err != nil {
 		return err
@@ -201,20 +206,21 @@ func newDataClaim(mirror *mirrorv1alpha1.Mirror, name string, syncTimestamp int6
 // errSnapshotTimestampConflict is returned instead (Degraded + RetryAfter 1m
 // upstream, pending pipeline preserved).
 func (r *MirrorReconciler) lookupOrCreateSyncJob(ctx context.Context, mirror *mirrorv1alpha1.Mirror) (*batchv1.Job, error) {
-	key := types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Status.PendingJob}
+	jobName := currentSyncJobName(mirror)
+	key := types.NamespacedName{Namespace: mirror.Namespace, Name: jobName}
 	job := &batchv1.Job{}
 	err := r.Get(ctx, key, job)
 	switch {
 	case apierrors.IsNotFound(err):
-		if !r.SyncLimiter.Acquire(mirror.Status.PendingJob, false) {
+		if !r.SyncLimiter.Acquire(jobName, false) {
 			return nil, errSyncQueued
 		}
 		if err := r.checkSyncTimestampConflict(ctx, mirror); err != nil {
-			r.SyncLimiter.Release(mirror.Status.PendingJob)
+			r.SyncLimiter.Release(jobName)
 			return nil, err
 		}
 		if err := r.createSyncJob(ctx, mirror); err != nil {
-			r.SyncLimiter.Release(mirror.Status.PendingJob)
+			r.SyncLimiter.Release(jobName)
 			return nil, err
 		}
 		if err := r.Get(ctx, key, job); err != nil {
@@ -234,11 +240,8 @@ func (r *MirrorReconciler) lookupOrCreateSyncJob(ctx context.Context, mirror *mi
 // Like the rest of the pipeline it is an error, not a silent shift to the
 // next second.
 func (r *MirrorReconciler) checkSyncTimestampConflict(ctx context.Context, mirror *mirrorv1alpha1.Mirror) error {
-	ts := mirror.Status.PendingSyncTimestamp
-	base, err := childBase(mirror.Name)
-	if err != nil {
-		return err
-	}
+	ts := currentSyncTimestamp(mirror)
+	base := childBase(mirror.Name)
 	labels := client.MatchingLabels{MirrorLabel: base}
 
 	claims := &corev1.PersistentVolumeClaimList{}
@@ -269,10 +272,7 @@ func (r *MirrorReconciler) checkSyncTimestampConflict(ctx context.Context, mirro
 		}
 	}
 	// Cover leftover objects that exist without the sync-timestamp label.
-	snapshotName, err := resourceName(base, fmt.Sprintf("snap-%d", ts))
-	if err != nil {
-		return err
-	}
+	snapshotName := resourceName(base, fmt.Sprintf("snap-%d", ts))
 	snapKey := types.NamespacedName{Namespace: mirror.Namespace, Name: snapshotName}
 	if err := r.Get(ctx, snapKey, &snapshotv1.VolumeSnapshot{}); err == nil {
 		return fmt.Errorf("%w: VolumeSnapshot %s already exists at timestamp %d", errSnapshotTimestampConflict, snapshotName, ts)
@@ -294,18 +294,15 @@ func (r *MirrorReconciler) checkSyncTimestampConflict(ctx context.Context, mirro
 // The pod template is the user's spec.sync.podTemplate with
 //
 //   - forced sync pipeline identity: the WRITABLE `sync-data` PVC volume
-//     (no read-only constraint — it is the sync output volume) mounted at
-//     spec.sync.dataMountPath into the first container, restartPolicy Never,
-//     terminationGracePeriodSeconds 30, the sync labels/placement;
+//     injected into spec.volumes (mounting it, and where, is the user's own
+//     declaration), restartPolicy Never, terminationGracePeriodSeconds 30,
+//     the sync labels;
 //   - defaults injected only where the template is silent (see
 //     applySyncPodDefaults).
 //
 // Job-level: backoffLimit 0 and activeDeadlineSeconds = spec.sync.timeout.
+// Placement is NOT injected (see the spec comment inside).
 func (r *MirrorReconciler) createSyncJob(ctx context.Context, mirror *mirrorv1alpha1.Mirror) error {
-	dataMountPath := mirror.Spec.Sync.DataMountPath
-	if dataMountPath == "" {
-		dataMountPath = "/data"
-	}
 	deadline := int64(mirror.Spec.Sync.Timeout.Duration.Seconds())
 	if deadline < 1 {
 		deadline = 1
@@ -316,7 +313,7 @@ func (r *MirrorReconciler) createSyncJob(ctx context.Context, mirror *mirrorv1al
 	// The Job carries the sync-timestamp label from creation: it embeds the
 	// same Unix seconds timestamp as its name and is the identity the
 	// snapshot and publish PVC reuse after success.
-	labels, err := childLabels(mirror, mirror.Status.PendingSyncTimestamp, "sync")
+	labels, err := childLabels(mirror, currentSyncTimestamp(mirror), "sync")
 	if err != nil {
 		return err
 	}
@@ -339,24 +336,11 @@ func (r *MirrorReconciler) createSyncJob(ctx context.Context, mirror *mirrorv1al
 
 	applySyncPodDefaults(spec)
 
-	// The writable sync data volume is forced, never optional: mounted into
-	// the first container at the user-declared dataMountPath (used verbatim).
-	if len(spec.Containers) > 0 {
-		mounted := false
-		for i := range spec.Containers[0].VolumeMounts {
-			mount := &spec.Containers[0].VolumeMounts[i]
-			if mount.Name == SyncDataVolumeName && mount.MountPath == dataMountPath {
-				mount.ReadOnly = false
-				mounted = true
-			}
-		}
-		if !mounted {
-			spec.Containers[0].VolumeMounts = append(spec.Containers[0].VolumeMounts, corev1.VolumeMount{
-				Name:      SyncDataVolumeName,
-				MountPath: dataMountPath,
-			})
-		}
-	}
+	// The writable sync data volume is forced, never optional — as a VOLUME
+	// only: mounting it, and where, is the user's own declaration in the pod
+	// template. Like the publish-side mirror-data the volume name is
+	// reserved; unlike it there is no read-only constraint (it is the sync
+	// Job's output volume).
 	spec.Volumes = append(spec.Volumes, corev1.Volume{
 		Name: SyncDataVolumeName,
 		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
@@ -367,7 +351,7 @@ func (r *MirrorReconciler) createSyncJob(ctx context.Context, mirror *mirrorv1al
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: mirror.Namespace,
-			Name:      mirror.Status.PendingJob,
+			Name:      currentSyncJobName(mirror),
 			Labels:    labels,
 		},
 		Spec: batchv1.JobSpec{
@@ -405,17 +389,15 @@ func applySyncPodDefaults(spec *corev1.PodSpec) {
 }
 
 // ensurePublish maintains the Deployment and Service of every ENABLED
-// spec.services key for the given claim. syncTimestamp (> 0) annotates the pod
-// templates with the snapshot's Unix seconds timestamp; 0 removes the
-// annotation again (steady-state repair). It reports readiness across all
-// enabled services.
+// spec.services key (a present key) for the given claim. It reports readiness
+// across all enabled services.
 //
 // Node placement is DERIVED, not configured: before touching any Deployment
 // the source PV of the sync PVC is read and its nodeAffinity turned into a
 // pod constraint (see publishPlacement). While that derivation cannot be made
 // (PVC/PV not bound yet — abnormal timing) no Deployment is created at all:
 // publish pods must never run without their volume locality constraint.
-func (r *MirrorReconciler) ensurePublish(ctx context.Context, mirror *mirrorv1alpha1.Mirror, claimName string, syncTimestamp int64) (bool, error) {
+func (r *MirrorReconciler) ensurePublish(ctx context.Context, mirror *mirrorv1alpha1.Mirror, claimName string) (bool, error) {
 	nodeSelector, affinity, determined, err := r.publishPlacement(ctx, mirror)
 	if err != nil {
 		return false, err
@@ -433,13 +415,13 @@ func (r *MirrorReconciler) ensurePublish(ctx context.Context, mirror *mirrorv1al
 		key  string
 		spec *mirrorv1alpha1.MirrorServiceSpec
 	}{
-		{PublishProtocolHTTP, &services.HTTP.MirrorServiceSpec},
-		{PublishProtocolRsync, &services.Rsync},
+		{PublishProtocolHTTP, httpServiceSpec(services)},
+		{PublishProtocolRsync, services.Rsync},
 	} {
-		if !entry.spec.Enable {
+		if entry.spec == nil {
 			continue
 		}
-		ok, err := r.ensurePublishEntry(ctx, mirror, entry.key, entry.spec, claimName, syncTimestamp, nodeSelector, affinity)
+		ok, err := r.ensurePublishEntry(ctx, mirror, entry.key, entry.spec, claimName, nodeSelector, affinity)
 		if err != nil {
 			return false, err
 		}
@@ -448,6 +430,104 @@ func (r *MirrorReconciler) ensurePublish(ctx context.Context, mirror *mirrorv1al
 		}
 	}
 	return ready, nil
+}
+
+// observePublishChildren reports whether every requested service has a
+// currently available pod and whether every Deployment has converged to its
+// current generation. It never mutates children, which is essential while a
+// newer PVC is rolling out: reconciling the old ActivePVC at that point would
+// undo the in-flight publication.
+func observePublishChildren(ctx context.Context, c client.Client, mirror *mirrorv1alpha1.Mirror) (available, converged bool, err error) {
+	available = true
+	converged = true
+	base := childBase(mirror.Name)
+	entries := make([]struct {
+		key      string
+		replicas int32
+	}, 0, 2)
+	if mirror.Spec.Services.HTTP != nil {
+		entries = append(entries, struct {
+			key      string
+			replicas int32
+		}{PublishProtocolHTTP, replicasOrDefault(mirror.Spec.Services.HTTP.Replicas)})
+	}
+	if mirror.Spec.Services.Rsync != nil {
+		entries = append(entries, struct {
+			key      string
+			replicas int32
+		}{PublishProtocolRsync, replicasOrDefault(mirror.Spec.Services.Rsync.Replicas)})
+	}
+	for _, entry := range entries {
+		name := publishChildName(base, entry.key)
+		service := &corev1.Service{}
+		if err := c.Get(ctx, types.NamespacedName{Namespace: mirror.Namespace, Name: name}, service); err != nil {
+			if apierrors.IsNotFound(err) {
+				available, converged = false, false
+				continue
+			}
+			return false, false, err
+		}
+		if !metav1.IsControlledBy(service, mirror) {
+			available, converged = false, false
+			continue
+		}
+
+		deployment := &appsv1.Deployment{}
+		if err := c.Get(ctx, types.NamespacedName{Namespace: mirror.Namespace, Name: name}, deployment); err != nil {
+			if apierrors.IsNotFound(err) {
+				available, converged = false, false
+				continue
+			}
+			return false, false, err
+		}
+		if !metav1.IsControlledBy(deployment, mirror) || deployment.Status.AvailableReplicas == 0 {
+			available = false
+		}
+		if deployment.Status.ObservedGeneration != deployment.Generation || deployment.Status.UpdatedReplicas < entry.replicas || deployment.Status.AvailableReplicas < entry.replicas {
+			converged = false
+		}
+	}
+	return available, converged, nil
+}
+
+// deletePublishEntry removes the deterministic Deployment and Service for a
+// service key that is no longer present in spec.services.
+func deletePublishEntry(ctx context.Context, c client.Client, owner client.Object, serviceKey string) error {
+	name := publishChildName(childBase(owner.GetName()), serviceKey)
+	objects := []client.Object{
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: owner.GetNamespace(), Name: name}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: owner.GetNamespace(), Name: name}},
+	}
+	for _, object := range objects {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(object), object); apierrors.IsNotFound(err) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if metav1.IsControlledBy(object, owner) {
+			if err := c.Delete(ctx, object); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (r *MirrorReconciler) cleanupDisabledPublishChildren(ctx context.Context, mirror *mirrorv1alpha1.Mirror) error {
+	if mirror.Spec.Services.HTTP == nil {
+		if err := deletePublishEntry(ctx, r.Client, mirror, PublishProtocolHTTP); err != nil {
+			return err
+		}
+	}
+	if mirror.Spec.Services.Rsync == nil {
+		if err := deletePublishEntry(ctx, r.Client, mirror, PublishProtocolRsync); err != nil {
+			return err
+		}
+	}
+	if mirror.Spec.Services.HTTP == nil || !r.Config.PublishEnabled() {
+		return deletePublishRouteFor(ctx, r.Client, mirror)
+	}
+	return nil
 }
 
 // publishPlacement derives the node constraint for publish pods from the
@@ -484,6 +564,8 @@ func (r *MirrorReconciler) publishPlacement(ctx context.Context, mirror *mirrorv
 		return nil, nil, false, nil
 	}
 	pv := &corev1.PersistentVolume{}
+	// Cached read: PVs go through the manager informer — the chart's
+	// pv-reader ClusterRole grants cluster-wide get/list/watch.
 	if err := r.Get(ctx, types.NamespacedName{Name: claim.Spec.VolumeName}, pv); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil, false, nil
@@ -525,35 +607,21 @@ func hostnameFromNodeSelectorTerms(required *corev1.NodeSelector) (string, bool)
 // The pod template is the user's spec.services.<key>.podTemplate with
 //
 //   - forced data-integrity constraints layered on top: the read-only
-//     `mirror-data` publish PVC volume (read-only volume source AND read-only
-//     mount) mounted at spec mirrorMountPath into the first container, the
-//     PV-derived node constraint, the pod labels/annotations identity;
+//     `mirror-data` publish PVC volume injected into spec.volumes (mounting
+//     it, and where, is the user's own declaration), the PV-derived node
+//     constraint and the pod identity labels;
 //   - defaults injected only where the user template is silent (see
 //     applyPublishPodDefaults).
-func (r *MirrorReconciler) ensurePublishEntry(ctx context.Context, mirror *mirrorv1alpha1.Mirror, serviceKey string, service *mirrorv1alpha1.MirrorServiceSpec, claimName string, syncTimestamp int64, nodeSelector map[string]string, affinity *corev1.NodeSelector) (bool, error) {
-	base, err := childBase(mirror.Name)
-	if err != nil {
-		return false, err
-	}
+func (r *MirrorReconciler) ensurePublishEntry(ctx context.Context, mirror *mirrorv1alpha1.Mirror, serviceKey string, service *mirrorv1alpha1.MirrorServiceSpec, claimName string, nodeSelector map[string]string, affinity *corev1.NodeSelector) (bool, error) {
+	base := childBase(mirror.Name)
 	role := publishRole(serviceKey)
 
 	template := service.PodTemplate.DeepCopy()
 	if template.Labels == nil {
 		template.Labels = map[string]string{}
 	}
-	for label, value := range map[string]string{MirrorLabel: base, RoleLabel: role} {
+	for label, value := range map[string]string{MirrorLabel: base, ComponentLabel: role} {
 		template.Labels[label] = value
-	}
-	if template.Annotations == nil {
-		template.Annotations = map[string]string{}
-	}
-	template.Annotations[ActivePVCAnnotation] = claimName
-	if syncTimestamp > 0 {
-		template.Annotations[SyncTimestampLabel] = strconv.FormatInt(syncTimestamp, 10)
-	} else {
-		// Steady-state repair: drop a stale sync-timestamp annotation (a
-		// template that carried it rolls once more).
-		delete(template.Annotations, SyncTimestampLabel)
 	}
 	spec := &template.Spec
 
@@ -589,26 +657,10 @@ func (r *MirrorReconciler) ensurePublishEntry(ctx context.Context, mirror *mirro
 
 	applyPublishPodDefaults(spec, serviceKey)
 
-	// The publish data volume is forced, never optional: the volume source is
-	// read-only and so is the mount, in the first container, at the
-	// user-declared mirrorMountPath (used verbatim — no mirror name appended).
-	if len(spec.Containers) > 0 {
-		mounted := false
-		for i := range spec.Containers[0].VolumeMounts {
-			mount := &spec.Containers[0].VolumeMounts[i]
-			if mount.Name == PublishDataVolumeName && mount.MountPath == service.MirrorMountPath {
-				mount.ReadOnly = true
-				mounted = true
-			}
-		}
-		if !mounted {
-			spec.Containers[0].VolumeMounts = append(spec.Containers[0].VolumeMounts, corev1.VolumeMount{
-				Name:      PublishDataVolumeName,
-				MountPath: service.MirrorMountPath,
-				ReadOnly:  true,
-			})
-		}
-	}
+	// The publish data volume is forced, never optional — as a VOLUME only,
+	// with a read-only volume source: mounting it, and where, is the user's
+	// own declaration. The controller never adds mounts; any user mount of
+	// mirror-data must be read-only (validateMirrorService).
 	spec.Volumes = append(spec.Volumes, corev1.Volume{
 		Name: PublishDataVolumeName,
 		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
@@ -626,16 +678,13 @@ func (r *MirrorReconciler) ensurePublishEntry(ctx context.Context, mirror *mirro
 // <key>), Deployment `<base>-publish-<key>` carrying the fully merged pod
 // template. It reports the Deployment rollout readiness.
 func ensurePublishServiceAndDeployment(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, base, serviceKey string, replicas int32, podTemplate corev1.PodTemplateSpec) (bool, error) {
-	childName, err := publishChildName(base, serviceKey)
-	if err != nil {
-		return false, err
-	}
+	childName := publishChildName(base, serviceKey)
 	role := publishRole(serviceKey)
 
 	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: owner.GetNamespace(), Name: childName}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, c, svc, func() error {
 		svc.Labels = objectLabels(base, role)
-		svc.Spec.Selector = map[string]string{MirrorLabel: base, RoleLabel: role}
+		svc.Spec.Selector = map[string]string{MirrorLabel: base, ComponentLabel: role}
 		svc.Spec.Ports = []corev1.ServicePort{{
 			Name:        serviceKey,
 			Port:        publishServicePort,
@@ -664,7 +713,7 @@ func ensurePublishServiceAndDeployment(ctx context.Context, c client.Client, sch
 				MaxSurge:       &maxSurge,
 			},
 		}
-		deployment.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{MirrorLabel: base, RoleLabel: role}}
+		deployment.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{MirrorLabel: base, ComponentLabel: role}}
 		deployment.Spec.Template = podTemplate
 		return controllerutil.SetControllerReference(owner, deployment, scheme)
 	}); err != nil {
@@ -775,10 +824,7 @@ func applyPublishPodDefaults(spec *corev1.PodSpec, serviceKey string) {
 // untouched: they carry a sync-timestamp label and are pruned with their
 // snapshot generation by pruneOldSnapshots.
 func (r *MirrorReconciler) pruneFailedJobs(ctx context.Context, mirror *mirrorv1alpha1.Mirror) error {
-	base, err := childBase(mirror.Name)
-	if err != nil {
-		return err
-	}
+	base := childBase(mirror.Name)
 	keep := int(mirror.Spec.Sync.KeepFailedJobs)
 	if keep < 0 {
 		keep = 0
@@ -818,10 +864,7 @@ func (r *MirrorReconciler) pruneFailedJobs(ctx context.Context, mirror *mirrorv1
 // publish PVC carrying the same timestamp exists any more, i.e. its clone PVC
 // has fully disappeared.
 func (r *MirrorReconciler) pruneOldSnapshots(ctx context.Context, mirror *mirrorv1alpha1.Mirror) error {
-	base, err := childBase(mirror.Name)
-	if err != nil {
-		return err
-	}
+	base := childBase(mirror.Name)
 	keep := int(mirror.Spec.Storage.Retention.PreviousSnapshots) + 1
 	if keep < 1 {
 		keep = 1
@@ -906,10 +949,7 @@ func (r *MirrorReconciler) pruneOldSnapshots(ctx context.Context, mirror *mirror
 // childLabels labels a child object. syncTimestamp > 0 marks a
 // snapshot-scoped child with the Unix seconds sync-start timestamp.
 func childLabels(mirror *mirrorv1alpha1.Mirror, syncTimestamp int64, role string) (map[string]string, error) {
-	base, err := childBase(mirror.Name)
-	if err != nil {
-		return nil, err
-	}
+	base := childBase(mirror.Name)
 	labels := objectLabels(base, role)
 	if syncTimestamp > 0 {
 		labels[SyncTimestampLabel] = strconv.FormatInt(syncTimestamp, 10)
@@ -928,45 +968,23 @@ func objectTimestamp(labels map[string]string) (int64, bool) {
 	return timestamp, err == nil
 }
 
-// maxDNSLabelLen is the Kubernetes limit for names embedded in labels and
-// most resource names (DNS-1123 label). Derived child names that would exceed
-// it are rejected instead of being silently shortened.
-const maxDNSLabelLen = 63
-
-// maxSyncTimestampLen bounds the decimal Unix seconds timestamp embedded in
-// sync Job, VolumeSnapshot and publish PVC names: 10 digits cover every
-// timestamp until 2286-11-20, so the token can never grow beyond that while
-// time fits in the foreseeable range.
-const maxSyncTimestampLen = 10
-
 // childBase returns the base of every derived child object name: the CR name
 // as-is, unconverted. CR names are already enforced to RFC 1123 subdomains by
 // the API server (lowercase alphanumerics, '-' and '.'; dots allowed, e.g.
 // `linux.git`), and dots are legal both in DNS subdomain child names
 // (`linux.git-sync-<ts>`) and in label values, so there is nothing to map —
 // the controller's early lowercasing/'.'→'-' normalization was unreachable
-// for valid CR names and is gone.
-//
-// The only remaining check is the explicit >63-character rejection: child
-// names append suffixes like `sync-` + 10 timestamp digits, and the base is
-// also carried as a label VALUE (label values cap at 63 characters). Like
-// every derived-name overflow this is an error (reported as InvalidSpec), not
-// a truncation.
-func childBase(name string) (string, error) {
-	if len(name) > maxDNSLabelLen {
-		return "", fmt.Errorf("child name base %q (derived from %q) is %d characters, exceeding the %d-character limit; shorten the CR name", name, name, len(name), maxDNSLabelLen)
-	}
-	return name, nil
+// for valid CR names and is gone. Falcon imposes no additional length limit;
+// the API server validates each derived resource according to that resource's
+// own name and label constraints.
+func childBase(name string) string {
+	return name
 }
 
-// resourceName joins a base and a role suffix into a child object name,
-// rejecting results that exceed maxDNSLabelLen.
-func resourceName(base, suffix string) (string, error) {
-	raw := strings.Trim(base+"-"+suffix, "-")
-	if len(raw) > maxDNSLabelLen {
-		return "", fmt.Errorf("child name %q is %d characters, exceeding the %d-character limit; shorten the CR name", raw, len(raw), maxDNSLabelLen)
-	}
-	return raw, nil
+// resourceName joins a base and a role suffix into a child object name. Name
+// validation belongs to the API server for the concrete child kind.
+func resourceName(base, suffix string) string {
+	return strings.Trim(base+"-"+suffix, "-")
 }
 
 // replicasOrDefault returns the declared replica count of a publish service

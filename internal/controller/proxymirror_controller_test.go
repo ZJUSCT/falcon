@@ -46,8 +46,7 @@ func testProxyMirror() *mirrorv1alpha1.ProxyMirror {
 				},
 			},
 			Services: mirrorv1alpha1.ProxyMirrorServicesSpec{
-				HTTP: mirrorv1alpha1.ProxyMirrorServiceSpec{
-					Enable: true,
+				HTTP: &mirrorv1alpha1.ProxyMirrorServiceSpec{
 					PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
 							Name:  "proxy",
@@ -131,14 +130,16 @@ func TestProxyMirrorHappyPathPublishesAndProvisionsCache(t *testing.T) {
 	if got := *deployment.Spec.Replicas; got != 1 {
 		t.Fatalf("expected 1 replica, got %d", got)
 	}
-	mounted := false
+	// The proxy-cache volume is injected (writable PVC source pointing at the
+	// cache PVC); mounting it is the user template's declaration.
+	cacheVolume := false
 	for _, volume := range deployment.Spec.Template.Spec.Volumes {
 		if volume.Name == "proxy-cache" && volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == "pypi-proxy-cache" {
-			mounted = true
+			cacheVolume = true
 		}
 	}
-	if !mounted {
-		t.Fatal("proxy Deployment must mount the cache PVC")
+	if !cacheVolume {
+		t.Fatal("proxy Deployment must inject the cache PVC as the proxy-cache volume")
 	}
 	if len(deployment.Spec.Template.Spec.Volumes) != 2 { // cache + tmp emptyDir, no data volume
 		t.Fatalf("proxy Deployment must have no data volume, got %#v", deployment.Spec.Template.Spec.Volumes)
@@ -152,14 +153,10 @@ func TestProxyMirrorHappyPathPublishesAndProvisionsCache(t *testing.T) {
 	if !ptr.Deref(first.SecurityContext.ReadOnlyRootFilesystem, false) {
 		t.Fatal("readOnlyRootFilesystem must default to true on the proxy container")
 	}
-	cacheMount := findMount(first, "proxy-cache")
-	if cacheMount == nil || cacheMount.MountPath != "/var/cache/nginx/proxy" {
-		t.Fatalf("proxy-cache must be mounted at /var/cache/nginx/proxy, got %#v", cacheMount)
-	}
-
-	current := getProxyMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.CachePVC != "pypi-proxy-cache" || current.Status.PublishedServiceName != "pypi-proxy-publish-http" {
-		t.Fatalf("unexpected status: %#v", current.Status)
+	// The controller adds no mounts: proxy-cache is volumes-only (the nginx
+	// proxy_cache directory is the user's declaration).
+	if cacheMount := findMount(first, "proxy-cache"); cacheMount != nil {
+		t.Fatalf("the controller must not mount proxy-cache itself, got %#v", cacheMount)
 	}
 
 	deployment.Status.ObservedGeneration = deployment.Generation
@@ -168,11 +165,10 @@ func TestProxyMirrorHappyPathPublishesAndProvisionsCache(t *testing.T) {
 	if err := fakeClient.Status().Update(ctx, deployment); err != nil {
 		t.Fatalf("mark Deployment available: %v", err)
 	}
+	reconcileProxy(t, ctx, reconciler, request) // create route; verdict pending
+	markRouteAccepted(t, ctx, fakeClient, proxy.Namespace, "pypi-proxy-publish")
 	reconcileProxy(t, ctx, reconciler, request) // ready
-	current = getProxyMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.Phase != mirrorv1alpha1.PhaseReady {
-		t.Fatalf("expected Ready, got %s", current.Status.Phase)
-	}
+	current := getProxyMirror(t, ctx, fakeClient, request.NamespacedName)
 	if condReady := findCondition(current.Status.Conditions, conditionReady); condReady == nil || condReady.Status != metav1.ConditionTrue {
 		t.Fatalf("expected Ready=True, got %#v", current.Status.Conditions)
 	}
@@ -202,21 +198,21 @@ func TestProxyMirrorInvalidCacheSpecIsDegraded(t *testing.T) {
 
 	reconcileProxy(t, ctx, reconciler, request)
 	current := getProxyMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.Phase != mirrorv1alpha1.PhaseDegraded {
-		t.Fatalf("expected Degraded, got %s", current.Status.Phase)
+	if degraded := findCondition(current.Status.Conditions, conditionDegraded); degraded == nil || degraded.Status != metav1.ConditionTrue {
+		t.Fatalf("expected Degraded=True, got %#v", current.Status.Conditions)
 	}
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-cache"}, &corev1.PersistentVolumeClaim{})
 	// A proxy that never became Ready gets no publish route.
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-publish"}, &gatewayv1.HTTPRoute{})
 }
 
-// TestProxyMirrorDisabledHTTPDeploysNothing: with the http key absent or
-// enable: false nothing is deployed, no cache PVC is touched and the status
-// carries no published Service.
+// TestProxyMirrorDisabledHTTPDeploysNothing: with the http key absent —
+// whether the whole services object or just the key (absent = disabled) —
+// no publish workload or cache is retained.
 func TestProxyMirrorDisabledHTTPDeploysNothing(t *testing.T) {
 	for name, mutate := range map[string]func(*mirrorv1alpha1.ProxyMirror){
-		"absent":  func(p *mirrorv1alpha1.ProxyMirror) { p.Spec.Services = mirrorv1alpha1.ProxyMirrorServicesSpec{} },
-		"disable": func(p *mirrorv1alpha1.ProxyMirror) { p.Spec.Services.HTTP.Enable = false },
+		"absent-services": func(p *mirrorv1alpha1.ProxyMirror) { p.Spec.Services = mirrorv1alpha1.ProxyMirrorServicesSpec{} },
+		"absent-http-key": func(p *mirrorv1alpha1.ProxyMirror) { p.Spec.Services.HTTP = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
@@ -243,14 +239,10 @@ func TestProxyMirrorDisabledHTTPDeploysNothing(t *testing.T) {
 			assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-publish-http"}, &corev1.Service{})
 			assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-publish"}, &gatewayv1.HTTPRoute{})
 			current := getProxyMirror(t, ctx, fakeClient, request.NamespacedName)
-			if current.Status.PublishedServiceName != "" {
-				t.Fatalf("publishedServiceName must stay empty, got %q", current.Status.PublishedServiceName)
+			if ready := findCondition(current.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionFalse {
+				t.Fatalf("disabled HTTP must report Ready=False, got %#v", current.Status.Conditions)
 			}
-			// The cache spec is independent of services: still provisioned.
-			claim := &corev1.PersistentVolumeClaim{}
-			if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-cache"}, claim); err != nil {
-				t.Fatalf("cache PVC must be provisioned regardless of services: %v", err)
-			}
+			assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-cache"}, &corev1.PersistentVolumeClaim{})
 		})
 	}
 }

@@ -36,9 +36,13 @@ const (
 	// (allocated once when the controller creates the task) on every
 	// snapshot-scoped child: the sync Job, the VolumeSnapshot and the publish
 	// PVC.
-	SyncTimestampLabel  = "mirrors.zjusct.io/sync-timestamp"
-	ActivePVCAnnotation = "mirrors.zjusct.io/active-pvc"
-	RoleLabel           = "mirrors.zjusct.io/role"
+	SyncTimestampLabel = "mirrors.zjusct.io/sync-timestamp"
+	// ComponentLabel is the standard recommended component label (values:
+	// sync/snapshot/publish-data/publish-http/publish-rsync/proxy-cache); it
+	// replaced the custom mirrors.zjusct.io/role label. Publish children use
+	// the per-service-key value (publish-<key>) so each Service selects only
+	// its own pods.
+	ComponentLabel = "app.kubernetes.io/component"
 
 	conditionReady       = "Ready"
 	conditionProgressing = "Progressing"
@@ -50,8 +54,8 @@ type MirrorReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 	Now      func() time.Time
-	// Config is the loaded controller configuration (required). The serving
-	// section (config serving.*) gates publish HTTPRoute generation, the sync
+	// Config is the loaded controller configuration (required). The publish
+	// section (config publish.*) gates publish HTTPRoute generation, the sync
 	// section the global concurrency cap.
 	Config *config.Config
 	// SyncLimiter enforces the global cap of concurrently running sync Jobs
@@ -105,7 +109,7 @@ func (r *MirrorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, reconcileErr error) {
 	logger := log.FromContext(ctx)
 	mirror := &mirrorv1alpha1.Mirror{}
 	if err := r.Get(ctx, req.NamespacedName, mirror); err != nil {
@@ -123,76 +127,40 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
+	defer func() {
+		result, reconcileErr = r.handleDerivedResourceInvalid(ctx, mirror, result, reconcileErr)
+	}()
+
+	// Removing a service is an operational request, not merely a validation
+	// concern. Honour it even when another part of the new spec is invalid so
+	// a broken sync template cannot accidentally keep an endpoint online.
+	if err := r.cleanupDisabledPublishChildren(ctx, mirror); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	if errs := validateMirror(mirror); len(errs) > 0 {
 		message := errs.ToAggregate().Error()
 		logger.Info("Mirror specification is invalid", "errors", message)
 		return r.patchStatus(ctx, mirror, func() {
 			mirror.Status.ObservedGeneration = mirror.Generation
-			mirror.Status.Phase = mirrorv1alpha1.PhaseDegraded
-			setCondition(mirror, conditionReady, metav1.ConditionFalse, "InvalidSpec", message)
+			setCondition(mirror, conditionReady, conditionStatus(mirrorWasReady(mirror)), "InvalidSpec", message)
 			setCondition(mirror, conditionProgressing, metav1.ConditionFalse, "InvalidSpec", message)
 			setCondition(mirror, conditionDegraded, metav1.ConditionTrue, "InvalidSpec", message)
 		})
 	}
 
-	if mirror.Status.PendingJob != "" {
-		return r.reconcilePendingSnapshot(ctx, mirror)
+	publication, err := r.reconcileActivePublication(ctx, mirror)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-
-	if mirror.Status.ActivePVC != "" && publishEnabled(mirror) {
-		// A published Mirror is served. Only the "http" service is routed
-		// through the Gateway API (the rsync Service is never routed); the
-		// config switch still gates all route generation — see ServingEnabled.
-		// Before ensuring the route, the canonical path and every alias are
-		// checked against all other Mirrors of the namespace: a conflict
-		// (RouteConflict) keeps the workload running but leaves the route
-		// untouched (never created, never updated).
-		routeConflict := ""
-		if publishHTTPEnabled(mirror) && r.Config.ServingEnabled() {
-			conflict, err := r.publishRouteConflict(ctx, mirror)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if conflict == "" {
-				if err := ensurePublishedMirrorRoute(ctx, r, mirror); err != nil {
-					return ctrl.Result{}, err
-				}
-			}
-			routeConflict = conflict
-		}
-		ready, err := r.ensurePublish(ctx, mirror, mirror.Status.ActivePVC, int64(0))
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if !ready {
-			return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: 5 * time.Second}, func() {
-				mirror.Status.Phase = mirrorv1alpha1.PhasePublishing
-				setCondition(mirror, conditionReady, metav1.ConditionFalse, "ServingRollout", "waiting for the publish Deployment to become available")
-				setCondition(mirror, conditionProgressing, metav1.ConditionTrue, "ServingRollout", "updating the publish Deployment")
-			})
-		}
-		if routeConflict != "" {
-			// The publish workload keeps running — only the route generation
-			// is withheld. Requeue after a minute so a conflict that dissolves
-			// (the other Mirror deleted or its aliases changed) is noticed
-			// without a spec change on this side.
-			return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: time.Minute}, func() {
-				mirror.Status.Phase = mirrorv1alpha1.PhaseDegraded
-				setCondition(mirror, conditionReady, metav1.ConditionFalse, "RouteConflict", routeConflict)
-				setCondition(mirror, conditionProgressing, metav1.ConditionFalse, "RouteConflict", routeConflict)
-				setCondition(mirror, conditionDegraded, metav1.ConditionTrue, "RouteConflict", routeConflict)
-			})
-		}
+	if mirror.Status.CurrentSync != nil {
+		return r.reconcilePendingSnapshot(ctx, mirror, publication)
 	}
 
 	if mirror.Spec.Paused {
 		return r.patchStatus(ctx, mirror, func() {
 			mirror.Status.ObservedGeneration = mirror.Generation
-			mirror.Status.Phase = mirrorv1alpha1.PhasePaused
-			setCondition(mirror, conditionReady, conditionStatus(mirror.Status.ActivePVC != ""), "Paused", "new synchronization runs are paused")
-			setCondition(mirror, conditionProgressing, metav1.ConditionFalse, "Paused", "new synchronization runs are paused")
-			setCondition(mirror, conditionDegraded, metav1.ConditionFalse, "Paused", "")
+			applyMirrorConditions(mirror, publication, false, "Paused", "new synchronization runs are paused", nil)
 		})
 	}
 
@@ -204,7 +172,7 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	scheduleDue := mirror.Status.NextSyncAt != nil && !mirror.Status.NextSyncAt.Time.After(now)
 
 	if manualDue || specDue || bootstrapDue || scheduleDue {
-		return r.startSync(ctx, mirror, request)
+		return r.startSync(ctx, mirror, request, publication)
 	}
 
 	if mirror.Status.ActivePVC != "" {
@@ -222,84 +190,71 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		pvcUsage, pvcUsageOK = r.publishPVCUsage(ctx, mirror, mirror.Status.ActivePVC)
 	}
 
-	result := ctrl.Result{}
+	nextResult := ctrl.Result{}
 	if mirror.Status.NextSyncAt != nil {
-		result.RequeueAfter = time.Until(mirror.Status.NextSyncAt.Time)
-		if result.RequeueAfter < time.Second {
-			result.RequeueAfter = time.Second
+		nextResult.RequeueAfter = time.Until(mirror.Status.NextSyncAt.Time)
+		if nextResult.RequeueAfter < time.Second {
+			nextResult.RequeueAfter = time.Second
 		}
 	}
-	return r.patchStatusWithResult(ctx, mirror, result, func() {
+	return r.patchStatusWithResult(ctx, mirror, nextResult, func() {
 		mirror.Status.ObservedGeneration = mirror.Generation
 		if pvcUsageOK {
 			mirror.Status.SizeBytes = pvcUsage
 		}
-		if mirror.Status.ActivePVC != "" {
-			mirror.Status.Phase = mirrorv1alpha1.PhaseReady
-			setCondition(mirror, conditionReady, metav1.ConditionTrue, "Published", fmt.Sprintf("PVC %s is published", mirror.Status.ActivePVC))
-		} else if mirror.Status.Phase == "" {
-			mirror.Status.Phase = mirrorv1alpha1.PhasePending
-			setCondition(mirror, conditionReady, metav1.ConditionFalse, "Pending", "waiting for the initial synchronization")
-		}
-		setCondition(mirror, conditionProgressing, metav1.ConditionFalse, "Idle", "no synchronization is running")
+		applyMirrorConditions(mirror, publication, false, "Idle", "no synchronization is running", nil)
 	})
 }
 
 // startSync begins a new synchronization run. The Unix seconds timestamp is
 // allocated ONCE here, when the controller creates the sync task, and
-// propagates from status.pendingSyncTimestamp into every derived name: the
+// propagates from status.currentSync.startedAt into every derived name: the
 // sync Job `<base>-sync-<ts>`, the VolumeSnapshot and the publish PVC (which
 // share the name `<base>-snap-<ts>`). The sync PVC has the fixed name
 // `<base>-sync` (no timestamp) and is reused across runs. Whether the
 // timestamp is free (no existing Job/PVC/VolumeSnapshot carrying it) is
 // checked when the sync Job is created — see lookupOrCreateSyncJob.
-func (r *MirrorReconciler) startSync(ctx context.Context, mirror *mirrorv1alpha1.Mirror, request string) (ctrl.Result, error) {
+func (r *MirrorReconciler) startSync(ctx context.Context, mirror *mirrorv1alpha1.Mirror, request string, publication publicationHealth) (ctrl.Result, error) {
 	now := r.now()
 	timestamp := now.Unix()
-	base, err := childBase(mirror.Name)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+	base := childBase(mirror.Name)
 	syncPVCName := mirror.Status.WorkPVC
 	if syncPVCName == "" {
-		syncPVCName, err = resourceName(base, "sync")
-		if err != nil {
-			return ctrl.Result{}, err
-		}
+		syncPVCName = resourceName(base, "sync")
 	}
-	jobName, err := resourceName(base, fmt.Sprintf("sync-%d", timestamp))
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	snapshotName, err := resourceName(base, fmt.Sprintf("snap-%d", timestamp))
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+	jobName := resourceName(base, fmt.Sprintf("sync-%d", timestamp))
 
 	if r.Recorder != nil {
 		r.Recorder.Eventf(mirror, corev1.EventTypeNormal, "SynchronizationStarted", "Starting synchronization run with Job %s", jobName)
 	}
 	return r.patchStatusWithResult(ctx, mirror, ctrl.Result{Requeue: true}, func() {
 		mirror.Status.ObservedGeneration = mirror.Generation
-		mirror.Status.Phase = mirrorv1alpha1.PhaseInitializing
 		mirror.Status.WorkPVC = syncPVCName
-		mirror.Status.PendingSyncTimestamp = timestamp
-		mirror.Status.PendingPVC = snapshotName
-		mirror.Status.PendingSnapshot = snapshotName
-		mirror.Status.PendingJob = jobName
-		mirror.Status.PendingSyncRequest = request
-		mirror.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{
-			JobName:   jobName,
-			Phase:     mirrorv1alpha1.SyncPhaseRunning,
-			StartedAt: timePtr(now),
+		mirror.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{
+			StartedAt:   timePtr(now),
+			SyncRequest: request,
 		}
-		setCondition(mirror, conditionReady, conditionStatus(mirror.Status.ActivePVC != ""), "SynchronizationStarted", "preparing synchronization run")
-		setCondition(mirror, conditionProgressing, metav1.ConditionTrue, "SynchronizationStarted", "preparing synchronization run")
-		setCondition(mirror, conditionDegraded, metav1.ConditionFalse, "SynchronizationStarted", "")
+		mirror.Status.NextSyncAt = nil
+		applyMirrorConditions(mirror, publication, true, "SynchronizationStarted", "preparing synchronization run", nil)
 	})
 }
 
-func (r *MirrorReconciler) reconcilePendingSnapshot(ctx context.Context, mirror *mirrorv1alpha1.Mirror) (ctrl.Result, error) {
+func currentSyncTimestamp(mirror *mirrorv1alpha1.Mirror) int64 {
+	if mirror.Status.CurrentSync == nil || mirror.Status.CurrentSync.StartedAt == nil {
+		return 0
+	}
+	return mirror.Status.CurrentSync.StartedAt.Unix()
+}
+
+func currentSyncJobName(mirror *mirrorv1alpha1.Mirror) string {
+	return resourceName(childBase(mirror.Name), fmt.Sprintf("sync-%d", currentSyncTimestamp(mirror)))
+}
+
+func currentSyncSnapshotName(mirror *mirrorv1alpha1.Mirror) string {
+	return resourceName(childBase(mirror.Name), fmt.Sprintf("snap-%d", currentSyncTimestamp(mirror)))
+}
+
+func (r *MirrorReconciler) reconcilePendingSnapshot(ctx context.Context, mirror *mirrorv1alpha1.Mirror, publication publicationHealth) (ctrl.Result, error) {
 	if err := r.ensureSyncPVC(ctx, mirror); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -309,8 +264,8 @@ func (r *MirrorReconciler) reconcilePendingSnapshot(ctx context.Context, mirror 
 		// leave the Job uncreated and retry shortly. The queued sync may
 		// start later than status.nextSyncAt.
 		return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: 5 * time.Second}, func() {
-			setCondition(mirror, conditionProgressing, metav1.ConditionTrue, "SyncQueued",
-				fmt.Sprintf("sync Job %s is queued: global sync concurrency limit (%d) reached", mirror.Status.PendingJob, r.Config.Sync.MaxConcurrent))
+			applyMirrorConditions(mirror, publication, true, "SyncQueued",
+				fmt.Sprintf("sync Job %s is queued: global sync concurrency limit (%d) reached", currentSyncJobName(mirror), r.Config.Sync.MaxConcurrent), nil)
 		})
 	}
 	if errors.Is(err, errSnapshotTimestampConflict) {
@@ -324,11 +279,9 @@ func (r *MirrorReconciler) reconcilePendingSnapshot(ctx context.Context, mirror 
 				"Synchronization run cannot start: %s. Check for the leftover same-second Job/PVC/VolumeSnapshot and remove it if safe.", err.Error())
 		}
 		return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: time.Minute}, func() {
-			mirror.Status.Phase = mirrorv1alpha1.PhaseDegraded
 			message := err.Error()
-			setCondition(mirror, conditionReady, conditionStatus(mirror.Status.ActivePVC != ""), "SnapshotTimestampConflict", message)
-			setCondition(mirror, conditionProgressing, metav1.ConditionFalse, "SnapshotTimestampConflict", message)
-			setCondition(mirror, conditionDegraded, metav1.ConditionTrue, "SnapshotTimestampConflict", message)
+			applyMirrorConditions(mirror, publication, false, "SnapshotTimestampConflict", message,
+				&conditionFailure{reason: "SnapshotTimestampConflict", message: message})
 		})
 	}
 	if err != nil {
@@ -349,12 +302,11 @@ func (r *MirrorReconciler) reconcilePendingSnapshot(ctx context.Context, mirror 
 
 	if jobFailed(job) {
 		message := jobFailureMessage(job)
-		return r.failPendingSnapshot(ctx, mirror, "SyncJobFailed", message)
+		return r.failPendingSnapshot(ctx, mirror, publication, "SyncJobFailed", message)
 	}
 	if !jobSucceeded(job) {
 		return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: 5 * time.Second}, func() {
-			mirror.Status.Phase = mirrorv1alpha1.PhaseSyncing
-			setCondition(mirror, conditionProgressing, metav1.ConditionTrue, "SyncJobRunning", fmt.Sprintf("Job %s is running", job.Name))
+			applyMirrorConditions(mirror, publication, true, "SyncJobRunning", fmt.Sprintf("Job %s is running", job.Name), nil)
 		})
 	}
 
@@ -366,12 +318,11 @@ func (r *MirrorReconciler) reconcilePendingSnapshot(ctx context.Context, mirror 
 		return ctrl.Result{}, err
 	}
 	if message != "" {
-		return r.failPendingSnapshot(ctx, mirror, "SnapshotFailed", message)
+		return r.failPendingSnapshot(ctx, mirror, publication, "SnapshotFailed", message)
 	}
 	if !ready {
 		return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: 5 * time.Second}, func() {
-			mirror.Status.Phase = mirrorv1alpha1.PhasePublishing
-			setCondition(mirror, conditionProgressing, metav1.ConditionTrue, "Snapshotting", fmt.Sprintf("snapshotting completed sync PVC %s", mirror.Status.WorkPVC))
+			applyMirrorConditions(mirror, publication, true, "Snapshotting", fmt.Sprintf("snapshotting completed sync PVC %s", mirror.Status.WorkPVC), nil)
 		})
 	}
 
@@ -380,24 +331,28 @@ func (r *MirrorReconciler) reconcilePendingSnapshot(ctx context.Context, mirror 
 	}
 
 	if publishEnabled(mirror) {
-		ready, err := r.ensurePublish(ctx, mirror, mirror.Status.PendingPVC, mirror.Status.PendingSyncTimestamp)
+		ready, err := r.ensurePublish(ctx, mirror, currentSyncSnapshotName(mirror))
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if !ready {
 			return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: 5 * time.Second}, func() {
-				mirror.Status.Phase = mirrorv1alpha1.PhasePublishing
-				setCondition(mirror, conditionProgressing, metav1.ConditionTrue, "ServingRollout", fmt.Sprintf("publishing PVC %s", mirror.Status.PendingPVC))
+				applyMirrorConditions(mirror, publication, true, "PublishRollout", fmt.Sprintf("publishing PVC %s", currentSyncSnapshotName(mirror)), nil)
 			})
 		}
 	}
 
-	return r.publishPendingSnapshot(ctx, mirror)
+	return r.publishPendingSnapshot(ctx, mirror, publication)
 }
 
-func (r *MirrorReconciler) publishPendingSnapshot(ctx context.Context, mirror *mirrorv1alpha1.Mirror) (ctrl.Result, error) {
+func (r *MirrorReconciler) publishPendingSnapshot(ctx context.Context, mirror *mirrorv1alpha1.Mirror, publication publicationHealth) (ctrl.Result, error) {
 	now := r.now()
 	interval := mirror.Spec.Sync.Interval.Duration
+	hadActivePublication := mirror.Status.ActivePVC != ""
+	result := ctrl.Result{RequeueAfter: interval}
+	if publishHTTPEnabled(mirror) && !publication.ready {
+		result.RequeueAfter = 5 * time.Second
+	}
 	// A successful publication ends the failure streak: fast retries (if any
 	// were queued) restart from zero. Failed Jobs are also pruned down to
 	// spec.sync.keepFailedJobs — every terminal state is a pruning point.
@@ -405,39 +360,54 @@ func (r *MirrorReconciler) publishPendingSnapshot(ctx context.Context, mirror *m
 		return ctrl.Result{}, err
 	}
 	if r.Recorder != nil {
-		r.Recorder.Eventf(mirror, corev1.EventTypeNormal, "SnapshotPublished", "Published PVC %s", mirror.Status.PendingPVC)
+		r.Recorder.Eventf(mirror, corev1.EventTypeNormal, "SnapshotPublished", "Published PVC %s", currentSyncSnapshotName(mirror))
 	}
 	// Best-effort usage accounting of the freshly published PVC, folded into
 	// the activation patch. It must never disturb publication: a miss (the
 	// rollout not having mounted the new PVC yet) just leaves sizeBytes empty
 	// for the idle path to backfill.
-	pvcUsage, pvcUsageOK := r.publishPVCUsage(ctx, mirror, mirror.Status.PendingPVC)
-	return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: interval}, func() {
-		pvc := mirror.Status.PendingPVC
-		snapshot := mirror.Status.PendingSnapshot
+	pvc := currentSyncSnapshotName(mirror)
+	jobName := currentSyncJobName(mirror)
+	startedAt := mirror.Status.CurrentSync.StartedAt.DeepCopy()
+	syncRequest := mirror.Status.CurrentSync.SyncRequest
+	pvcUsage, pvcUsageOK := r.publishPVCUsage(ctx, mirror, pvc)
+	return r.patchStatusWithResult(ctx, mirror, result, func() {
 		mirror.Status.ActivePVC = pvc
-		mirror.Status.ActiveSnapshot = snapshot
-		mirror.Status.PendingSyncTimestamp = 0
-		mirror.Status.PendingPVC = ""
-		mirror.Status.PendingSnapshot = ""
-		mirror.Status.PendingJob = ""
-		mirror.Status.LastHandledSyncRequest = mirror.Status.PendingSyncRequest
-		mirror.Status.PendingSyncRequest = ""
-		mirror.Status.Phase = mirrorv1alpha1.PhaseReady
+		mirror.Status.ActiveSnapshot = pvc
+		mirror.Status.CurrentSync = nil
+		mirror.Status.LastHandledSyncRequest = syncRequest
 		mirror.Status.LastPublishedAt = timePtr(now)
 		mirror.Status.NextSyncAt = timePtr(now.Add(interval))
 		mirror.Status.ConsecutiveFailures = 0
 		if pvcUsageOK {
 			mirror.Status.SizeBytes = pvcUsage
 		}
-		if mirror.Status.LastSync != nil {
-			mirror.Status.LastSync.Phase = mirrorv1alpha1.SyncPhaseSucceeded
-			mirror.Status.LastSync.FinishedAt = timePtr(now)
-			mirror.Status.LastSync.Message = fmt.Sprintf("published PVC %s", pvc)
+		mirror.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{
+			JobName:    jobName,
+			Phase:      mirrorv1alpha1.SyncPhaseSucceeded,
+			StartedAt:  startedAt,
+			FinishedAt: timePtr(now),
+			Message:    fmt.Sprintf("published PVC %s", pvc),
 		}
-		setCondition(mirror, conditionReady, metav1.ConditionTrue, "Published", fmt.Sprintf("PVC %s is published", pvc))
-		setCondition(mirror, conditionProgressing, metav1.ConditionFalse, "Published", "synchronization and publication completed")
-		setCondition(mirror, conditionDegraded, metav1.ConditionFalse, "Published", "")
+		if publishHTTPEnabled(mirror) && !publication.ready {
+			reason := publication.reason
+			message := publication.message
+			if !hadActivePublication || reason == "Pending" {
+				reason = "HTTPRoutePending"
+				message = "waiting for HTTPRoute Accepted=True and ResolvedRefs=True"
+			}
+			setCondition(mirror, conditionReady, metav1.ConditionFalse, reason, message)
+			setCondition(mirror, conditionProgressing, conditionStatus(publication.progressing || publication.failure == nil), reason, message)
+			if publication.failure != nil {
+				setCondition(mirror, conditionDegraded, metav1.ConditionTrue, publication.failure.reason, publication.failure.message)
+			} else {
+				setCondition(mirror, conditionDegraded, metav1.ConditionFalse, "AsExpected", "")
+			}
+		} else {
+			setCondition(mirror, conditionReady, metav1.ConditionTrue, "Published", fmt.Sprintf("PVC %s is published", pvc))
+			setCondition(mirror, conditionProgressing, metav1.ConditionFalse, "Published", "synchronization and publication completed")
+			setCondition(mirror, conditionDegraded, metav1.ConditionFalse, "AsExpected", "")
+		}
 	})
 }
 
@@ -446,7 +416,7 @@ func (r *MirrorReconciler) publishPendingSnapshot(ctx context.Context, mirror *m
 // spec.sync.failureRetryLimit the retry is queued after spec.sync.retryInterval
 // (fast retries); afterwards the next attempt waits for the regular
 // spec.sync.interval and the counter stops incrementing.
-func (r *MirrorReconciler) failPendingSnapshot(ctx context.Context, mirror *mirrorv1alpha1.Mirror, reason, message string) (ctrl.Result, error) {
+func (r *MirrorReconciler) failPendingSnapshot(ctx context.Context, mirror *mirrorv1alpha1.Mirror, publication publicationHealth, reason, message string) (ctrl.Result, error) {
 	now := r.now()
 	interval := mirror.Spec.Sync.Interval.Duration
 	retryInterval := mirror.Spec.Sync.RetryInterval.Duration
@@ -471,28 +441,27 @@ func (r *MirrorReconciler) failPendingSnapshot(ctx context.Context, mirror *mirr
 	if r.Recorder != nil {
 		r.Recorder.Eventf(mirror, corev1.EventTypeWarning, reason, "Synchronization run failed: %s", message)
 	}
+	jobName := currentSyncJobName(mirror)
+	startedAt := mirror.Status.CurrentSync.StartedAt.DeepCopy()
+	syncRequest := mirror.Status.CurrentSync.SyncRequest
 	progressingMessage := fmt.Sprintf("%s; %d consecutive failure(s); retry queued for %s", message, failures, nextAttempt.Format(time.RFC3339))
 	if failures >= limit {
 		progressingMessage = fmt.Sprintf("%s; retry limit %d reached after %d consecutive failure(s); next attempt scheduled for %s", message, limit, failures, nextAttempt.Format(time.RFC3339))
 	}
 	return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: nextAttempt.Sub(now)}, func() {
-		mirror.Status.PendingSyncTimestamp = 0
-		mirror.Status.PendingPVC = ""
-		mirror.Status.PendingSnapshot = ""
-		mirror.Status.PendingJob = ""
-		mirror.Status.LastHandledSyncRequest = mirror.Status.PendingSyncRequest
-		mirror.Status.PendingSyncRequest = ""
-		mirror.Status.Phase = mirrorv1alpha1.PhaseDegraded
+		mirror.Status.CurrentSync = nil
+		mirror.Status.LastHandledSyncRequest = syncRequest
 		mirror.Status.ConsecutiveFailures = failures
 		mirror.Status.NextSyncAt = timePtr(nextAttempt)
-		if mirror.Status.LastSync != nil {
-			mirror.Status.LastSync.Phase = mirrorv1alpha1.SyncPhaseFailed
-			mirror.Status.LastSync.FinishedAt = timePtr(now)
-			mirror.Status.LastSync.Message = message
+		mirror.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{
+			JobName:    jobName,
+			Phase:      mirrorv1alpha1.SyncPhaseFailed,
+			StartedAt:  startedAt,
+			FinishedAt: timePtr(now),
+			Message:    message,
 		}
-		setCondition(mirror, conditionReady, conditionStatus(mirror.Status.ActivePVC != ""), reason, message)
-		setCondition(mirror, conditionProgressing, metav1.ConditionFalse, reason, progressingMessage)
-		setCondition(mirror, conditionDegraded, metav1.ConditionTrue, reason, message)
+		applyMirrorConditions(mirror, publication, false, reason, progressingMessage,
+			&conditionFailure{reason: reason, message: message})
 	})
 }
 
@@ -501,10 +470,7 @@ func (r *MirrorReconciler) reconcileDelete(ctx context.Context, mirror *mirrorv1
 		return ctrl.Result{}, nil
 	}
 
-	base, err := childBase(mirror.Name)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+	base := childBase(mirror.Name)
 
 	claims := &corev1.PersistentVolumeClaimList{}
 	if err := r.List(ctx, claims, client.InNamespace(mirror.Namespace), client.MatchingLabels{MirrorLabel: base}); err != nil {
@@ -579,34 +545,138 @@ func conditionStatus(value bool) metav1.ConditionStatus {
 	return metav1.ConditionFalse
 }
 
-// validateDerivedName rejects a CR name if the derived child object name for
-// the given (longest) suffix would exceed the DNS-1123 label limit.
-func validateDerivedName(name, longestSuffix string) *field.Error {
-	base, err := childBase(name)
-	if err != nil {
-		return field.Invalid(field.NewPath("metadata", "name"), name, err.Error())
-	}
-	derived, err := resourceName(base, longestSuffix)
-	if err != nil {
-		return field.Invalid(field.NewPath("metadata", "name"), name, fmt.Sprintf("%s (derived name: %s)", err.Error(), derived))
-	}
-	return nil
+func mirrorWasReady(mirror *mirrorv1alpha1.Mirror) bool {
+	condition := meta.FindStatusCondition(mirror.Status.Conditions, conditionReady)
+	return condition != nil && condition.Status == metav1.ConditionTrue
 }
 
-// mirrorLongestNameSuffix is the longest suffix ever appended to a Mirror's
-// child names: the decimal Unix seconds timestamp (bounded by
-// maxSyncTimestampLen) prefixed with "sync-". Checking it covers every other
-// derived name (snap-<ts>, publish-<protocol> are shorter or equal).
-func mirrorLongestNameSuffix() string {
-	return "sync-" + strings.Repeat("0", maxSyncTimestampLen)
+func proxyWasReady(proxy *mirrorv1alpha1.ProxyMirror) bool {
+	condition := meta.FindStatusCondition(proxy.Status.Conditions, conditionReady)
+	return condition != nil && condition.Status == metav1.ConditionTrue
+}
+
+type conditionFailure struct {
+	reason  string
+	message string
+}
+
+// publicationHealth describes the currently active generation independently
+// of a newer synchronization transaction. In particular, a rolling
+// Deployment can be available (Ready) and still converging (Progressing).
+type publicationHealth struct {
+	ready       bool
+	progressing bool
+	reason      string
+	message     string
+	failure     *conditionFailure
+}
+
+// reconcileActivePublication reconciles an idle active generation, but only
+// observes it while CurrentSync is non-nil. Re-applying ActivePVC during a
+// pending publication would otherwise revert the Deployment away from the new
+// PVC on every reconcile. Availability is intentionally weaker than rollout
+// convergence: maxUnavailable=0 keeps an old pod serving while the new pod is
+// coming up.
+func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirror *mirrorv1alpha1.Mirror) (publicationHealth, error) {
+	if mirror.Status.ActivePVC == "" {
+		return publicationHealth{reason: "Pending", message: "waiting for the initial synchronization"}, nil
+	}
+	if !publishEnabled(mirror) {
+		return publicationHealth{ready: true, reason: "Published", message: fmt.Sprintf("PVC %s is active", mirror.Status.ActivePVC)}, nil
+	}
+
+	if mirror.Status.CurrentSync == nil {
+		if _, err := r.ensurePublish(ctx, mirror, mirror.Status.ActivePVC); err != nil {
+			return publicationHealth{}, err
+		}
+	}
+
+	available, converged, err := observePublishChildren(ctx, r.Client, mirror)
+	if err != nil {
+		return publicationHealth{}, err
+	}
+	health := publicationHealth{
+		ready:       available,
+		progressing: !converged,
+		reason:      "Published",
+		message:     "all requested publish Deployments are available",
+	}
+	if !available {
+		health.reason = "PublishUnavailable"
+		health.message = "waiting for all requested publish Deployments and Services to become available"
+	} else if !converged {
+		health.reason = "PublishRollout"
+		health.message = "the active publication remains available while a publish Deployment is rolling out"
+	}
+
+	if !publishHTTPEnabled(mirror) {
+		return health, nil
+	}
+	if !r.Config.PublishEnabled() {
+		health.ready = false
+		health.progressing = false
+		health.reason = "HTTPRouteDisabled"
+		health.message = "HTTP publishing is requested but route generation is disabled"
+		health.failure = &conditionFailure{reason: health.reason, message: health.message}
+		return health, nil
+	}
+	if err := ensurePublishedMirrorRoute(ctx, r, mirror); err != nil {
+		return publicationHealth{}, err
+	}
+	routeState, routeMessage, err := publishRouteHealth(ctx, r.Client, mirror)
+	if err != nil {
+		return publicationHealth{}, err
+	}
+	switch routeState {
+	case publishRouteRejected:
+		health.ready = false
+		health.progressing = false
+		health.reason = "HTTPRouteRejected"
+		health.message = routeMessage
+		health.failure = &conditionFailure{reason: health.reason, message: routeMessage}
+		if r.Recorder != nil {
+			r.Recorder.Event(mirror, corev1.EventTypeWarning, "HTTPRouteRejected", routeMessage)
+		}
+	case publishRoutePending:
+		health.ready = false
+		health.progressing = true
+		health.reason = "HTTPRoutePending"
+		health.message = routeMessage
+	}
+	return health, nil
+}
+
+// applyMirrorConditions is the single condition projection for a valid
+// Mirror. Publication health, current synchronization activity and the last
+// completed synchronization are orthogonal facts, so Ready and Degraded may
+// both legitimately be true.
+func applyMirrorConditions(mirror *mirrorv1alpha1.Mirror, publication publicationHealth, syncProgressing bool, progressReason, progressMessage string, currentFailure *conditionFailure) {
+	setCondition(mirror, conditionReady, conditionStatus(publication.ready), publication.reason, publication.message)
+	if syncProgressing {
+		setCondition(mirror, conditionProgressing, metav1.ConditionTrue, progressReason, progressMessage)
+	} else if publication.progressing {
+		setCondition(mirror, conditionProgressing, metav1.ConditionTrue, publication.reason, publication.message)
+	} else {
+		setCondition(mirror, conditionProgressing, metav1.ConditionFalse, progressReason, progressMessage)
+	}
+
+	failure := currentFailure
+	if failure == nil {
+		failure = publication.failure
+	}
+	if failure == nil && mirror.Status.LastSync != nil && mirror.Status.LastSync.Phase == mirrorv1alpha1.SyncPhaseFailed {
+		failure = &conditionFailure{reason: "SynchronizationFailed", message: mirror.Status.LastSync.Message}
+	}
+	if failure != nil {
+		setCondition(mirror, conditionDegraded, metav1.ConditionTrue, failure.reason, failure.message)
+	} else {
+		setCondition(mirror, conditionDegraded, metav1.ConditionFalse, "AsExpected", "")
+	}
 }
 
 func validateMirror(mirror *mirrorv1alpha1.Mirror) field.ErrorList {
 	path := field.NewPath("spec")
 	var errs field.ErrorList
-	if err := validateDerivedName(mirror.Name, mirrorLongestNameSuffix()); err != nil {
-		errs = append(errs, err)
-	}
 	if mirror.Spec.Sync.Interval.Duration <= 0 {
 		errs = append(errs, field.Invalid(path.Child("sync", "interval"), mirror.Spec.Sync.Interval.Duration.String(), "must be greater than zero"))
 	}
@@ -646,18 +716,18 @@ func validateMirror(mirror *mirrorv1alpha1.Mirror) field.ErrorList {
 		key  string
 		spec *mirrorv1alpha1.MirrorServiceSpec
 	}{
-		{PublishProtocolHTTP, &services.HTTP.MirrorServiceSpec},
-		{PublishProtocolRsync, &services.Rsync},
+		{PublishProtocolHTTP, httpServiceSpec(services)},
+		{PublishProtocolRsync, services.Rsync},
 	} {
-		if !entry.spec.Enable {
+		if entry.spec == nil {
 			continue
 		}
 		errs = append(errs, validateMirrorService(entry.spec, servicesPath.Child(entry.key))...)
 	}
-	// Alias paths of an ENABLED http service (a disabled key may park
+	// Alias paths of an ENABLED http service (an absent key may park
 	// anything).
-	if services.HTTP.Enable {
-		errs = append(errs, validateHTTPAliases(&services.HTTP, mirror.Name, servicesPath.Child("http", "aliases"))...)
+	if services.HTTP != nil {
+		errs = append(errs, validateHTTPAliases(services.HTTP, mirror.Name, servicesPath.Child("http", "aliases"))...)
 	}
 	// There is no placement validation: node locality is K8s-native on the
 	// sync side (WFFC + bound-PV nodeAffinity) and PV-derived on the publish
@@ -672,18 +742,22 @@ func publishEnabled(mirror *mirrorv1alpha1.Mirror) bool {
 	return mirror.Spec.Services.AnyEnabled()
 }
 
+// httpServiceSpec returns the base service spec of the http key, or nil when
+// the key is absent (absent = disabled).
+func httpServiceSpec(services mirrorv1alpha1.MirrorServicesSpec) *mirrorv1alpha1.MirrorServiceSpec {
+	if services.HTTP == nil {
+		return nil
+	}
+	return &services.HTTP.MirrorServiceSpec
+}
+
 // validateMirrorService validates one ENABLED publish service of a Mirror
-// (disabled keys are skipped entirely — anything may be parked there). The
-// CRD additionally enforces the enable-time presence of mirrorMountPath and
-// podTemplate.spec at admission; the controller-side checks keep the
-// InvalidSpec path complete for specs that bypassed it.
+// (absent keys are skipped entirely — anything may be parked there). The CRD
+// additionally enforces the declaration-time presence of podTemplate.spec at
+// admission; the controller-side checks keep the InvalidSpec path complete
+// for specs that bypassed it.
 func validateMirrorService(service *mirrorv1alpha1.MirrorServiceSpec, path *field.Path) field.ErrorList {
 	var errs field.ErrorList
-	if service.MirrorMountPath == "" {
-		errs = append(errs, field.Required(path.Child("mirrorMountPath"), "must not be empty when enable is true"))
-	} else if service.MirrorMountPath[0] != '/' {
-		errs = append(errs, field.Invalid(path.Child("mirrorMountPath"), service.MirrorMountPath, "must be an absolute path"))
-	}
 	templatePath := path.Child("podTemplate")
 	errs = append(errs, validatePublishPodTemplate(&service.PodTemplate, templatePath, PublishDataVolumeName)...)
 	// Data integrity: every mount of the controller-injected mirror-data
@@ -717,10 +791,12 @@ func validateMirrorDataMounts(mounts []corev1.VolumeMount, path *field.Path) fie
 // validateHTTPAliases validates the additional public path prefixes of an
 // ENABLED http service: no duplicate, no alias equal to the canonical
 // /<mirror name> path, and the syntax rules (start with '/', no trailing '/',
-// no '//', no whitespace). Syntax is additionally enforced at admission by a
-// CEL rule; the controller-side mirror keeps the InvalidSpec path complete
-// for specs that bypassed it. Case-sensitive on purpose: CR names are bound
-// by DNS rules while alias paths are not.
+// no '//', no whitespace). This controller-side check is the SOLE syntax
+// enforcement (the CRD carries only the MaxItems/MaxLength bounds — a CEL
+// mirror of these rules was deliberately dropped); keeping it in the
+// InvalidSpec path buys precise error messages. Cross-route precedence is the
+// gateway's business (see routeGatewayRejection). Case-sensitive on purpose:
+// CR names are bound by DNS rules while alias paths are not.
 func validateHTTPAliases(http *mirrorv1alpha1.MirrorHTTPServiceSpec, mirrorName string, path *field.Path) field.ErrorList {
 	var errs field.ErrorList
 	canonical := "/" + mirrorName

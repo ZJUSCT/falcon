@@ -15,8 +15,8 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.phase
-      name: Phase
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
       type: string
     - jsonPath: .status.activePVC
       name: Active PVC
@@ -80,7 +80,7 @@ spec:
                 description: |-
                   Services declares how the active snapshot clone is published, through
                   the fixed keys "http" and "rsync" (see MirrorServicesSpec). With every
-                  key disabled (including an entirely absent services object) the mirror
+                  key absent (including an entirely absent services object) the mirror
                   is sync-only: the sync/snapshot pipeline still runs and the publish PVC
                   is still produced, but no publish Deployment/Service/HTTPRoute is
                   created.
@@ -88,7 +88,7 @@ spec:
                   http:
                     description: |-
                       HTTP is the HTTP publish service (web server, git http-backend via
-                      fastcgi, ...). It owns the publish HTTPRoute when enabled, serving the
+                      fastcgi, ...). It owns the publish HTTPRoute when enabled, publishing the
                       canonical /<mirror name> path plus any declared aliases.
                     properties:
                       aliases:
@@ -101,9 +101,12 @@ spec:
                           portal links, documentation). Each alias gets a PathPrefix match on the
                           publish HTTPRoute, appended after the canonical path in declaration
                           order (matches within a rule are OR). Case-sensitive, uppercase
-                          allowed; an alias equal to the canonical path is rejected by the
-                          controller. Conflicts with other Mirrors' paths are detected at route
-                          generation time (RouteConflict condition).
+                          allowed; the syntax rules and the canonical-path/duplicate rules are
+                          enforced by the controller (validateHTTPAliases). Whether the gateway
+                          accepts the resulting routes (including precedence against other
+                          Mirrors' routes) is the Gateway API's own precedence and acceptance
+                          machinery; the controller surfaces an Accepted=False condition as
+                          Degraded instead of pre-filtering.
                         items:
                           description: |-
                             MirrorHTTPAlias is one additional public path prefix of an http service.
@@ -113,32 +116,17 @@ spec:
                           type: string
                         maxItems: 8
                         type: array
-                      enable:
-                        description: |-
-                          Enable turns the service on. A key that does not appear in
-                          spec.services is disabled, and so is a key declared with
-                          enable: false — Enable is the single source of truth.
-                        type: boolean
-                      mirrorMountPath:
-                        description: |-
-                          MirrorMountPath is where the controller mounts the publish PVC
-                          (read-only) inside the first container when the service is enabled. It
-                          is the exact mount point: the controller does not append the mirror
-                          name (the publish HTTPRoute prefix remains /<mirror name>; point the
-                          web root, rsyncd module path or git http-backend root at this
-                          directory as the image requires).
-                        type: string
                       podTemplate:
                         description: |-
                           PodTemplate is the FULL pod template of the publish Deployment
                           (Deployment .spec.template): the user declares every container, port,
                           probe, volume, affinity and so on. The controller forces the
                           data-integrity constraints (the read-only `mirror-data` publish PVC
-                          volume mounted at mirrorMountPath, pod labels/annotations, placement,
-                          naming/selector identity) and injects defaults only where the template
-                          is silent (TCP readiness probe on the first container port, a /tmp
-                          emptyDir, readOnlyRootFilesystem and the restricted-profile security
-                          defaults).
+                          volume in spec.volumes — mounting it, and where, is the user's own
+                          declaration —, pod labels/annotations, placement, naming/selector
+                          identity) and injects defaults only where the template is silent (TCP
+                          readiness probe on the first container port, a /tmp emptyDir,
+                          readOnlyRootFilesystem and the restricted-profile security defaults).
                         properties:
                           metadata:
                             description: |-
@@ -8770,46 +8758,26 @@ spec:
                         type: integer
                     type: object
                     x-kubernetes-validations:
-                    - message: each alias must start with '/', must not end with '/',
-                        and must not contain '//' or whitespace
-                      rule: '!has(self.aliases) || self.aliases.all(a, a.matches(''^/([^/\s]+/)*[^/\s]+$''))'
-                    - message: mirrorMountPath is required when enable is true
-                      rule: '!self.enable || (has(self.mirrorMountPath) && self.mirrorMountPath.length()
-                        > 0)'
-                    - message: podTemplate.spec is required when enable is true
-                      rule: '!self.enable || has(self.podTemplate.spec)'
+                    - message: podTemplate.spec is required when the service key is
+                        declared
+                      rule: has(self.podTemplate.spec)
                   rsync:
                     description: |-
                       Rsync is the rsync publish service. It only gets a Deployment and a
                       ClusterIP Service — no Gateway API route (a future RsyncRoute is out
                       of scope), and no path concept, hence no aliases.
                     properties:
-                      enable:
-                        description: |-
-                          Enable turns the service on. A key that does not appear in
-                          spec.services is disabled, and so is a key declared with
-                          enable: false — Enable is the single source of truth.
-                        type: boolean
-                      mirrorMountPath:
-                        description: |-
-                          MirrorMountPath is where the controller mounts the publish PVC
-                          (read-only) inside the first container when the service is enabled. It
-                          is the exact mount point: the controller does not append the mirror
-                          name (the publish HTTPRoute prefix remains /<mirror name>; point the
-                          web root, rsyncd module path or git http-backend root at this
-                          directory as the image requires).
-                        type: string
                       podTemplate:
                         description: |-
                           PodTemplate is the FULL pod template of the publish Deployment
                           (Deployment .spec.template): the user declares every container, port,
                           probe, volume, affinity and so on. The controller forces the
                           data-integrity constraints (the read-only `mirror-data` publish PVC
-                          volume mounted at mirrorMountPath, pod labels/annotations, placement,
-                          naming/selector identity) and injects defaults only where the template
-                          is silent (TCP readiness probe on the first container port, a /tmp
-                          emptyDir, readOnlyRootFilesystem and the restricted-profile security
-                          defaults).
+                          volume in spec.volumes — mounting it, and where, is the user's own
+                          declaration —, pod labels/annotations, placement, naming/selector
+                          identity) and injects defaults only where the template is silent (TCP
+                          readiness probe on the first container port, a /tmp emptyDir,
+                          readOnlyRootFilesystem and the restricted-profile security defaults).
                         properties:
                           metadata:
                             description: |-
@@ -17441,11 +17409,9 @@ spec:
                         type: integer
                     type: object
                     x-kubernetes-validations:
-                    - message: mirrorMountPath is required when enable is true
-                      rule: '!self.enable || (has(self.mirrorMountPath) && self.mirrorMountPath.length()
-                        > 0)'
-                    - message: podTemplate.spec is required when enable is true
-                      rule: '!self.enable || has(self.podTemplate.spec)'
+                    - message: podTemplate.spec is required when the service key is
+                        declared
+                      rule: has(self.podTemplate.spec)
                 type: object
               storage:
                 properties:
@@ -17501,24 +17467,13 @@ spec:
               sync:
                 description: |-
                   MirrorSyncSpec describes one synchronization run. The Job-level knobs
-                  (interval/retry/timeout/limits), the data mount point and the placement are
-                  CR fields; everything else about the sync container lives in PodTemplate —
-                  the full pod template of the sync Job, symmetric to the publish services'
-                  podTemplate.
+                  (interval/retry/timeout/limits) are CR fields; everything else about the
+                  sync container lives in PodTemplate — the full pod template of the sync
+                  Job, symmetric to the publish services' podTemplate. There are no placement
+                  fields: sync pods reference the sync PVC, so the scheduler handles locality
+                  natively (WaitForFirstConsumer decides the volume's node on first supply;
+                  the bound PV's nodeAffinity pins every later sync pod) — see spec/k8s.md.
                 properties:
-                  dataMountPath:
-                    description: |-
-                      DataMountPath is where the controller mounts the WRITABLE sync PVC
-                      (volume name `sync-data`, forced) inside the first container. It is the
-                      exact mount point. Everything else the sync process needs to know
-                      (paths, credentials, tuning) goes through the pod template / explicit
-                      env — the controller injects no implicit environment variables.
-
-                      There are no placement fields: sync pods reference the sync PVC, so the
-                      scheduler handles locality natively (WaitForFirstConsumer decides the
-                      volume's node on first supply; the bound PV's nodeAffinity pins every
-                      later sync pod) — see spec/k8s.md.
-                    type: string
                   failureRetryLimit:
                     default: 3
                     description: |-
@@ -17548,12 +17503,14 @@ spec:
                       .spec.template): the user declares every container, image, command,
                       args, env, probe, volume and so on — ConfigMap/Secret inputs included,
                       as plain volumes/mounts. The controller forces the sync pipeline
-                      identity (the WRITABLE `sync-data` PVC volume mounted at dataMountPath
-                      into the first container, restartPolicy Never, the sync labels, the Job
-                      deadline) and injects defaults only where the template is silent
-                      (restricted-profile security defaults, a /tmp emptyDir, imagePullPolicy
-                      IfNotPresent). No placement is injected: volume locality is the
-                      scheduler's job.
+                      identity (the WRITABLE `sync-data` PVC volume in spec.volumes —
+                      mounting it, and where, is the user's own declaration —,
+                      restartPolicy Never, the sync labels, the Job deadline) and injects
+                      defaults only where the template is silent (restricted-profile
+                      security defaults, a /tmp emptyDir, imagePullPolicy IfNotPresent). No
+                      probes or environment variables are injected: data location and every
+                      other input the sync process needs are explicit user declarations.
+                      No placement is injected: volume locality is the scheduler's job.
                     properties:
                       metadata:
                         description: |-
@@ -26184,6 +26141,21 @@ spec:
                   every success.
                 format: int32
                 type: integer
+              currentSync:
+                description: |-
+                  MirrorCurrentSyncStatus is the durable identity of the synchronization
+                  transaction currently in progress. Every child name is derived from the
+                  Unix seconds of StartedAt, so persisting each deterministic name separately
+                  would duplicate the same fact.
+                properties:
+                  startedAt:
+                    format: date-time
+                    type: string
+                  syncRequest:
+                    type: string
+                required:
+                - startedAt
+                type: object
               lastHandledSyncRequest:
                 type: string
               lastPublishedAt:
@@ -26200,7 +26172,6 @@ spec:
                     type: string
                   phase:
                     enum:
-                    - Running
                     - Succeeded
                     - Failed
                     type: string
@@ -26217,32 +26188,6 @@ spec:
               observedGeneration:
                 format: int64
                 type: integer
-              pendingJob:
-                type: string
-              pendingPVC:
-                type: string
-              pendingSnapshot:
-                type: string
-              pendingSyncRequest:
-                type: string
-              pendingSyncTimestamp:
-                description: |-
-                  PendingSyncTimestamp is the Unix seconds timestamp allocated when the
-                  sync task was created. It is embedded in the pending sync Job's name
-                  and in the pending snapshot and publish PVC names (which share the
-                  same name, `<mirror>-snap-<ts>`).
-                format: int64
-                type: integer
-              phase:
-                enum:
-                - Pending
-                - Initializing
-                - Syncing
-                - Publishing
-                - Ready
-                - Paused
-                - Degraded
-                type: string
               sizeBytes:
                 format: int64
                 type: integer

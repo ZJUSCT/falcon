@@ -64,12 +64,11 @@ func TestAtomicPublicationUsesStableSyncPVCAndSnapshotClone(t *testing.T) {
 	// The timestamp is allocated ONCE at sync task creation and propagates to
 	// the sync Job name and to the snapshot and publish PVC (which share the
 	// name <base>-snap-<ts>).
-	if current.Status.PendingJob != fmt.Sprintf("smoke-sync-%d", now.Unix()) {
-		t.Fatalf("expected pending sync Job smoke-sync-<ts>, got %#v", current.Status)
+	if currentSyncJobName(current) != fmt.Sprintf("smoke-sync-%d", now.Unix()) {
+		t.Fatalf("expected current sync Job smoke-sync-<ts>, got %#v", current.Status)
 	}
-	if current.Status.PendingSyncTimestamp != now.Unix() ||
-		current.Status.PendingPVC != fmt.Sprintf("smoke-snap-%d", now.Unix()) ||
-		current.Status.PendingSnapshot != fmt.Sprintf("smoke-snap-%d", now.Unix()) {
+	if currentSyncTimestamp(current) != now.Unix() ||
+		currentSyncSnapshotName(current) != fmt.Sprintf("smoke-snap-%d", now.Unix()) {
 		t.Fatalf("expected timestamped names derived from the task creation timestamp, got %#v", current.Status)
 	}
 
@@ -77,18 +76,21 @@ func TestAtomicPublicationUsesStableSyncPVCAndSnapshotClone(t *testing.T) {
 	workClaim := &corev1.PersistentVolumeClaim{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.WorkPVC}, workClaim)
 	job := &batchv1.Job{}
-	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingJob}, job)
-	// The writable sync-data volume is forced: PVC source without ReadOnly.
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncJobName(current)}, job)
+	// The writable sync-data volume is forced as a VOLUME (PVC source without
+	// ReadOnly); mounting it is the user template's own declaration.
 	jobData := findVolume(job.Spec.Template.Spec.Volumes, "sync-data")
 	if jobData == nil || jobData.PersistentVolumeClaim == nil || jobData.PersistentVolumeClaim.ClaimName != current.Status.WorkPVC {
-		t.Fatalf("sync Job must mount the sync PVC %q as writable sync-data, got %#v", current.Status.WorkPVC, jobData)
+		t.Fatalf("sync Job must inject the sync PVC %q as writable sync-data volume, got %#v", current.Status.WorkPVC, jobData)
 	}
 	if jobData.PersistentVolumeClaim.ReadOnly {
-		t.Fatal("sync-data is the sync OUTPUT volume: it must not be mounted read-only")
+		t.Fatal("sync-data is the sync OUTPUT volume: its volume source must not be read-only")
 	}
+	// The user-declared sync-data mount is preserved verbatim (the controller
+	// adds no mounts of its own).
 	jobMount := findMount(job.Spec.Template.Spec.Containers[0], "sync-data")
 	if jobMount == nil || jobMount.MountPath != "/data" || jobMount.ReadOnly {
-		t.Fatalf("sync-data must be mounted writable at the declared dataMountPath, got %#v", jobMount)
+		t.Fatalf("the user-declared sync-data mount must be preserved verbatim, got %#v", jobMount)
 	}
 	// The user-declared input volume from the pod template is preserved.
 	jobMounts := job.Spec.Template.Spec.Containers[0].VolumeMounts
@@ -104,9 +106,9 @@ func TestAtomicPublicationUsesStableSyncPVCAndSnapshotClone(t *testing.T) {
 	if len(job.Spec.Template.Spec.NodeSelector) != 0 {
 		t.Fatalf("sync Job must carry no controller-injected nodeSelector (placement is scheduler-native), got %#v", job.Spec.Template.Spec.NodeSelector)
 	}
-	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingSnapshot}, &snapshotv1.VolumeSnapshot{})
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncSnapshotName(current)}, &snapshotv1.VolumeSnapshot{})
 	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
-	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingPVC}, &corev1.PersistentVolumeClaim{})
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncSnapshotName(current)}, &corev1.PersistentVolumeClaim{})
 
 	job.Status.Succeeded = 1
 	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
@@ -115,11 +117,11 @@ func TestAtomicPublicationUsesStableSyncPVCAndSnapshotClone(t *testing.T) {
 	if err := fakeClient.Status().Update(ctx, job); err != nil {
 		t.Fatalf("mark Job complete: %v", err)
 	}
-	// After Job success the pending timestamp is simply reused: no separate
-	// allocation step, the persisted names go straight into child objects.
+	// After Job success the transaction timestamp is simply reused: no
+	// separate allocation step is needed.
 	reconcile(t, ctx, reconciler, request) // post-sync snapshot
 	snapshot := &snapshotv1.VolumeSnapshot{}
-	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingSnapshot}, snapshot)
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncSnapshotName(current)}, snapshot)
 	if snapshot.Spec.Source.PersistentVolumeClaimName == nil || *snapshot.Spec.Source.PersistentVolumeClaimName != current.Status.WorkPVC {
 		t.Fatalf("snapshot source was not the stable sync PVC: %#v", snapshot.Spec.Source)
 	}
@@ -131,8 +133,8 @@ func TestAtomicPublicationUsesStableSyncPVCAndSnapshotClone(t *testing.T) {
 	}
 	reconcile(t, ctx, reconciler, request) // publish PVC clone + Deployment + Service
 	publishClaim := &corev1.PersistentVolumeClaim{}
-	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingPVC}, publishClaim)
-	if publishClaim.Spec.DataSource == nil || publishClaim.Spec.DataSource.Kind != "VolumeSnapshot" || publishClaim.Spec.DataSource.Name != current.Status.PendingSnapshot {
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncSnapshotName(current)}, publishClaim)
+	if publishClaim.Spec.DataSource == nil || publishClaim.Spec.DataSource.Kind != "VolumeSnapshot" || publishClaim.Spec.DataSource.Name != currentSyncSnapshotName(current) {
 		t.Fatalf("publish PVC was not cloned from the completed snapshot: %#v", publishClaim.Spec.DataSource)
 	}
 	if publishClaim.Name != publishClaim.Spec.DataSource.Name {
@@ -144,18 +146,16 @@ func TestAtomicPublicationUsesStableSyncPVCAndSnapshotClone(t *testing.T) {
 	deployment := &appsv1.Deployment{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
 	dataVolume := findVolume(deployment.Spec.Template.Spec.Volumes, "mirror-data")
-	if dataVolume == nil || dataVolume.PersistentVolumeClaim == nil || dataVolume.PersistentVolumeClaim.ClaimName != current.Status.PendingPVC {
-		t.Fatalf("publish Deployment must mount the clone PVC %q as mirror-data, got %#v", current.Status.PendingPVC, dataVolume)
+	if dataVolume == nil || dataVolume.PersistentVolumeClaim == nil || dataVolume.PersistentVolumeClaim.ClaimName != currentSyncSnapshotName(current) {
+		t.Fatalf("publish Deployment must inject the clone PVC %q as mirror-data volume, got %#v", currentSyncSnapshotName(current), dataVolume)
 	}
 	if !dataVolume.PersistentVolumeClaim.ReadOnly {
 		t.Fatal("the mirror-data volume source must be read-only")
 	}
-	dataMount := findMount(deployment.Spec.Template.Spec.Containers[0], "mirror-data")
-	if dataMount == nil || !dataMount.ReadOnly {
-		t.Fatal("the mirror-data mount must be read-only in both the volume source and container mount")
-	}
-	if got := dataMount.MountPath; got != "/usr/share/nginx/html/smoke" {
-		t.Fatalf("mirrorMountPath must be used verbatim as the data mount point, got %q", got)
+	// The controller injects the volume only: no mount is added, mounting is
+	// the user template's declaration.
+	if dataMount := findMount(deployment.Spec.Template.Spec.Containers[0], "mirror-data"); dataMount != nil {
+		t.Fatalf("the controller must not mount mirror-data itself, got %#v", dataMount)
 	}
 	// The first container port is the Service target; the controller renames
 	// it to the service key so the Service and probes reference a named port.
@@ -183,9 +183,6 @@ func TestAtomicPublicationUsesStableSyncPVCAndSnapshotClone(t *testing.T) {
 	if current.Status.ActivePVC != publishClaim.Name || current.Status.ActiveSnapshot != snapshot.Name {
 		t.Fatalf("unexpected published status: %#v", current.Status)
 	}
-	if current.Status.Phase != mirrorv1alpha1.PhaseReady {
-		t.Fatalf("expected Ready, got %s", current.Status.Phase)
-	}
 	reconcile(t, ctx, reconciler, request) // published Mirror: publish route ensured
 
 	// The published Mirror is served through the protocol-named Service of
@@ -195,8 +192,8 @@ func TestAtomicPublicationUsesStableSyncPVCAndSnapshotClone(t *testing.T) {
 	if got := service.Spec.Ports[0].Port; got != 80 {
 		t.Fatalf("publish Service port = %d, want 80", got)
 	}
-	if got := service.Spec.Selector[RoleLabel]; got != "publish-http" {
-		t.Fatalf("publish Service selector role = %q, want publish-http (per-service pods)", got)
+	if got := service.Spec.Selector[ComponentLabel]; got != "publish-http" {
+		t.Fatalf("publish Service selector component = %q, want publish-http (per-service pods)", got)
 	}
 	route := &gatewayv1.HTTPRoute{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
@@ -211,7 +208,6 @@ func TestNextSnapshotStillWritesOnlyToSyncPVC(t *testing.T) {
 	mirror.Annotations = map[string]string{SyncRequestAnnotation: "second-run"}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration:     mirror.Generation,
-		Phase:                  mirrorv1alpha1.PhaseReady,
 		WorkPVC:                "smoke-sync",
 		ActivePVC:              "smoke-snap-1756147200",
 		ActiveSnapshot:         "smoke-snap-1756147200",
@@ -251,19 +247,18 @@ func TestNextSnapshotStillWritesOnlyToSyncPVC(t *testing.T) {
 	}
 	reconcile(t, ctx, reconciler, request) // start the next synchronization run
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.PendingJob == "" || current.Status.PendingSyncTimestamp != now.Unix() ||
-		current.Status.PendingPVC != fmt.Sprintf("smoke-snap-%d", now.Unix()) ||
-		current.Status.PendingSnapshot != fmt.Sprintf("smoke-snap-%d", now.Unix()) {
-		t.Fatalf("expected a pending run with names derived from the new task timestamp, got %#v", current.Status)
+	if currentSyncJobName(current) == "" || currentSyncTimestamp(current) != now.Unix() ||
+		currentSyncSnapshotName(current) != fmt.Sprintf("smoke-snap-%d", now.Unix()) {
+		t.Fatalf("expected a current run with names derived from the new task timestamp, got %#v", current.Status)
 	}
 	reconcile(t, ctx, reconciler, request) // create Job
 	job := &batchv1.Job{}
-	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingJob}, job)
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncJobName(current)}, job)
 	jobData := findVolume(job.Spec.Template.Spec.Volumes, "sync-data")
 	if jobData == nil || jobData.PersistentVolumeClaim == nil || jobData.PersistentVolumeClaim.ClaimName != mirror.Status.WorkPVC {
 		t.Fatalf("next synchronization Job must mount the stable sync PVC %q as sync-data, got %#v", mirror.Status.WorkPVC, jobData)
 	}
-	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingSnapshot}, &snapshotv1.VolumeSnapshot{})
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncSnapshotName(current)}, &snapshotv1.VolumeSnapshot{})
 }
 
 func testMirror() *mirrorv1alpha1.Mirror {
@@ -287,18 +282,26 @@ func testMirror() *mirrorv1alpha1.Mirror {
 				Timeout:           metav1.Duration{Duration: 10 * time.Minute},
 				FailureRetryLimit: 3,
 				KeepFailedJobs:    1,
-				DataMountPath:     "/data",
 				PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
 						Name:    "sync",
 						Image:   "busybox:1.37.0",
 						Command: []string{"sh", "-c"},
 						Args:    []string{"date -u > /data/index.html"},
-						VolumeMounts: []corev1.VolumeMount{{
-							Name:      "sync-config",
-							MountPath: "/etc/sync",
-							ReadOnly:  true,
-						}},
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "sync-config",
+								MountPath: "/etc/sync",
+								ReadOnly:  true,
+							},
+							{
+								// The controller injects the sync-data
+								// volume only; mounting it (and where) is
+								// the user's declaration.
+								Name:      "sync-data",
+								MountPath: "/data",
+							},
+						},
 					}},
 					Volumes: []corev1.Volume{{
 						Name: "sync-config",
@@ -317,10 +320,8 @@ func testMirror() *mirrorv1alpha1.Mirror {
 				Retention:               mirrorv1alpha1.MirrorRetentionSpec{PreviousSnapshots: 1},
 			},
 			Services: mirrorv1alpha1.MirrorServicesSpec{
-				HTTP: mirrorv1alpha1.MirrorHTTPServiceSpec{
+				HTTP: &mirrorv1alpha1.MirrorHTTPServiceSpec{
 					MirrorServiceSpec: mirrorv1alpha1.MirrorServiceSpec{
-						Enable:          true,
-						MirrorMountPath: "/usr/share/nginx/html/smoke",
 						PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{
 								Name:  "web",
@@ -379,116 +380,21 @@ func assertNotFound(t *testing.T, ctx context.Context, c client.Client, key clie
 	}
 }
 
-// TestChildBaseNamingRules pins the childBase/resourceName contract: the CR
-// name is returned AS-IS (no case folding, no character mapping — dots are
-// legal in DNS subdomain child names and label values), with only the hard
-// 63-character limit that guards suffix concatenation and label values.
-func TestChildBaseNamingRules(t *testing.T) {
-	cases := []struct {
-		name string
-		want string
-	}{
-		{name: "smoke", want: "smoke"},
-		{name: "linux.git", want: "linux.git"}, // dots preserved verbatim
-		{name: "a.b.c", want: "a.b.c"},
-		{name: "Debian.Archive_2", want: "Debian.Archive_2"}, // no lowercasing, no mapping
-	}
-	for _, tc := range cases {
-		got, err := childBase(tc.name)
-		if err != nil {
-			t.Fatalf("childBase(%q): %v", tc.name, err)
-		}
-		if got != tc.want {
-			t.Fatalf("childBase(%q) = %q, want %q", tc.name, got, tc.want)
-		}
-	}
-
-	if _, err := childBase(strings.Repeat("a", 63)); err != nil {
-		t.Fatalf("63-character base must be accepted: %v", err)
-	}
-	_, err := childBase(strings.Repeat("a", 64))
-	if err == nil {
-		t.Fatal("64-character base must be rejected")
-	}
-	if !strings.Contains(err.Error(), "64") || !strings.Contains(err.Error(), "63") {
-		t.Fatalf("error must name the offending length and the limit: %v", err)
-	}
-
-	// Dotted base names flow into child names unconverted.
-	got, err := resourceName("linux.git", "sync")
-	if err != nil {
-		t.Fatalf("resourceName(linux.git, sync): %v", err)
-	}
-	if got != "linux.git-sync" {
-		t.Fatalf("resourceName(linux.git, sync) = %q, want linux.git-sync", got)
-	}
-
-	if _, err := resourceName(strings.Repeat("a", 58), "sync"); err != nil {
-		t.Fatalf("63-character name must be accepted: %v", err)
-	}
-	if _, err := resourceName(strings.Repeat("a", 59), "sync"); err == nil {
-		t.Fatal("64-character name must be rejected")
-	}
-}
-
-// TestOversizedMirrorNameIsInvalidSpec: a CR whose derived child names would
-// exceed the 63-character DNS label limit lands in the usual
-// Degraded/InvalidSpec path instead of being silently shortened.
-func TestOversizedMirrorNameIsInvalidSpec(t *testing.T) {
-	ctx := context.Background()
-	mirror := testMirror()
-	mirror.Name = strings.Repeat("mirror", 11) // 66 characters
-	scheme := testScheme(t)
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&mirrorv1alpha1.Mirror{}).
-		WithObjects(mirror).
-		Build()
-	reconciler := &MirrorReconciler{
-		Client:      fakeClient,
-		Scheme:      scheme,
-		Recorder:    record.NewFakeRecorder(20),
-		Config:      testConfig(),
-		SyncLimiter: NewSyncLimiter(0),
-	}
-	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
-	reconcile(t, ctx, reconciler, request) // finalizer
-	reconcile(t, ctx, reconciler, request) // validation
-
-	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.Phase != mirrorv1alpha1.PhaseDegraded {
-		t.Fatalf("expected Degraded, got %s", current.Status.Phase)
-	}
-	for _, conditionType := range []string{conditionReady, conditionProgressing, conditionDegraded} {
-		cond := findCondition(current.Status.Conditions, conditionType)
-		if cond == nil || cond.Reason != "InvalidSpec" {
-			t.Fatalf("expected InvalidSpec condition for %s, got %#v", conditionType, cond)
-		}
-	}
-	if current.Status.PendingJob != "" {
-		t.Fatalf("no sync must start for an invalid spec, got %#v", current.Status)
-	}
-}
-
-// TestSnapshotTimestampConflictDegradesAndKeepsPending: when the timestamp
+// TestSnapshotTimestampConflictDegradesAndKeepsTransaction: when the timestamp
 // allocated at sync task creation is already taken (here by a leftover PVC
 // carrying the derived publish-PVC name from a previous same-second run), the
 // Job cannot be created: the reconcile stops with a
 // Degraded/SnapshotTimestampConflict condition and a Warning event, keeps the
-// pending pipeline intact, and does not clear anything.
-func TestSnapshotTimestampConflictDegradesAndKeepsPending(t *testing.T) {
+// current transaction intact, and does not clear anything.
+func TestSnapshotTimestampConflictDegradesAndKeepsTransaction(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 25, 20, 0, 0, 0, time.UTC)
 	mirror := testMirror()
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
-		ObservedGeneration:   mirror.Generation,
-		Phase:                mirrorv1alpha1.PhaseInitializing,
-		WorkPVC:              "smoke-sync",
-		PendingJob:           fmt.Sprintf("smoke-sync-%d", now.Unix()),
-		PendingSyncTimestamp: now.Unix(),
-		PendingPVC:           fmt.Sprintf("smoke-snap-%d", now.Unix()),
-		PendingSnapshot:      fmt.Sprintf("smoke-snap-%d", now.Unix()),
+		ObservedGeneration: mirror.Generation,
+		WorkPVC:            "smoke-sync",
+		CurrentSync:        &mirrorv1alpha1.MirrorCurrentSyncStatus{StartedAt: timePtr(now)},
 	}
 	scheme := testScheme(t)
 	conflictingPVC := &corev1.PersistentVolumeClaim{
@@ -524,19 +430,16 @@ func TestSnapshotTimestampConflictDegradesAndKeepsPending(t *testing.T) {
 	reconcile(t, ctx, reconciler, request) // hits the conflict branch at Job creation
 
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.Phase != mirrorv1alpha1.PhaseDegraded {
-		t.Fatalf("expected Degraded, got %s", current.Status.Phase)
-	}
 	cond := findCondition(current.Status.Conditions, conditionDegraded)
 	if cond == nil || cond.Reason != "SnapshotTimestampConflict" {
 		t.Fatalf("expected SnapshotTimestampConflict condition, got %#v", current.Status.Conditions)
 	}
-	// The pending pipeline is kept: a later reconcile (after 1 minute) retries
+	// The current transaction is kept: a later reconcile (after 1 minute) retries
 	// Job creation instead of discarding the run.
-	if current.Status.PendingJob == "" || current.Status.PendingSyncTimestamp != now.Unix() {
-		t.Fatalf("pending pipeline must be kept for the retry, got %#v", current.Status)
+	if currentSyncJobName(current) == "" || currentSyncTimestamp(current) != now.Unix() {
+		t.Fatalf("current transaction must be kept for the retry, got %#v", current.Status)
 	}
-	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingJob}, &batchv1.Job{})
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncJobName(current)}, &batchv1.Job{})
 	select {
 	case event := <-recorder.Events:
 		if !strings.Contains(event, "SnapshotTimestampConflict") {
@@ -564,7 +467,6 @@ func TestFailureRetryIntervals(t *testing.T) {
 	mirror.Annotations = map[string]string{SyncRequestAnnotation: "failing-run"}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration:     mirror.Generation,
-		Phase:                  mirrorv1alpha1.PhaseReady,
 		WorkPVC:                "smoke-sync",
 		ActivePVC:              "smoke-snap-1756147200",
 		LastHandledSyncRequest: "previous",
@@ -589,12 +491,12 @@ func TestFailureRetryIntervals(t *testing.T) {
 		t.Helper()
 		reconcile(t, ctx, reconciler, request) // startSync
 		current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-		if current.Status.PendingJob == "" {
-			t.Fatalf("expected a pending Job, got %#v", current.Status)
+		if currentSyncJobName(current) == "" {
+			t.Fatalf("expected a current Job, got %#v", current.Status)
 		}
 		reconcile(t, ctx, reconciler, request) // create the Job
 		job := &batchv1.Job{}
-		get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingJob}, job)
+		get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncJobName(current)}, job)
 		job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "Error", Message: "upstream unreachable"}}
 		if err := fakeClient.Status().Update(ctx, job); err != nil {
 			t.Fatalf("mark Job failed: %v", err)
@@ -614,9 +516,9 @@ func TestFailureRetryIntervals(t *testing.T) {
 	if !current.Status.NextSyncAt.Time.Equal(base.Add(15 * time.Minute)) {
 		t.Fatalf("nextSyncAt = %v, want retryInterval-based %v", current.Status.NextSyncAt, base.Add(15*time.Minute))
 	}
-	cond := findCondition(current.Status.Conditions, conditionProgressing)
-	if cond == nil || !strings.Contains(cond.Message, "retry queued") {
-		t.Fatalf("Progressing condition must mention the queued retry, got %#v", cond)
+	cond := findCondition(current.Status.Conditions, conditionDegraded)
+	if cond == nil || cond.Status != metav1.ConditionTrue || !strings.Contains(cond.Message, "upstream unreachable") {
+		t.Fatalf("Degraded must retain the completed synchronization failure, got %#v", cond)
 	}
 
 	// Failure #2: still below the limit of 2 -> fast retry again.
@@ -646,7 +548,7 @@ func TestFailureRetryIntervals(t *testing.T) {
 	clock = base.Add(90 * time.Minute)
 	reconcile(t, ctx, reconciler, request) // startSync
 	current = getMirror(t, ctx, fakeClient, request.NamespacedName)
-	jobName := current.Status.PendingJob
+	jobName := currentSyncJobName(current)
 	reconcile(t, ctx, reconciler, request) // create the Job
 	job := &batchv1.Job{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: jobName}, job)
@@ -657,10 +559,10 @@ func TestFailureRetryIntervals(t *testing.T) {
 	if err := fakeClient.Status().Update(ctx, job); err != nil {
 		t.Fatalf("mark Job complete: %v", err)
 	}
-	reconcile(t, ctx, reconciler, request) // create snapshot (pending timestamp reused)
+	reconcile(t, ctx, reconciler, request) // create snapshot (transaction timestamp reused)
 	snapshot := &snapshotv1.VolumeSnapshot{}
 	current = getMirror(t, ctx, fakeClient, request.NamespacedName)
-	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingSnapshot}, snapshot)
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncSnapshotName(current)}, snapshot)
 	ready := true
 	snapshot.Status = &snapshotv1.VolumeSnapshotStatus{ReadyToUse: &ready}
 	if err := fakeClient.Status().Update(ctx, snapshot); err != nil {
@@ -671,8 +573,8 @@ func TestFailureRetryIntervals(t *testing.T) {
 	reconcile(t, ctx, reconciler, request) // publish
 
 	current = getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.Phase != mirrorv1alpha1.PhaseReady || current.Status.ActivePVC == "" {
-		t.Fatalf("expected a published Ready mirror, got %#v", current.Status)
+	if current.Status.ActivePVC == "" {
+		t.Fatalf("expected a published mirror, got %#v", current.Status)
 	}
 	if current.Status.ConsecutiveFailures != 0 {
 		t.Fatalf("consecutiveFailures = %d, want 0 after success", current.Status.ConsecutiveFailures)
@@ -694,14 +596,14 @@ func TestKeepFailedJobsPrunesOldestFailed(t *testing.T) {
 	mirror.Annotations = map[string]string{SyncRequestAnnotation: "fail-again"}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration:     mirror.Generation,
-		Phase:                  mirrorv1alpha1.PhaseDegraded,
 		WorkPVC:                "smoke-sync",
-		PendingJob:             "smoke-sync-newest",
+		CurrentSync:            &mirrorv1alpha1.MirrorCurrentSyncStatus{StartedAt: timePtr(now)},
 		LastHandledSyncRequest: "previous",
 	}
 	scheme := testScheme(t)
 	objects := []client.Object{mirror}
-	failedNames := []string{"smoke-sync-oldest", "smoke-sync-middle", "smoke-sync-newest"}
+	currentJob := currentSyncJobName(mirror)
+	failedNames := []string{"smoke-sync-oldest", "smoke-sync-middle", currentJob}
 	for i, name := range failedNames {
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
@@ -745,16 +647,16 @@ func TestKeepFailedJobsPrunesOldestFailed(t *testing.T) {
 	}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
 
-	reconcile(t, ctx, reconciler, request) // pending Job failed -> failure path + pruning
+	reconcile(t, ctx, reconciler, request) // current Job failed -> failure path + pruning
 
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.Phase != mirrorv1alpha1.PhaseDegraded || current.Status.ConsecutiveFailures != 1 {
+	if degraded := findCondition(current.Status.Conditions, conditionDegraded); degraded == nil || degraded.Status != metav1.ConditionTrue || current.Status.ConsecutiveFailures != 1 {
 		t.Fatalf("expected the failure path to record the failure, got %#v", current.Status)
 	}
 	for _, name := range []string{"smoke-sync-oldest", "smoke-sync-middle"} {
 		assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: name}, &batchv1.Job{})
 	}
-	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-sync-newest"}, &batchv1.Job{})
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentJob}, &batchv1.Job{})
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-sync-1756147200"}, &batchv1.Job{})
 }
 
@@ -780,9 +682,6 @@ func TestVolumeSnapshotClassNameIsRequired(t *testing.T) {
 	reconcile(t, ctx, reconciler, request) // validation
 
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.Phase != mirrorv1alpha1.PhaseDegraded {
-		t.Fatalf("expected Degraded, got %s", current.Status.Phase)
-	}
 	cond := findCondition(current.Status.Conditions, conditionDegraded)
 	if cond == nil || !strings.Contains(cond.Message, "volumeSnapshotClassName") {
 		t.Fatalf("expected a validation error naming volumeSnapshotClassName, got %#v", cond)
@@ -821,7 +720,6 @@ func TestPublishPlacementDerivedFromLocalPV(t *testing.T) {
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
 	}
@@ -870,7 +768,6 @@ func TestPublishPlacementSharedStorageStaysFree(t *testing.T) {
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
 	}
@@ -916,7 +813,6 @@ func TestPublishPlacementNonHostnameAffinityCopied(t *testing.T) {
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
 	}
@@ -965,7 +861,6 @@ func TestPublishDeferredUntilSourcePVReadable(t *testing.T) {
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		Phase:              mirrorv1alpha1.PhaseReady,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
 	}
@@ -986,12 +881,9 @@ func TestPublishDeferredUntilSourcePVReadable(t *testing.T) {
 
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if current.Status.Phase != mirrorv1alpha1.PhasePublishing {
-		t.Fatalf("expected Publishing while placement is undetermined, got %s", current.Status.Phase)
-	}
 	cond := findCondition(current.Status.Conditions, conditionProgressing)
-	if cond == nil || cond.Reason != "ServingRollout" {
-		t.Fatalf("expected the ServingRollout wait condition, got %#v", cond)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("expected publication convergence to report Progressing=True, got %#v", cond)
 	}
 	waitForEvent(t, recorder, "PublishPlacementPending")
 
@@ -1007,24 +899,19 @@ func TestPublishDeferredUntilSourcePVReadable(t *testing.T) {
 }
 
 // TestServicesSchemaInCRDs pins the generated schema contracts that a plain
-// fake-client test cannot exercise: the fixed services keys with the enable/
-// mirrorMountPath/podTemplate shape, the enable-time presence CEL rules, and
-// the absence of the old array shape (per-entry name/image/ports) — in both
-// the Mirror and the ProxyMirror CRD.
+// fake-client test cannot exercise: the fixed services keys with the
+// replicas/podTemplate shape (no enable, no mirrorMountPath), the
+// declaration-time podTemplate.spec presence CEL rule, and the absence of the
+// old array shape (per-entry name/image/ports) — in both the Mirror and the
+// ProxyMirror CRD.
 func TestServicesSchemaInCRDs(t *testing.T) {
 	// The committed chart CRDs are installed manually (helm does not upgrade
 	// crds/), so this test only guards the realistic drift: the committed
 	// YAML lagging behind a type change. It pins the fixed-key services shape,
-	// the embedded corev1 pod template schema, and the enable-time CEL rules.
-	for _, tc := range []struct {
-		crd             string
-		wantMirrorMount bool
-	}{
-		{crd: "mirrors.zjusct.io_mirrors.yaml", wantMirrorMount: true},
-		{crd: "mirrors.zjusct.io_proxymirrors.yaml", wantMirrorMount: false},
-	} {
-		t.Run(tc.crd, func(t *testing.T) {
-			raw, err := os.ReadFile(filepath.Join("..", "..", "charts", "falcon", "crds", tc.crd))
+	// the embedded corev1 pod template schema, and the CEL rule.
+	for _, crd := range []string{"mirrors.zjusct.io_mirrors.yaml", "mirrors.zjusct.io_proxymirrors.yaml"} {
+		t.Run(crd, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("..", "..", "charts", "falcon", "crds", crd))
 			if err != nil {
 				t.Fatalf("read CRD: %v", err)
 			}
@@ -1042,13 +929,15 @@ func TestServicesSchemaInCRDs(t *testing.T) {
 				t.Fatalf("services.http schema missing, got %v", properties)
 			}
 			httpProperties, _ := http["properties"].(map[string]interface{})
-			for _, required := range []string{"enable", "replicas", "podTemplate"} {
+			for _, required := range []string{"replicas", "podTemplate"} {
 				if _, has := httpProperties[required]; !has {
 					t.Fatalf("services.http.%s schema missing, got %v", required, httpProperties)
 				}
 			}
-			if _, has := httpProperties["mirrorMountPath"]; has != tc.wantMirrorMount {
-				t.Fatalf("services.http.mirrorMountPath presence = %v, want %v", !tc.wantMirrorMount, tc.wantMirrorMount)
+			for _, removed := range []string{"enable", "mirrorMountPath"} {
+				if _, has := httpProperties[removed]; has {
+					t.Fatalf("services.http.%s schema must be gone (2026-09 spec decision), got %v", removed, httpProperties)
+				}
 			}
 			// The full corev1 pod template schema must be embedded.
 			podTemplate, _ := httpProperties["podTemplate"].(map[string]interface{})
@@ -1060,7 +949,8 @@ func TestServicesSchemaInCRDs(t *testing.T) {
 				t.Fatal("podTemplate.spec.containers must carry the full corev1 schema")
 			}
 
-			// Enable-time presence CEL rules on the service spec.
+			// The declaration-time presence CEL rule on the service spec
+			// (key present -> podTemplate.spec present).
 			rules, _ := http["x-kubernetes-validations"].([]interface{})
 			messages := map[string]bool{}
 			for _, rule := range rules {
@@ -1070,11 +960,8 @@ func TestServicesSchemaInCRDs(t *testing.T) {
 					}
 				}
 			}
-			if !messages["podTemplate.spec is required when enable is true"] {
+			if !messages["podTemplate.spec is required when the service key is declared"] {
 				t.Fatalf("podTemplate presence CEL rule missing, got %#v", rules)
-			}
-			if tc.wantMirrorMount && !messages["mirrorMountPath is required when enable is true"] {
-				t.Fatalf("mirrorMountPath presence CEL rule missing, got %#v", rules)
 			}
 		})
 	}
@@ -1108,10 +995,7 @@ func findMount(container corev1.Container, name string) *corev1.VolumeMount {
 func addBoundSyncPVC(t *testing.T, ctx context.Context, c client.Client, mirror *mirrorv1alpha1.Mirror, pvcName string, hostname string, affinity *corev1.NodeSelector) {
 	t.Helper()
 	if pvcName == "" {
-		base, err := childBase(mirror.Name)
-		if err != nil {
-			t.Fatalf("childBase: %v", err)
-		}
+		base := childBase(mirror.Name)
 		pvcName = base + "-sync"
 	}
 	pvc := &corev1.PersistentVolumeClaim{
@@ -1182,11 +1066,10 @@ func findSchemaNode(node interface{}, key string) (map[string]interface{}, bool)
 }
 
 // TestSyncPodTemplateDefaultsAndInjection: the sync Job is built from the
-// user's sync.podTemplate with the writable sync-data volume forced at
-// dataMountPath and the silent-only defaults injected (runAsUser 65532,
-// restricted profile, /tmp emptyDir, IfNotPresent pull policy). The published
-// testMirror template already carries the user input volume, which must be
-// preserved.
+// user's sync.podTemplate with the writable sync-data volume forced (volumes
+// only) and the silent-only defaults injected (runAsUser 65532, restricted
+// profile, /tmp emptyDir, IfNotPresent pull policy). The published testMirror
+// template already carries the user input volume, which must be preserved.
 func TestSyncPodTemplateDefaultsAndInjection(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
@@ -1209,7 +1092,7 @@ func TestSyncPodTemplateDefaultsAndInjection(t *testing.T) {
 
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
 	job := &batchv1.Job{}
-	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: current.Status.PendingJob}, job)
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncJobName(current)}, job)
 	podSpec := job.Spec.Template.Spec
 	first := podSpec.Containers[0]
 	// Silent fields got the sync defaults.

@@ -8,9 +8,11 @@ controller:
     cluster-scoped subresource and cannot be granted by a namespaced Role.
   - pv-reader (always on with rbac.create): the publish placement is derived
     from the source PV's nodeAffinity (sync PVC -> .spec.volumeName -> PV),
-    so the controller must be able to READ PersistentVolumes. persistentvolumes
-    are cluster-scoped; the grant is read-only and core to publishing, hence
-    rendered whenever the controller's RBAC is rendered at all.
+    so the controller must be able to READ PersistentVolumes — through its
+    informer cache (get/list/watch), like every other object it reconciles
+    against. persistentvolumes are cluster-scoped; the grant is read-only
+    and core to publishing, hence rendered whenever the controller's RBAC is
+    rendered at all.
 */ -}}
 {{- if and .Values.controller.enabled .Values.controller.rbac.create .Values.controller.rbac.nodeStats }}
 apiVersion: rbac.authorization.k8s.io/v1
@@ -44,4 +46,6 @@ rules:
       - persistentvolumes
     verbs:
       - get
+      - list
+      - watch
 {{- end }}

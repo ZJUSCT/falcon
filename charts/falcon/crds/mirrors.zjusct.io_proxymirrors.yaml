@@ -15,11 +15,8 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.phase
-      name: Phase
-      type: string
-    - jsonPath: .status.cachePVC
-      name: Cache PVC
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -48,7 +45,8 @@ spec:
           spec:
             description: |-
               ProxyMirrorSpec groups the proxy mirror configuration. ProxyMirror has no
-              paused concept (unlike Mirror): to take a proxy mirror offline, delete the CR.
+              paused concept (unlike Mirror); removing services.http takes its endpoint
+              offline while preserving the CR.
             properties:
               info:
                 description: |-
@@ -88,9 +86,11 @@ spec:
                   cache:
                     description: |-
                       ProxyMirrorCacheSpec configures the nginx proxy_cache-shaped disk cache in
-                      front of the upstream. The controller provisions and mounts the cache PVC;
-                      the container image is responsible for pointing proxy_cache at the mounted
-                      directory (CacheMountPath).
+                      front of the upstream. The controller provisions the cache PVC and injects
+                      it as the reserved `proxy-cache` volume (a WRITABLE volume source); the
+                      user mounts it in the pod template — the nginx proxy_cache conventional
+                      directory /var/cache/nginx/proxy is applied by the image/user, the
+                      controller generates no nginx configuration and no mounts.
                     properties:
                       enabled:
                         default: false
@@ -113,7 +113,7 @@ spec:
               services:
                 description: |-
                   Services declares the publish workload through the fixed "http" key
-                  (see ProxyMirrorServicesSpec). With the key disabled (including an
+                  (see ProxyMirrorServicesSpec). With the key absent (including an
                   entirely absent services object) nothing is deployed: the proxy is not
                   published. An enabled http service gets Deployment/Service
                   `<name>-publish-http` plus the publish HTTPRoute (once Ready).
@@ -121,16 +121,12 @@ spec:
                   http:
                     description: |-
                       ProxyMirrorServiceSpec is the HTTP publish service of a ProxyMirror,
-                      addressed by the fixed "http" key under spec.services. Unlike the Mirror
-                      service there is no mirrorMountPath: a proxy has no data volume to mount.
+                      addressed by the fixed "http" key under spec.services. The key is enabled
+                      when it appears (a valid enable requires podTemplate.spec, CEL-enforced) and disabled when absent. A proxy
+                      has no data volume to mount; when the cache is enabled the WRITABLE
+                      `proxy-cache` PVC volume is injected into spec.volumes only — mounting it,
+                      and where, is the user's own declaration.
                     properties:
-                      enable:
-                        description: |-
-                          Enable turns the service on. A key that does not appear in
-                          spec.services is disabled, and so is a key declared with
-                          enable: false — Enable is the single source of truth. With the service
-                          disabled nothing is deployed (the proxy is not published).
-                        type: boolean
                       podTemplate:
                         description: |-
                           PodTemplate is the FULL pod template of the publish Deployment
@@ -138,8 +134,9 @@ spec:
                           selector identity and injects defaults only where the template is
                           silent (TCP readiness probe on the first container port, a /tmp
                           emptyDir, readOnlyRootFilesystem and the restricted-profile security
-                          defaults); the optional cache PVC is still provisioned and injected at
-                          /var/cache/nginx/proxy when spec.proxy.cache.enabled is true.
+                          defaults); the optional cache PVC is still provisioned and injected as
+                          the reserved `proxy-cache` volume (volumes only — no mount) when
+                          spec.proxy.cache.enabled is true.
                         properties:
                           metadata:
                             description: |-
@@ -8771,18 +8768,15 @@ spec:
                         type: integer
                     type: object
                     x-kubernetes-validations:
-                    - message: podTemplate.spec is required when enable is true
-                      rule: '!self.enable || has(self.podTemplate.spec)'
+                    - message: podTemplate.spec is required when the service key is
+                        declared
+                      rule: has(self.podTemplate.spec)
                 type: object
             required:
             - info
             type: object
           status:
             properties:
-              cachePVC:
-                description: CachePVC is the cache backing PVC when spec.proxy.cache.enabled
-                  is true.
-                type: string
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current
@@ -8842,18 +8836,6 @@ spec:
               observedGeneration:
                 format: int64
                 type: integer
-              phase:
-                enum:
-                - Pending
-                - Ready
-                - Degraded
-                type: string
-              publishedServiceName:
-                description: |-
-                  PublishedServiceName is the Service fronting the http publish service
-                  (<name>-publish-http); empty when the http service is disabled (such a
-                  proxy deploys nothing).
-                type: string
             type: object
         required:
         - spec

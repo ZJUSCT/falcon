@@ -31,7 +31,7 @@ catalog:
   enabled: true
 sync:
   maxConcurrent: 4
-serving:
+publish:
   gatewayRef:
     name: nginx-gateway
     namespace: ""
@@ -66,17 +66,17 @@ serving:
 	if cfg.Sync.MaxConcurrent != 4 {
 		t.Errorf("sync.maxConcurrent = %d, want 4", cfg.Sync.MaxConcurrent)
 	}
-	if !cfg.ServingEnabled() {
-		t.Errorf("ServingEnabled() = false, want true")
+	if !cfg.PublishEnabled() {
+		t.Errorf("PublishEnabled() = false, want true")
 	}
-	if cfg.Serving.GatewayRef.Name != "nginx-gateway" || cfg.Serving.GatewayRef.Namespace != "" || cfg.Serving.GatewayRef.SectionName != "https" {
-		t.Errorf("gatewayRef wrong: %+v", cfg.Serving.GatewayRef)
+	if cfg.Publish.GatewayRef.Name != "nginx-gateway" || cfg.Publish.GatewayRef.Namespace != "" || cfg.Publish.GatewayRef.SectionName != "https" {
+		t.Errorf("gatewayRef wrong: %+v", cfg.Publish.GatewayRef)
 	}
-	if len(cfg.Serving.Hostnames) != 2 || cfg.Serving.Hostnames[1] != "mirror.zju.edu.cn" {
-		t.Errorf("hostnames wrong: %v", cfg.Serving.Hostnames)
+	if len(cfg.Publish.Hostnames) != 2 || cfg.Publish.Hostnames[1] != "mirror.zju.edu.cn" {
+		t.Errorf("hostnames wrong: %v", cfg.Publish.Hostnames)
 	}
-	if cfg.Serving.Labels["app"] != "mirrors" || cfg.Serving.Annotations["cert"] != "managed" {
-		t.Errorf("labels/annotations wrong: %v %v", cfg.Serving.Labels, cfg.Serving.Annotations)
+	if cfg.Publish.Labels["app"] != "mirrors" || cfg.Publish.Annotations["cert"] != "managed" {
+		t.Errorf("labels/annotations wrong: %v %v", cfg.Publish.Labels, cfg.Publish.Annotations)
 	}
 }
 
@@ -98,8 +98,8 @@ func TestLoadDefaultsForSparseConfig(t *testing.T) {
 	if cfg.Sync.MaxConcurrent != 0 {
 		t.Errorf("sync.maxConcurrent default = %d, want 0 (unlimited)", cfg.Sync.MaxConcurrent)
 	}
-	if cfg.ServingEnabled() {
-		t.Errorf("ServingEnabled() = true for empty hostnames, want false")
+	if cfg.PublishEnabled() {
+		t.Errorf("PublishEnabled() = true for empty hostnames, want false")
 	}
 }
 
@@ -108,9 +108,9 @@ func TestLoadInvalidConfigs(t *testing.T) {
 		"missing site.url":        "catalog:\n  enabled: true\n",
 		"site.url without scheme": "site:\n  url: mirrors.example.com\n",
 		"bad log level":           "site:\n  url: https://a\nlog:\n  level: verbose\n",
-		"gatewayRef without name": "site:\n  url: https://a\nserving:\n  hostnames: [mirrors.example.com]\n",
-		"empty hostname entry":    "site:\n  url: https://a\nserving:\n  gatewayRef:\n    name: gw\n  hostnames: [\" \"]\n",
-		"hostname with path":      "site:\n  url: https://a\nserving:\n  gatewayRef:\n    name: gw\n  hostnames: [mirrors.example.com/foo]\n",
+		"gatewayRef without name": "site:\n  url: https://a\npublish:\n  hostnames: [mirrors.example.com]\n",
+		"empty hostname entry":    "site:\n  url: https://a\npublish:\n  gatewayRef:\n    name: gw\n  hostnames: [\" \"]\n",
+		"hostname with path":      "site:\n  url: https://a\npublish:\n  gatewayRef:\n    name: gw\n  hostnames: [mirrors.example.com/foo]\n",
 		"not YAML":                "\t\tbroken: [",
 	}
 	for name, content := range cases {

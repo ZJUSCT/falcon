@@ -70,10 +70,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	if !cfg.ServingEnabled() {
+	if !cfg.PublishEnabled() {
 		// Logged once at startup; the reconcilers then simply skip route
 		// generation without touching existing HTTPRoutes.
-		logger.Info("serving-route generation disabled: serving.hostnames is empty", "config", configPath)
+		logger.Info("publish-route generation disabled: publish.hostnames is empty", "config", configPath)
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -129,7 +129,7 @@ func main() {
 		apiServer := &webapi.Server{
 			Client:           mgr.GetClient(),
 			Site:             webapi.SiteConfig{URL: cfg.Site.URL, Abbr: cfg.Site.Abbr, Name: cfg.Site.Name},
-			ServingHostnames: cfg.Serving.Hostnames,
+			PublishHostnames: cfg.Publish.Hostnames,
 			CatalogEnabled:   cfg.Catalog.Enabled,
 		}
 		apiServer.Auth = &webapi.Authenticator{Config: webapi.GitHubAuthConfig{ClientID: cfg.Auth.GitHub.ClientID, ClientSecret: cfg.Auth.GitHub.ClientSecret, AllowedUserIDs: cfg.Auth.GitHub.AllowedUserIDs}, AdminHost: cfg.Admin.Host}
@@ -164,7 +164,7 @@ func main() {
 	logger.Info("starting Falcon controller manager",
 		"namespace", podNamespace,
 		"maxConcurrentSyncs", cfg.Sync.MaxConcurrent,
-		"servingRoutes", cfg.ServingEnabled())
+		"publishRoutes", cfg.PublishEnabled())
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		logger.Error(err, "controller manager exited")
 		os.Exit(1)

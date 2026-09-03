@@ -23,7 +23,7 @@ import (
 type SiteConfig struct {
 	// URL is the fallback site base URL without a trailing slash, e.g.
 	// https://mirrors.zjusct.io. It backs the mirrorz site section and entry
-	// URLs whenever the request Host is not one of the serving hostnames.
+	// URLs whenever the request Host is not one of the publish hostnames.
 	URL string
 	// Abbr is the short site name, e.g. ZJU.
 	Abbr string
@@ -39,11 +39,11 @@ type Server struct {
 	// the controller's own namespace).
 	Client client.Reader
 	Site   SiteConfig
-	// ServingHostnames is the whitelist of serving hostnames (config
-	// serving.hostnames). A request whose Host (port stripped, matched
+	// PublishHostnames is the whitelist of publish hostnames (config
+	// publish.hostnames). A request whose Host (port stripped, matched
 	// case-insensitively) is on the list gets its mirrorz document reflected
 	// with that host; anything else falls back to Site.URL. May be empty.
-	ServingHostnames []string
+	PublishHostnames []string
 	// CatalogEnabled gates GET /mirrorz.json (config catalog.enabled).
 	CatalogEnabled bool
 	// Usage aggregates zfs-agent reports for GET /api/usage. It is nil when
