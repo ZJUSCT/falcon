@@ -5,7 +5,9 @@ on:
     types: [opened, synchronize, reopened]
   push:
     branches: ['*']
-    tags: ['*']
+  # Reused by release.yml as the check stage for tag pushes; tags do not
+  # trigger this workflow directly to avoid a duplicate check run.
+  workflow_call:
 
 jobs:
   build:

@@ -1,9 +1,11 @@
-name: release-chart
+name: release
+
+# Tag pipeline: checks gate image builds, and images gate the chart
+# release, so a tag whose checks fail never produces artifacts.
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
 
 permissions:
   contents: read
@@ -19,7 +21,64 @@ env:
   CHART_REPO_PATH: charts
 
 jobs:
-  release:
+  check:
+    name: Check
+    uses: ./.github/workflows/go.yml
+
+  images:
+    name: Build and push ${{ matrix.name }} image
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      # An image that can build still publishes when a sibling fails; the
+      # chart stage below blocks on any of them regardless.
+      fail-fast: false
+      matrix:
+        include:
+          - name: controller
+            context: .
+            dockerfile: ./Dockerfile
+            image: falcon
+          - name: ui
+            context: ./ui
+            dockerfile: ./ui/Dockerfile
+            image: falcon-ui
+          - name: zfs-agent
+            context: .
+            dockerfile: ./Dockerfile.zfs-agent
+            image: zfs-agent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image reference
+        shell: bash
+        run: |
+          owner_lc="${GITHUB_REPOSITORY_OWNER,,}"   # GHCR rejects uppercase in repository paths
+          echo "IMAGE=ghcr.io/${owner_lc}/${{ matrix.image }}:${{ github.ref_name }}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}
+
+  chart:
+    name: Release chart
+    needs: images
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
