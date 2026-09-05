@@ -28,6 +28,12 @@ repos:
       - id: mixed-line-ending
   - repo: local
     hooks:
+      - id: go-test
+        name: Go test suite
+        language: system
+        entry: scripts/pre-commit-go-test.sh
+        pass_filenames: false
+        always_run: true
       - id: falcon-chart
         name: falcon chart render validation
         files: ^charts/

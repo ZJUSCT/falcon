@@ -60,7 +60,7 @@ func TestMirrorzStatusForMirror(t *testing.T) {
 		},
 		{
 			name: "paused uses the last publication time for freshness",
-			mirror: mirrorv1alpha1.Mirror{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: created}, Spec: mirrorv1alpha1.MirrorSpec{Paused: true}, Status: mirrorv1alpha1.MirrorStatus{
+			mirror: mirrorv1alpha1.Mirror{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: created}, Spec: mirrorv1alpha1.MirrorSpec{Sync: mirrorv1alpha1.MirrorSyncSpec{Paused: true}}, Status: mirrorv1alpha1.MirrorStatus{
 				LastPublishedAt: &published,
 				NextSyncAt:      &next,
 			}},

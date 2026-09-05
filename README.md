@@ -27,6 +27,17 @@ helm install falcon oci://ghcr.io/zjusct/charts/falcon \
 - CRD 随 chart 的 crds/ 目录在 install 时安装。helm upgrade 不更新 CRD，需手动 kubectl apply。
 - values 结构、RBAC 与部署细节见 [`docs/spec/chart.md`](docs/spec/chart.md)；管理前端见 [`docs/spec/ui.md`](docs/spec/ui.md)。
 
+## 开发检查
+
+提交前必须安装并运行 pre-commit：
+
+```sh
+pre-commit install
+pre-commit run --all-files
+```
+
+仓库的 pre-commit 配置会运行 YAML、Shell、Chart 校验以及完整的 Go 测试套件（`go test ./...`）。CI 使用相同的 Go 测试命令；修改 Go 类型或 CRD 后，请先通过本地 hook 再提交。
+
 ## 发布物
 
 | 组件 | 地址 |
@@ -66,7 +77,6 @@ helm install falcon oci://ghcr.io/zjusct/charts/falcon \
 
 等待做的：
 
-- goci 检查
 - Spec 全部整理
 - chart 和 pre-commit hook 等的校验完善
 - e2e 测试 CI 化

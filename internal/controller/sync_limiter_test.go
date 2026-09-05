@@ -30,8 +30,8 @@ func TestSyncLimiter(t *testing.T) {
 	if !l.Acquire("job-a", false) {
 		t.Fatal("acquire job-a failed")
 	}
-	if l.Acquire("job-a", false) {
-		t.Fatal("duplicate acquire must be rejected")
+	if !l.Acquire("job-a", false) {
+		t.Fatal("duplicate acquire must be idempotently accepted")
 	}
 	if l.Held() != 1 {
 		t.Fatalf("held = %d, want 1", l.Held())

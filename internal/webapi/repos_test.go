@@ -31,7 +31,7 @@ func TestHandleRepoSpecOnlyYAML(t *testing.T) {
 	m := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors"},
 		Spec: mirrorv1alpha1.MirrorSpec{
-			Paused: false,
+			Sync: mirrorv1alpha1.MirrorSyncSpec{Paused: false},
 			Info: mirrorv1alpha1.MirrorInfo{
 				Description: localized("Debian 镜像", "Debian mirror"),
 				Upstream:    "rsync://ftp.debian.org/debian/",

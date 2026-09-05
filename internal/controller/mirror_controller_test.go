@@ -892,13 +892,13 @@ func TestPublishDeferredUntilSourcePVReadable(t *testing.T) {
 	}
 }
 
-// TestServicesSchemaInCRDs pins the generated schema contracts that a plain
+// TestPublishSchemaInCRDs pins the generated schema contracts that a plain
 // fake-client test cannot exercise: the fixed services keys with the
 // replicas/podTemplate shape (no enable, no mirrorMountPath), the
 // declaration-time podTemplate.spec presence CEL rule, and the absence of the
 // old array shape (per-entry name/image/ports) — in both the Mirror and the
 // ProxyMirror CRD.
-func TestServicesSchemaInCRDs(t *testing.T) {
+func TestPublishSchemaInCRDs(t *testing.T) {
 	// The committed chart CRDs are installed manually (helm does not upgrade
 	// crds/), so this test only guards the realistic drift: the committed
 	// YAML lagging behind a type change. It pins the fixed-key services shape,
@@ -913,14 +913,14 @@ func TestServicesSchemaInCRDs(t *testing.T) {
 			if err := yaml.Unmarshal(raw, &doc); err != nil {
 				t.Fatalf("parse CRD: %v", err)
 			}
-			services, ok := findSchemaNode(doc, "services")
+			services, ok := findSchemaNode(doc, "publish")
 			if !ok {
-				t.Fatal("services schema not found in CRD")
+				t.Fatal("publish schema not found in CRD")
 			}
 			properties, _ := services["properties"].(map[string]interface{})
 			http, ok := properties["http"].(map[string]interface{})
 			if !ok {
-				t.Fatalf("services.http schema missing, got %v", properties)
+				t.Fatalf("publish.http schema missing, got %v", properties)
 			}
 			httpProperties, _ := http["properties"].(map[string]interface{})
 			for _, required := range []string{"replicas", "podTemplate"} {
