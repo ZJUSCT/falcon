@@ -38,6 +38,8 @@ pre-commit run --all-files
 
 仓库的 pre-commit 配置会运行 YAML、Shell、Chart 校验以及完整的 Go 测试套件（`go test ./...`）。CI 使用相同的 Go 测试命令；修改 Go 类型或 CRD 后，请先通过本地 hook 再提交。
 
+Go 提交检查还需要本机安装 `golangci-lint`。pre-commit 会运行 `golangci-lint run`，其版本和配置以 `.golangci.yml` 为准。
+
 ## 发布物
 
 | 组件 | 地址 |

@@ -34,6 +34,12 @@ repos:
         entry: scripts/pre-commit-go-test.sh
         pass_filenames: false
         always_run: true
+      - id: golangci-lint
+        name: golangci-lint
+        language: system
+        entry: golangci-lint run
+        pass_filenames: false
+        always_run: true
       - id: falcon-chart
         name: falcon chart render validation
         files: ^charts/
