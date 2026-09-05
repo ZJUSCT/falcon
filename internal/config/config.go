@@ -58,20 +58,20 @@ type Config struct {
 	Site struct {
 		// URL is the fallback site URL (no trailing slash) used by
 		// /mirrorz.json when the request Host is not in publish.hostnames.
-		URL  string `json:"url"`
-		Abbr string `json:"abbr,omitempty"`
-		Name string `json:"name,omitempty"`
-		Logo string `json:"logo,omitempty"`
+		URL          string `json:"url"`
+		Abbr         string `json:"abbr,omitempty"`
+		Name         string `json:"name,omitempty"`
+		Logo         string `json:"logo,omitempty"`
 		LogoDarkmode string `json:"logo_darkmode,omitempty"`
-		Homepage string `json:"homepage,omitempty"`
-		Issue string `json:"issue,omitempty"`
-		Request string `json:"request,omitempty"`
-		Email string `json:"email,omitempty"`
-		Group string `json:"group,omitempty"`
-		Disk string `json:"disk,omitempty"`
-		Note string `json:"note,omitempty"`
-		Big string `json:"big,omitempty"`
-		Disable bool `json:"disable,omitempty"`
+		Homepage     string `json:"homepage,omitempty"`
+		Issue        string `json:"issue,omitempty"`
+		Request      string `json:"request,omitempty"`
+		Email        string `json:"email,omitempty"`
+		Group        string `json:"group,omitempty"`
+		Disk         string `json:"disk,omitempty"`
+		Note         string `json:"note,omitempty"`
+		Big          string `json:"big,omitempty"`
+		Disable      bool   `json:"disable,omitempty"`
 	} `json:"site"`
 
 	Catalog struct {

@@ -29,10 +29,20 @@ import (
 const mirrorzVersion = 1.7
 
 type mirrorzSite struct {
-	URL  string `json:"url"`
-	Abbr string `json:"abbr"`
-	Name string `json:"name,omitempty"`
-	Logo string `json:"logo,omitempty"`; LogoDarkmode string `json:"logo_darkmode,omitempty"`; Homepage string `json:"homepage,omitempty"`; Issue string `json:"issue,omitempty"`; Request string `json:"request,omitempty"`; Email string `json:"email,omitempty"`; Group string `json:"group,omitempty"`; Disk string `json:"disk,omitempty"`; Note string `json:"note,omitempty"`; Big string `json:"big,omitempty"`; Disable bool `json:"disable,omitempty"`
+	URL          string `json:"url"`
+	Abbr         string `json:"abbr"`
+	Name         string `json:"name,omitempty"`
+	Logo         string `json:"logo,omitempty"`
+	LogoDarkmode string `json:"logo_darkmode,omitempty"`
+	Homepage     string `json:"homepage,omitempty"`
+	Issue        string `json:"issue,omitempty"`
+	Request      string `json:"request,omitempty"`
+	Email        string `json:"email,omitempty"`
+	Group        string `json:"group,omitempty"`
+	Disk         string `json:"disk,omitempty"`
+	Note         string `json:"note,omitempty"`
+	Big          string `json:"big,omitempty"`
+	Disable      bool   `json:"disable,omitempty"`
 }
 
 type mirrorzMirror struct {
@@ -287,7 +297,7 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 			URL:  baseURL,
 			Abbr: s.Site.Abbr,
 			Name: s.Site.Name,
-			Logo:s.Site.Logo, LogoDarkmode:s.Site.LogoDarkmode, Homepage:s.Site.Homepage, Issue:s.Site.Issue, Request:s.Site.Request, Email:s.Site.Email, Group:s.Site.Group, Disk:s.Site.Disk, Note:s.Site.Note, Big:s.Site.Big, Disable:s.Site.Disable,
+			Logo: s.Site.Logo, LogoDarkmode: s.Site.LogoDarkmode, Homepage: s.Site.Homepage, Issue: s.Site.Issue, Request: s.Site.Request, Email: s.Site.Email, Group: s.Site.Group, Disk: s.Site.Disk, Note: s.Site.Note, Big: s.Site.Big, Disable: s.Site.Disable,
 		},
 		Info:    []struct{}{},
 		Mirrors: entries,

@@ -28,9 +28,9 @@ type SiteConfig struct {
 	// Abbr is the short site name, e.g. ZJU.
 	Abbr string
 	// Name is the full site name, e.g. "Zhejiang University Mirror".
-	Name string
+	Name                                                                        string
 	Logo, LogoDarkmode, Homepage, Issue, Request, Email, Group, Disk, Note, Big string
-	Disable bool
+	Disable                                                                     bool
 }
 
 // Server serves the read-only HTTP API on top of a controller-runtime client.

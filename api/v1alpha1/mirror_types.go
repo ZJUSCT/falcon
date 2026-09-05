@@ -45,7 +45,7 @@ type MirrorInfo struct {
 type MirrorSyncSpec struct {
 	// Paused prevents the controller from starting new synchronization runs.
 	// Published content and its serving workloads remain available.
-	Paused bool `json:"paused,omitempty"`
+	Paused   bool            `json:"paused,omitempty"`
 	Interval metav1.Duration `json:"interval"`
 	// RetryInterval is the delay before the next synchronization attempt
 	// after a *failed* run. It applies while status.consecutiveFailures is

@@ -166,7 +166,7 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 	notReady := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "ubuntu", Namespace: "mirrors"},
 		Spec: mirrorv1alpha1.MirrorSpec{
-			Info:     mirrorv1alpha1.MirrorInfo{Upstream: "rsync://archive.ubuntu.com/ubuntu/"},
+			Info:    mirrorv1alpha1.MirrorInfo{Upstream: "rsync://archive.ubuntu.com/ubuntu/"},
 			Publish: httpService(),
 		},
 		Status: mirrorv1alpha1.MirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionFalse)}},
