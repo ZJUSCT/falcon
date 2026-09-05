@@ -6,4 +6,4 @@ namespace: controller, admin web UI, metrics, admin/catalog HTTPRoutes).
 Documentation:
 
 - Project README: <https://github.com/ZJUSCT/falcon>
-- Chart specification (chart structure, values, RBAC, CRD conventions, CI publishing): <https://github.com/ZJUSCT/falcon/blob/main/spec/chart.md>
+- Chart specification (chart structure, values, RBAC, CRD conventions, CI publishing): <https://github.com/ZJUSCT/falcon/blob/main/docs/spec/chart.md>

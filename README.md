@@ -12,9 +12,9 @@ Falcon 是一个运行在 [Kubernetes](https://kubernetes.io/) 上的软件源�
 - **原子化发布**：同步任务成功完成后，基于 VolumeSnapshot 生成不可变的快照，并以快照克隆出只读发布 PVC，滚动替换实例。用户永远不会访问到同步的中间状态。
 - **`mirrorz.json`**：符合 [教育网联合镜像站（MirrorZ）](https://github.com/mirrorz-org/mirrorz) 标准。
 
-Falcon 使用 [规范驱动开发（SDD）](https://en.wikipedia.org/wiki/Specification-driven_development)，技术细节见由人工主导编写和维护的 `spec` 下的内容。目前 Spec 仍主要是 AI 生成内容，且代码中可能存在较多防御性编程，正在缓慢整理优化中。
+Falcon 使用 [规范驱动开发（SDD）](https://en.wikipedia.org/wiki/Specification-driven_development)，技术细节见由人工主导编写和维护的 `docs/spec` 下的内容。目前 Spec 仍主要是 AI 生成内容，且代码中可能存在较多防御性编程，正在缓慢整理优化中。
 
-![Falcon Overview](spec/overview.png)
+![Falcon Overview](docs/spec/overview.png)
 
 ## 快速开始
 
@@ -23,9 +23,9 @@ helm install falcon oci://ghcr.io/zjusct/charts/falcon \
   -n mirror --create-namespace -f my-values.yaml
 ```
 
-- 镜像由 `Mirror` CR 描述；字段与示例见 [`spec/mirror.md`](spec/mirror.md)，也可在 [`crds.dev`](https://doc.crds.dev/github.com/ZJUSCT/falcon) 浏览。
+- 镜像由 `Mirror` CR 描述；字段与示例见 [`docs/spec/mirror.md`](docs/spec/mirror.md)，也可在 [`crds.dev`](https://doc.crds.dev/github.com/ZJUSCT/falcon) 浏览。
 - CRD 随 chart 的 crds/ 目录在 install 时安装。helm upgrade 不更新 CRD，需手动 kubectl apply。
-- values 结构、RBAC 与部署细节见 [`spec/chart.md`](spec/chart.md)；管理前端见 [`spec/ui.md`](spec/ui.md)。
+- values 结构、RBAC 与部署细节见 [`docs/spec/chart.md`](docs/spec/chart.md)；管理前端见 [`docs/spec/ui.md`](docs/spec/ui.md)。
 
 ## 发布物
 
@@ -55,24 +55,47 @@ helm install falcon oci://ghcr.io/zjusct/charts/falcon \
 | 活跃快照 | `status.activeSnapshot` | 当前正在对外提供内容的那份快照 |
 | 发布 PVC | `PersistentVolumeClaim`<br/>`<镜像名>-snap-<时间戳>` | 从某个快照克隆出的只读数据卷 |
 | 活跃发布 PVC | `status.activePVC` | 当前正在对外提供内容的发布 PVC；除它之外的历史发布 PVC 按保留策略随各自快照一起清理 |
-| 服务 | `spec.services` 的一个 key | 对外提供内容的方式，目前支持 http 和 rsync |
+| 发布服务 | `spec.publish` 的一个 key | 对外提供内容的方式，目前支持 http 和 rsync |
 
 ## TODO
 
 已经整理完成的 Spec：
 
 - `common.md`
+- `mirror.md`
 
 等待做的：
 
-- `mirror.md` 整理
-    - CRD 整理
-    - 同步整理
-    - 服务整理
+- goci 检查
 - Spec 全部整理
-- 审查测试用例
 - chart 和 pre-commit hook 等的校验完善
-- e2e 测试
+- e2e 测试 CI 化
+- Before the next OpenEBS ZFS LocalPV release: enable snapshotter creation metadata, verify ZFS annotations, and align Falcon zfs-agent handling
+
+## 与同步工具/容器的关系
+
+同步的行为取决于具体的同步工具。Falcon 作为编排器，尽可能在这方面为各工具留出可配置的空间。
+
+我们实际使用过 [tuna/tunasync-scripts](https://github.com/tuna/tunasync-scripts) 和 [ustclug/ustcmirror-images](https://github.com/ustclug/ustcmirror-images)，这里记录一些使用经验。
+
+### tunasync-scripts
+
+TUNA 为裸机服务。该仓库由每个上游一个的独立同步脚本组成，Python、Shell Script 各半。这些脚本一致性较好，都按照 tunasync 的设计编写：
+
+- env 稳定：
+    - `TUNASYNC_WORKING_DIR`：内容输出目录
+    - `TUNASYNC_UPSTREAM_URL`：上游地址
+- 日志：
+    - 输出统一：`echo` 到 stdout，能够由 K8s 可观测性基础设施直接收集
+    - 格式统一：`%Y-%m-%dT%H:%M:%S - 文件:行号 [级别] 消息`
+- 退出码：脚本默认宽容部分同步的退出码，tunasync worker 除退出码外还按 `failOnMatch` 正则扫描日志判败
+
+### ustcmirror-images
+
+USTC 全面容器化。不同的同步容器约定不同，但文档详尽。有大致统一的框架：
+
+- 在 `base` 镜像中固定 entry 为 `upstream.sh`、`pre-sync.sh`、`sync.sh` 等一系列固定流程
+- 日志统一文件写入 `/log`
 
 ## 许可证
 

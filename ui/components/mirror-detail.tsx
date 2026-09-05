@@ -245,10 +245,6 @@ export function MirrorDetail({ mirrorId, onBack }: MirrorDetailProps) {
               {job.last_action_status ? <StatusBadge status={job.last_action_status} /> : <span className="font-mono">—</span>}
             </div>
             <div>
-              <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Namespace</div>
-              <div className="font-mono">{job.namespace || '—'}</div>
-            </div>
-            <div>
               <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Active PVC</div>
               <div className="font-mono text-xs break-all">{job.active_pvc || '—'}</div>
             </div>

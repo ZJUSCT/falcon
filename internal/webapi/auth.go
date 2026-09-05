@@ -100,17 +100,17 @@ func (a *Authenticator) login(w http.ResponseWriter, r *http.Request) {
 }
 func (a *Authenticator) callback(w http.ResponseWriter, r *http.Request) {
 	if !a.enabled() {
-		http.Error(w, "OAuth is not configured", 503)
+		http.Error(w, "OAuth is not configured", http.StatusServiceUnavailable)
 		return
 	}
 	c, e := r.Cookie("falcon_oauth_state")
 	if e != nil || c.Value == "" || r.URL.Query().Get("state") != c.Value {
-		http.Error(w, "invalid OAuth state", 400)
+		http.Error(w, "invalid OAuth state", http.StatusBadRequest)
 		return
 	}
 	code := r.URL.Query().Get("code")
 	if code == "" {
-		http.Error(w, "missing code", 400)
+		http.Error(w, "missing code", http.StatusBadRequest)
 		return
 	}
 	cl := a.Client
@@ -123,7 +123,7 @@ func (a *Authenticator) callback(w http.ResponseWriter, r *http.Request) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := cl.Do(req)
 	if err != nil {
-		http.Error(w, "OAuth exchange failed", 502)
+		http.Error(w, "OAuth exchange failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
@@ -135,7 +135,7 @@ func (a *Authenticator) callback(w http.ResponseWriter, r *http.Request) {
 		AccessToken string `json:"access_token"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&tok) != nil || tok.AccessToken == "" {
-		http.Error(w, "OAuth exchange failed", 502)
+		http.Error(w, "OAuth exchange failed", http.StatusBadGateway)
 		return
 	}
 	req, _ = http.NewRequestWithContext(r.Context(), http.MethodGet, "https://api.github.com/user", nil)
@@ -143,7 +143,7 @@ func (a *Authenticator) callback(w http.ResponseWriter, r *http.Request) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err = cl.Do(req)
 	if err != nil {
-		http.Error(w, "GitHub user lookup failed", 502)
+		http.Error(w, "GitHub user lookup failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
@@ -155,12 +155,12 @@ func (a *Authenticator) callback(w http.ResponseWriter, r *http.Request) {
 		ID int64 `json:"id"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&user) != nil || !a.allowed(user.ID) {
-		http.Error(w, "GitHub user is not allowed", 403)
+		http.Error(w, "GitHub user is not allowed", http.StatusForbidden)
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: "falcon_session", Value: a.cookieValue(user.ID), Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: 86400})
 	http.SetCookie(w, &http.Cookie{Name: "falcon_oauth_state", MaxAge: -1, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
-	http.Redirect(w, r, "/", 303)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 func (a *Authenticator) session(w http.ResponseWriter, r *http.Request) {
 	id, ok := a.validCookie(r)
@@ -168,18 +168,18 @@ func (a *Authenticator) session(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 401, "unauthorized")
 		return
 	}
-	writeJSON(w, 200, "application/json", map[string]interface{}{"authenticated": true, "githubUserID": id})
+	writeJSON(w, 200, map[string]interface{}{"authenticated": true, "githubUserID": id})
 }
 func (a *Authenticator) logout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: "falcon_session", MaxAge: -1, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
-	w.WriteHeader(204)
+	w.WriteHeader(http.StatusNoContent)
 }
 func (a *Authenticator) require(w http.ResponseWriter, r *http.Request) bool {
 	if _, ok := a.validCookie(r); !ok {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			writeJSONError(w, 401, "unauthorized")
 		} else {
-			http.Redirect(w, r, "/oauth/login", 302)
+			http.Redirect(w, r, "/oauth/login", http.StatusFound)
 		}
 		return false
 	}

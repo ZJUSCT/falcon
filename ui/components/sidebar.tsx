@@ -24,6 +24,7 @@ const navItems: { id: PageId; label: string; icon: typeof BarChart3 }[] = [
 ];
 
 export function Sidebar({ activePage, onNavigate }: SidebarProps) {
+  const [namespace, setNamespace] = useState<string>('');
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [theme, setThemeState] = useState<'dark' | 'light' | 'system'>('dark');
@@ -32,6 +33,14 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
     const saved = localStorage.getItem('falcon-theme') || 'dark';
     setThemeState(saved as any);
     applyTheme(saved as any);
+  }, []);
+
+  useEffect(() => {
+    fetch('/api/jobs').then(r => r.ok ? r.json() : null)
+      .then(data => {
+        const ns = data?.jobs?.[0]?.namespace || data?.[0]?.namespace;
+        if (ns) setNamespace(ns);
+      }).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -105,10 +114,18 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
         className="hidden sm:flex flex-col border-r bg-card flex-shrink-0 transition-all duration-200 h-full overflow-y-auto"
         style={{ width: collapsed ? 52 : 180 }}
       >
-        <div className="flex items-center gap-2 px-3 py-4 border-b">
-          <img src="/falcon.svg" alt="Falcon logo" className="w-7 h-7 rounded-md flex-shrink-0" />
-          {!collapsed && <span className="font-bold text-sm">Falcon</span>}
+        <div className="px-3 py-4 border-b">
+          <div className="flex items-center gap-2">
+            <img src="/falcon.svg" alt="Falcon logo" className="w-7 h-7 rounded-md flex-shrink-0" />
+            {!collapsed && <span className="font-bold text-sm">Falcon</span>}
+          </div>
         </div>
+        {!collapsed && namespace && (
+          <div className="px-3 py-3 border-b">
+            <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Namespace</div>
+            <div className="text-xs font-semibold text-foreground truncate" title={namespace}>{namespace}</div>
+          </div>
+        )}
         {nav}
         <div className="px-2 pb-1">
           <button

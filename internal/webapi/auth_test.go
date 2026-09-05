@@ -29,13 +29,13 @@ func (f fakeGitHubTransport) RoundTrip(r *http.Request) (*http.Response, error) 
 func TestAuthenticatorSessionAndAllowlist(t *testing.T) {
 	a := &Authenticator{Config: GitHubAuthConfig{ClientID: "id", ClientSecret: "secret", AllowedUserIDs: []int64{42}}, AdminHost: "admin.example"}
 	a.Now = func() time.Time { return time.Unix(1000, 0) }
-	r := httptest.NewRequest("GET", "https://admin.example/", nil)
+	r := httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)
 	httpCookie := a.cookieValue(42)
 	r.AddCookie(&http.Cookie{Name: "falcon_session", Value: httpCookie})
 	if id, ok := a.validCookie(r); !ok || id != 42 {
 		t.Fatalf("valid session rejected")
 	}
-	r2 := httptest.NewRequest("GET", "https://admin.example/", nil)
+	r2 := httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)
 	r2.AddCookie(&http.Cookie{Name: "falcon_session", Value: a.cookieValue(7)})
 	if _, ok := a.validCookie(r2); ok {
 		t.Fatalf("disallowed user accepted")

@@ -213,14 +213,8 @@ func TestNextSnapshotStillWritesOnlyToSyncPVC(t *testing.T) {
 		ActiveSnapshot:         "smoke-snap-1756147200",
 		LastHandledSyncRequest: "first-run",
 	}
-	syncClaim, err := newDataClaim(mirror, mirror.Status.WorkPVC, 0, "sync")
-	if err != nil {
-		t.Fatalf("build sync claim: %v", err)
-	}
-	publishClaim, err := newDataClaim(mirror, mirror.Status.ActivePVC, 1756147200, "publish-data")
-	if err != nil {
-		t.Fatalf("build publish claim: %v", err)
-	}
+	syncClaim := newDataClaim(mirror, mirror.Status.WorkPVC, 0, "sync")
+	publishClaim := newDataClaim(mirror, mirror.Status.ActivePVC, 1756147200, "publish-data")
 	scheme := testScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &batchv1.Job{}, &snapshotv1.VolumeSnapshot{}, &appsv1.Deployment{}).
@@ -319,7 +313,7 @@ func testMirror() *mirrorv1alpha1.Mirror {
 				VolumeSnapshotClassName: "snapshot-class",
 				Retention:               mirrorv1alpha1.MirrorRetentionSpec{PreviousSnapshots: 1},
 			},
-			Services: mirrorv1alpha1.MirrorServicesSpec{
+			Publish: mirrorv1alpha1.MirrorServicesSpec{
 				HTTP: &mirrorv1alpha1.MirrorHTTPServiceSpec{
 					MirrorServiceSpec: mirrorv1alpha1.MirrorServiceSpec{
 						PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
@@ -342,7 +336,7 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	for name, add := range map[string]func(*runtime.Scheme) error{
 		"core":     clientgoscheme.AddToScheme,
 		"snapshot": snapshotv1.AddToScheme,
-		"gateway":  gatewayv1.AddToScheme,
+		"gateway":  gatewayv1.Install,
 		"mirror":   mirrorv1alpha1.AddToScheme,
 	} {
 		if err := add(scheme); err != nil {
@@ -712,8 +706,8 @@ func waitForEvent(t *testing.T, recorder *record.FakeRecorder, substr string) {
 func TestPublishPlacementDerivedFromLocalPV(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Services.HTTP.Replicas = ptr.To(int32(2))
-	mirror.Spec.Services.HTTP.PodTemplate.Spec.NodeSelector = map[string]string{
+	mirror.Spec.Publish.HTTP.Replicas = ptr.To(int32(2))
+	mirror.Spec.Publish.HTTP.PodTemplate.Spec.NodeSelector = map[string]string{
 		corev1.LabelHostname: "user-chosen.example.com", // must be overridden
 		"pool":               "edge",                    // must be merged
 	}
@@ -764,7 +758,7 @@ func TestPublishPlacementDerivedFromLocalPV(t *testing.T) {
 func TestPublishPlacementSharedStorageStaysFree(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Services.HTTP.Replicas = ptr.To(int32(2))
+	mirror.Spec.Publish.HTTP.Replicas = ptr.To(int32(2))
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
@@ -803,7 +797,7 @@ func TestPublishPlacementSharedStorageStaysFree(t *testing.T) {
 func TestPublishPlacementNonHostnameAffinityCopied(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Services.HTTP.PodTemplate.Spec.Affinity = &corev1.Affinity{
+	mirror.Spec.Publish.HTTP.PodTemplate.Spec.Affinity = &corev1.Affinity{
 		NodeAffinity: &corev1.NodeAffinity{RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
 			NodeSelectorTerms: []corev1.NodeSelectorTerm{{
 				MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "wrong", Operator: corev1.NodeSelectorOpIn, Values: []string{"x"}}},

@@ -125,7 +125,7 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 		if err := r.Patch(ctx, mirror, client.MergeFrom(before)); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	defer func() {
 		result, reconcileErr = r.handleDerivedResourceInvalid(ctx, mirror, result, reconcileErr)
@@ -157,7 +157,7 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 		return r.reconcilePendingSnapshot(ctx, mirror, publication)
 	}
 
-	if mirror.Spec.Paused {
+	if mirror.Spec.Sync.Paused {
 		return r.patchStatus(ctx, mirror, func() {
 			mirror.Status.ObservedGeneration = mirror.Generation
 			applyMirrorConditions(mirror, publication, false, "Paused", "new synchronization runs are paused", nil)
@@ -169,7 +169,7 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	manualDue := request != "" && request != mirror.Status.LastHandledSyncRequest
 	specDue := mirror.Status.ActivePVC != "" && mirror.Status.ObservedGeneration != mirror.Generation
 	bootstrapDue := mirror.Status.ActivePVC == "" && mirror.Status.LastSync == nil
-	scheduleDue := mirror.Status.NextSyncAt != nil && !mirror.Status.NextSyncAt.Time.After(now)
+	scheduleDue := mirror.Status.NextSyncAt != nil && !mirror.Status.NextSyncAt.After(now)
 
 	if manualDue || specDue || bootstrapDue || scheduleDue {
 		return r.startSync(ctx, mirror, request, publication)
@@ -227,7 +227,7 @@ func (r *MirrorReconciler) startSync(ctx context.Context, mirror *mirrorv1alpha1
 	if r.Recorder != nil {
 		r.Recorder.Eventf(mirror, corev1.EventTypeNormal, "SynchronizationStarted", "Starting synchronization run with Job %s", jobName)
 	}
-	return r.patchStatusWithResult(ctx, mirror, ctrl.Result{Requeue: true}, func() {
+	return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: time.Second}, func() {
 		mirror.Status.ObservedGeneration = mirror.Generation
 		mirror.Status.WorkPVC = syncPVCName
 		mirror.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{
@@ -652,11 +652,12 @@ func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirro
 // both legitimately be true.
 func applyMirrorConditions(mirror *mirrorv1alpha1.Mirror, publication publicationHealth, syncProgressing bool, progressReason, progressMessage string, currentFailure *conditionFailure) {
 	setCondition(mirror, conditionReady, conditionStatus(publication.ready), publication.reason, publication.message)
-	if syncProgressing {
+	switch {
+	case syncProgressing:
 		setCondition(mirror, conditionProgressing, metav1.ConditionTrue, progressReason, progressMessage)
-	} else if publication.progressing {
+	case publication.progressing:
 		setCondition(mirror, conditionProgressing, metav1.ConditionTrue, publication.reason, publication.message)
-	} else {
+	default:
 		setCondition(mirror, conditionProgressing, metav1.ConditionFalse, progressReason, progressMessage)
 	}
 
@@ -710,7 +711,7 @@ func validateMirror(mirror *mirrorv1alpha1.Mirror) field.ErrorList {
 	if mirror.Spec.Storage.VolumeSnapshotClassName == "" {
 		errs = append(errs, field.Required(path.Child("storage", "volumeSnapshotClassName"), "is required for atomic publication"))
 	}
-	services := mirror.Spec.Services
+	services := mirror.Spec.Publish
 	servicesPath := path.Child("services")
 	for _, entry := range []struct {
 		key  string
@@ -736,10 +737,10 @@ func validateMirror(mirror *mirrorv1alpha1.Mirror) field.ErrorList {
 	return errs
 }
 
-// publishEnabled reports whether at least one spec.services key is enabled
+// publishEnabled reports whether at least one spec.publish key is enabled
 // (a mirror with everything disabled syncs but publishes nothing).
 func publishEnabled(mirror *mirrorv1alpha1.Mirror) bool {
-	return mirror.Spec.Services.AnyEnabled()
+	return mirror.Spec.Publish.AnyEnabled()
 }
 
 // httpServiceSpec returns the base service spec of the http key, or nil when

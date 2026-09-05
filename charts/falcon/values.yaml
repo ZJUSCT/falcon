@@ -51,6 +51,17 @@ controller:
       url: https://mirrors.zjusct.io
       abbr: ZJU
       name: Zhejiang University Mirror
+      logo: ""
+      logo_darkmode: ""
+      homepage: ""
+      issue: ""
+      request: ""
+      email: ""
+      group: ""
+      disk: ""
+      note: ""
+      big: ""
+      disable: false
     catalog:
       enabled: true                    # toggles GET /mirrorz.json
     sync:
@@ -127,7 +138,7 @@ webui:
     tag: ""            # empty = Chart.AppVersion
     digest: ""         # optional; takes precedence over tag
     pullPolicy: IfNotPresent
-  replicaCount: 2
+  replicaCount: 1
   resources:
     requests:
       cpu: 10m

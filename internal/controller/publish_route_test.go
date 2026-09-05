@@ -88,7 +88,7 @@ func assertPublishRouteShape(t *testing.T, route *gatewayv1.HTTPRoute, owner cli
 func TestMirrorPausedKeepsPublishRoute(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Paused = true
+	mirror.Spec.Sync.Paused = true
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
@@ -268,7 +268,7 @@ func TestMirrorDataVolumeInjectedVolumeOnly(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
 	// The user template mounts the injected mirror-data volume itself.
-	mirror.Spec.Services.HTTP.PodTemplate.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
+	mirror.Spec.Publish.HTTP.PodTemplate.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
 		{Name: "mirror-data", MountPath: "/srv/www/debian", ReadOnly: true},
 	}
 	mirror.Finalizers = []string{MirrorFinalizer}
@@ -347,7 +347,7 @@ func TestMirrorDataVolumeInjectedVolumeOnly(t *testing.T) {
 func TestServicesRenderPerKey(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Services.Rsync = &mirrorv1alpha1.MirrorServiceSpec{
+	mirror.Spec.Publish.Rsync = &mirrorv1alpha1.MirrorServiceSpec{
 		Replicas: ptr.To(int32(2)),
 		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
@@ -445,8 +445,8 @@ func TestServicesRenderPerKey(t *testing.T) {
 func TestRsyncOnlyMirrorGetsNoRoute(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Services.HTTP = nil
-	mirror.Spec.Services.Rsync = &mirrorv1alpha1.MirrorServiceSpec{
+	mirror.Spec.Publish.HTTP = nil
+	mirror.Spec.Publish.Rsync = &mirrorv1alpha1.MirrorServiceSpec{
 		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
 				Name:  "rsyncd",
@@ -492,7 +492,7 @@ func TestAbsentOrDisabledServicesCreateNoWorkload(t *testing.T) {
 	// runs (the Mirror settles Ready), but no publish workload or route is
 	// created.
 	mirror := testMirror()
-	mirror.Spec.Services = mirrorv1alpha1.MirrorServicesSpec{}
+	mirror.Spec.Publish = mirrorv1alpha1.MirrorServicesSpec{}
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
@@ -525,7 +525,7 @@ func TestAbsentOrDisabledServicesCreateNoWorkload(t *testing.T) {
 	// An absent key is as good as disabled — no workload for it, while the
 	// present key still publishes.
 	mirror = testMirror()
-	mirror.Spec.Services.HTTP = &mirrorv1alpha1.MirrorHTTPServiceSpec{
+	mirror.Spec.Publish.HTTP = &mirrorv1alpha1.MirrorHTTPServiceSpec{
 		MirrorServiceSpec: mirrorv1alpha1.MirrorServiceSpec{
 			PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 				Containers: []corev1.Container{{
@@ -536,7 +536,7 @@ func TestAbsentOrDisabledServicesCreateNoWorkload(t *testing.T) {
 			}},
 		},
 	}
-	mirror.Spec.Services.Rsync = nil
+	mirror.Spec.Publish.Rsync = nil
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
@@ -651,7 +651,7 @@ func TestPublishDefaultsInjectedWhereSilent(t *testing.T) {
 func TestPublishUserSettingsWin(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Services.HTTP.PodTemplate = corev1.PodTemplateSpec{
+	mirror.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      map[string]string{"pool": "edge"},
 			Annotations: map[string]string{"example.com/owner": "webteam"},
@@ -723,7 +723,7 @@ func TestPublishUserSettingsWin(t *testing.T) {
 // and a user volume named mirror-data is rejected as reserved.
 func TestMirrorDataMountsAreForcedReadOnly(t *testing.T) {
 	mirror := testMirror()
-	mirror.Spec.Services.HTTP.PodTemplate.Spec.Containers = append(mirror.Spec.Services.HTTP.PodTemplate.Spec.Containers, corev1.Container{
+	mirror.Spec.Publish.HTTP.PodTemplate.Spec.Containers = append(mirror.Spec.Publish.HTTP.PodTemplate.Spec.Containers, corev1.Container{
 		Name:         "sidecar",
 		Image:        "docker.io/library/busybox:1.37.0",
 		VolumeMounts: []corev1.VolumeMount{{Name: "mirror-data", MountPath: "/data", ReadOnly: false}},
@@ -736,7 +736,7 @@ func TestMirrorDataMountsAreForcedReadOnly(t *testing.T) {
 
 	// Read-only extra mounts are fine.
 	mirror = testMirror()
-	mirror.Spec.Services.HTTP.PodTemplate.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
+	mirror.Spec.Publish.HTTP.PodTemplate.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
 		{Name: "mirror-data", MountPath: "/srv/mirror/smoke/index", ReadOnly: true},
 	}
 	if errs := validateMirror(mirror); len(errs) != 0 {
@@ -745,7 +745,7 @@ func TestMirrorDataMountsAreForcedReadOnly(t *testing.T) {
 
 	// A user-declared volume named mirror-data collides with the injection.
 	mirror = testMirror()
-	mirror.Spec.Services.HTTP.PodTemplate.Spec.Volumes = []corev1.Volume{{
+	mirror.Spec.Publish.HTTP.PodTemplate.Spec.Volumes = []corev1.Volume{{
 		Name:         "mirror-data",
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	}}
@@ -763,7 +763,7 @@ func TestPublishTemplateWithoutPortsOrContainersIsInvalid(t *testing.T) {
 
 	// No ports on the first container.
 	broken := mirror.DeepCopy()
-	broken.Spec.Services.HTTP.PodTemplate.Spec.Containers[0].Ports = nil
+	broken.Spec.Publish.HTTP.PodTemplate.Spec.Containers[0].Ports = nil
 	errs := validateMirror(broken)
 	if len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "ports") {
 		t.Fatalf("an enabled service without container ports must be InvalidSpec, got %v", errs)
@@ -771,7 +771,7 @@ func TestPublishTemplateWithoutPortsOrContainersIsInvalid(t *testing.T) {
 
 	// No containers at all.
 	broken = mirror.DeepCopy()
-	broken.Spec.Services.HTTP.PodTemplate.Spec.Containers = nil
+	broken.Spec.Publish.HTTP.PodTemplate.Spec.Containers = nil
 	errs = validateMirror(broken)
 	if len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "containers") {
 		t.Fatalf("an enabled service without containers must be InvalidSpec, got %v", errs)
@@ -790,7 +790,7 @@ func publishedMirrorFixture(t *testing.T, name string, aliases ...mirrorv1alpha1
 		Generation: 1,
 	}
 	base := childBase(name)
-	mirror.Spec.Services.HTTP = &mirrorv1alpha1.MirrorHTTPServiceSpec{
+	mirror.Spec.Publish.HTTP = &mirrorv1alpha1.MirrorHTTPServiceSpec{
 		MirrorServiceSpec: mirrorv1alpha1.MirrorServiceSpec{
 			PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 				Containers: []corev1.Container{{
@@ -801,7 +801,7 @@ func publishedMirrorFixture(t *testing.T, name string, aliases ...mirrorv1alpha1
 			}},
 		},
 	}
-	mirror.Spec.Services.HTTP.Aliases = aliases
+	mirror.Spec.Publish.HTTP.Aliases = aliases
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
@@ -849,7 +849,7 @@ func TestAliasesServeMultiMatchRoute(t *testing.T) {
 		}
 	}
 	// All matches share the single http backend.
-	if backends := route.Spec.Rules[0].BackendRefs; len(backends) != 1 || string(backends[0].BackendRef.Name) != "smoke-publish-http" {
+	if backends := route.Spec.Rules[0].BackendRefs; len(backends) != 1 || string(backends[0].Name) != "smoke-publish-http" {
 		t.Fatalf("aliases must share the canonical backend, got %#v", backends)
 	}
 	assertPublishRouteShape(t, route, mirror, "/smoke", "smoke-publish-http")
@@ -861,7 +861,7 @@ func TestAliasesServeMultiMatchRoute(t *testing.T) {
 func TestAliasValidation(t *testing.T) {
 	// Uppercase and multi-segment aliases are the point of the mechanism.
 	valid := testMirror()
-	valid.Spec.Services.HTTP.Aliases = []mirrorv1alpha1.MirrorHTTPAlias{
+	valid.Spec.Publish.HTTP.Aliases = []mirrorv1alpha1.MirrorHTTPAlias{
 		"/Linux.Git", "/git/smoke.git", "/a/b/c",
 	}
 	if errs := validateMirror(valid); len(errs) != 0 {
@@ -877,7 +877,7 @@ func TestAliasValidation(t *testing.T) {
 	}
 	for name, alias := range cases {
 		broken := testMirror()
-		broken.Spec.Services.HTTP.Aliases = []mirrorv1alpha1.MirrorHTTPAlias{alias}
+		broken.Spec.Publish.HTTP.Aliases = []mirrorv1alpha1.MirrorHTTPAlias{alias}
 		if errs := validateMirror(broken); len(errs) == 0 {
 			t.Fatalf("%s: alias %q must be InvalidSpec", name, alias)
 		}
@@ -886,7 +886,7 @@ func TestAliasValidation(t *testing.T) {
 	// An ABSENT http key is never validated — and with enable gone, aliases
 	// (which live on the key) simply cannot be parked anywhere else.
 	absent := testMirror()
-	absent.Spec.Services.HTTP = nil
+	absent.Spec.Publish.HTTP = nil
 	if errs := validateMirror(absent); len(errs) != 0 {
 		t.Fatalf("aliases of an absent http key must not be validated, got %v", errs.ToAggregate())
 	}
@@ -986,7 +986,7 @@ func TestDisabledChildCleanupPrecedesValidationAndPreservesForeignObjects(t *tes
 	mirror := testMirror()
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Spec.Sync.Interval.Duration = 0 // unrelated invalid field
-	mirror.Spec.Services = mirrorv1alpha1.MirrorServicesSpec{}
+	mirror.Spec.Publish = mirrorv1alpha1.MirrorServicesSpec{}
 	owner := *metav1.NewControllerRef(mirror, mirrorv1alpha1.GroupVersion.WithKind("Mirror"))
 	controlled := []client.Object{
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: mirror.Namespace, Name: "smoke-publish-http", OwnerReferences: []metav1.OwnerReference{owner}}},
@@ -1020,7 +1020,7 @@ func TestGatewayRejectionDegradesMirrorWithPassthrough(t *testing.T) {
 	gitMirror := testMirror()
 	gitMirror.Name = "git"
 	gitMirror.UID = types.UID("uid-git")
-	gitMirror.Spec.Services.HTTP = &mirrorv1alpha1.MirrorHTTPServiceSpec{
+	gitMirror.Spec.Publish.HTTP = &mirrorv1alpha1.MirrorHTTPServiceSpec{
 		MirrorServiceSpec: mirrorv1alpha1.MirrorServiceSpec{
 			PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 				Containers: []corev1.Container{{

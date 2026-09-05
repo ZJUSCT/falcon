@@ -27,8 +27,11 @@ func TestSyncLimiter(t *testing.T) {
 	// its name must not consume a second slot, and terminal-state reconciles
 	// may release several times without opening a slot for someone else.
 	l = NewSyncLimiter(2)
-	if !l.Acquire("job-a", false) || !l.Acquire("job-a", false) {
-		t.Fatal("acquire and re-acquire of the same job must succeed")
+	if !l.Acquire("job-a", false) {
+		t.Fatal("acquire job-a failed")
+	}
+	if l.Acquire("job-a", false) {
+		t.Fatal("duplicate acquire must be rejected")
 	}
 	if l.Held() != 1 {
 		t.Fatalf("held = %d, want 1", l.Held())

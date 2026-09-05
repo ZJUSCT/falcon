@@ -9,13 +9,13 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	mirrorv1alpha1 "github.com/ZJUSCT/falcon/api/v1alpha1"
-	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {

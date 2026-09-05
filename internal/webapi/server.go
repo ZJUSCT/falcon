@@ -29,6 +29,8 @@ type SiteConfig struct {
 	Abbr string
 	// Name is the full site name, e.g. "Zhejiang University Mirror".
 	Name string
+	Logo, LogoDarkmode, Homepage, Issue, Request, Email, Group, Disk, Note, Big string
+	Disable bool
 }
 
 // Server serves the read-only HTTP API on top of a controller-runtime client.
@@ -94,7 +96,7 @@ func (s *Server) Handler() http.Handler {
 			if !strings.HasPrefix(r.URL.Path, "/api/") && s.UIUpstream != "" {
 				u, err := url.Parse(s.UIUpstream)
 				if err != nil {
-					http.Error(w, "invalid UI upstream", 500)
+					http.Error(w, "invalid UI upstream", http.StatusInternalServerError)
 					return
 				}
 				httputil.NewSingleHostReverseProxy(u).ServeHTTP(w, r)
@@ -111,8 +113,8 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
-func writeJSON(w http.ResponseWriter, statusCode int, contentType string, payload interface{}) {
-	w.Header().Set("Content-Type", contentType)
+func writeJSON(w http.ResponseWriter, statusCode int, payload interface{}) {
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -120,7 +122,7 @@ func writeJSON(w http.ResponseWriter, statusCode int, contentType string, payloa
 }
 
 func writeJSONError(w http.ResponseWriter, statusCode int, message string) {
-	writeJSON(w, statusCode, "application/json", map[string]string{"error": message})
+	writeJSON(w, statusCode, map[string]string{"error": message})
 }
 
 // splitNameExtension splits a repo name requested as /api/repos/<name> into

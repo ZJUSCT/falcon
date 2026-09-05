@@ -15,7 +15,7 @@ API 组 `mirrors.zjusct.io`，版本 `v1alpha1`，kind `Mirror`（复数 `mirror
 - 怎么服务
 - 其他信息
 
-自然产生了 `spec` 中的 `storage`、`sync`、`services`、`info` 四个 map。
+自然产生了 `spec` 中的 `storage`、`sync`、`publish`、`info` 四个 map。
 
 ```yaml
 metadata:
@@ -129,7 +129,7 @@ spec:
       # int32：保留的历史快照代数
       # 可选：默认 1
       # 校验（schema）：1–10
-  services:
+  publish:
     # 可选；固定 key：http / rsync；key 出现 = 启用，不出现 = 禁用；
     # 全禁用 = 纯同步镜像（同步/快照/发布 PVC 照常，但不部署发布负载）
     http:
@@ -260,8 +260,8 @@ status:
 
 `spec` 中 `sync` 替换为 `proxy`，此外大部分字段与 Mirror 相同：
 
-- `services.http` 字段形状同 Mirror 但**暂无 `aliases`**（代理单路径即够，未来按需添加）
-- 没有 paused、没有同步、没有 finalizer，删除 CR 时靠 owner-reference GC 回收全部子资源；移除 `services.http` 可在保留 CR 的同时停止发布
+- `publish.http` 字段形状同 Mirror 但**暂无 `aliases`**（代理单路径即够，未来按需添加）
+- 没有 paused、没有同步、没有 finalizer，删除 CR 时靠 owner-reference GC 回收全部子资源；移除 `publish.http` 可在保留 CR 的同时停止发布
 
 ```yaml
 spec:
@@ -279,7 +279,7 @@ spec:
       # 可选；缓存启用时必填
       # 对应：缓存 PVC spec.resources.requests.storage
       # 校验（控制器）：缓存启用时 > 0
-  services:
+  publish:
     # 仅 http 一个 key（代理即 HTTP 发布者）；key 未出现 = 不部署负载，代理不对外发布
     http:
       replicas: 1
@@ -320,7 +320,7 @@ status:
 
 Falcon 仅对 CRD 做基础校验，派生资源的校验由其他组件负责，Falcon 消费相关事件。例如：
 
-- Falcon 不对 `spec.services.http.aliases` 与其他 Mirror 路径的重叠做校验，而是交给 Gateway 规范和具体实现。HTTPRoute 明确报告 `Accepted=False` 或 `ResolvedRefs=False` 时，Falcon 设置 `Degraded=True/HTTPRouteRejected` 并保留网关的 reason/message 上下文。
+- Falcon 不对 `spec.publish.http.aliases` 与其他 Mirror 路径的重叠做校验，而是交给 Gateway 规范和具体实现。HTTPRoute 明确报告 `Accepted=False` 或 `ResolvedRefs=False` 时，Falcon 设置 `Degraded=True/HTTPRouteRejected` 并保留网关的 reason/message 上下文。
 - Falcon 不预检派生资源名长度。创建或更新派生资源被 apiserver 以 `Invalid` 拒绝时，Falcon 将原始错误转述到父 CR 的 `Degraded/DerivedResourceInvalid` condition，并记录同名 Warning Event。
 
 ### 相关资源的名称、label 与 annotation
@@ -360,7 +360,7 @@ Falcon 仅对 CRD 做基础校验，派生资源的校验由其他组件负责�
 格式字段到 Falcon 字段的对应（转换用自然语言标注）：
 
 ```jsonc
-// 收录：Mirror 与 ProxyMirror 统一要求 spec.services.http 已配置，且当前
+// 收录：Mirror 与 ProxyMirror 统一要求 spec.publish.http 已配置，且当前
 // metadata.generation 对应的 Ready condition 为 True。
 // 排序：按 cname 字典序。
 {
@@ -403,7 +403,7 @@ status 字母按 mirrorz-org/mirrorz README 的约定编码，固定顺序为「
 
 Falcon 不输出 `D`：首次成功前 Ready=False，条目不会进入目录；周期同步的等待态则用上一笔已完成结果 `S` 或 `F` 表达，比 `D` 更准确。同步或失败期间的 `O` 让 monitor 使用旧的成功发布时间判断仍在服务的 immutable snapshot 是否新鲜。
 
-其余机制：条目 url 恒为规范路径——`services.http.aliases` 别名不出现在 mirrorz 输出中（别名仅是额外路由，内容与协商行为完全一致）；通用 GET/JSON 约束见「Web API」。
+其余机制：条目 url 恒为规范路径——`publish.http.aliases` 别名不出现在 mirrorz 输出中（别名仅是额外路由，内容与协商行为完全一致）；通用 GET/JSON 约束见「Web API」。
 
 ## 控制器配置文件（/etc/falcon/config.yaml）
 
@@ -436,81 +436,16 @@ publish:
 
 fail-fast 校验（启动时，非法拒绝启动）：归一化（site.url TrimSpace 去末尾 `/`；log.level 空补 info）后检查——log.level 枚举；site.url 非空且含 `://`；hostnames 非空时 gatewayRef.name 必填；hostnames 不含空白项、不含 `/`（裸主机名）。文件不可读/非法 YAML 报错（前缀 `read config` / `parse config`），stderr + 退出码 1。
 
-## 同步
-
-### 同步容器
-
-[tuna/tunasync-scripts](https://github.com/tuna/tunasync-scripts) 由较多镜像站使用和参与维护，故选择它作为同步容器。Falcon 需要适当结合同步容器的行为进行适配，故 Fork 一份作为本仓库的 submodule 维护。
-
-tunasync-scripts 由每个上游一个的独立同步脚本组成，Python、Shell Script 各半。这些脚本一致性较好，故值得采用：
-
-- env 稳定：
-    - `TUNASYNC_WORKING_DIR`：内容输出目录
-    - `TUNASYNC_UPSTREAM_URL`：上游地址
-- 日志：
-    - 输出统一：`echo` 到 stdout，能够由 K8s 可观测性基础设施直接收集
-    - 格式统一：`%Y-%m-%dT%H:%M:%S - 文件:行号 [级别] 消息`
-- TODO：
-    - **退出码**：tunasync worker 除退出码外还按 `failOnMatch` 正则扫描日志判败——这说明部分脚本存在"失败但退出码 0"（如 rsync 部分失败被吞）。Falcon 以 Job 退出码判定同步成败，**需要在使用时具体考虑**；不要移植日志正则判败的约定。
-
-tunasync-scripts 的主镜像是全家桶打包，使用需要斟酌。还有一些独立镜像（如 `tunathu/ftpsync`）目前正在测试复用。
-
-## 发布
+## Mirror 生命周期
 
 Falcon 将“同步”与“发布”分离：同步 Job 始终写入可变的工作 PVC，读流量则始终来自某一代不可变的快照克隆。这样，同步过程中的半成品不会暴露给用户；一次同步失败也不会破坏上一代仍可用的内容。
 
-### 原子发布模型
+Mirror 的长期状态由以下字段共同描述：
 
-每次同步事务使用 `status.currentSync.startedAt` 作为唯一身份。该时间的 Unix 秒值同时派生同步 Job `<base>-sync-<ts>`、VolumeSnapshot `<base>-snap-<ts>` 和同名发布 PVC。同步 PVC `<base>-sync` 不属于任何一代，会在各次同步间复用。
-
-一代内容按以下顺序产生：
-
-1. 同步 Job 更新工作 PVC；
-2. Job 成功后，CSI 为工作 PVC 创建 VolumeSnapshot；
-3. Falcon 从快照克隆出只读发布 PVC；
-4. 各发布 Deployment 滚动到新的 PVC；
-5. 所有启用的发布负载就绪后，Falcon 将该 PVC 写入 `status.activePVC`，完成原子切换。
-
-发布 PVC 的名字及 Deployment 中 `mirror-data` 卷的 `claimName` 唯一标识发布代次。切换 `claimName` 自然改变 Pod 模板并触发滚动，因此 Falcon 不再注入额外的代次注解。成功激活前，`activePVC` 仍指向旧代次，已有 Pod 可继续服务。
-
-### 发布负载
-
-`spec.services` 中出现的每个 key 都对应一组同名的 Deployment 和 Service：`<base>-publish-<key>`。HTTP 和 rsync 的 Pod 彼此独立，但挂载同一个只读发布 PVC。Deployment 使用 `RollingUpdate`，`maxUnavailable: 0`、`maxSurge: 1`，以便新代次启动期间尽量保留旧代次的服务能力。
-
-用户提供完整的 Pod 模板；控制器只负责 CRD 章节列出的强制字段与默认值。特别地，Falcon 只注入 `mirror-data` volume，不替用户决定挂载路径；任何容器或 init container 对该卷的挂载都必须为只读。Service 将端口 80 转发到第一个容器的第一个端口，该端口由控制器命名为服务 key。
-
-一个发布 Deployment 只有在控制器观察到当前 generation，且期望数量的副本都已更新并可用时才算收敛。滚动过程中只要仍有可用副本，Mirror 可以同时处于 `Ready=True` 和 `Progressing=True`。
-
-### HTTPRoute
-
-启用 HTTP 服务且全局 `publish.hostnames` 非空时，Falcon 创建 `<base>-publish` HTTPRoute。它包含规范路径 `/<CR 名>`，Mirror 还会按声明顺序追加 `services.http.aliases`；这些 PathPrefix match 共同指向 `<base>-publish-http` Service。路由的 Gateway、hostnames、labels 和 annotations 来自控制器的 `publish` 配置。
-
-Falcon 不自行裁决不同 HTTPRoute 之间的路径冲突，而是消费 Gateway API 状态。只有期望 parent 对当前 HTTPRoute generation 同时报告 `Accepted=True` 与 `ResolvedRefs=True` 时，HTTP 发布才可用；明确的 `False` 表示发布故障，缺失、`Unknown` 或旧 generation 的 condition 表示仍在收敛。
-
-移除某个 service key 会删除 Falcon 所属的对应 Deployment 和 Service；移除 HTTP 服务或关闭全局 HTTP 发布还会删除所属 HTTPRoute。清理发生在其余 spec 校验之前，因此即使一次编辑还包含其他无效字段，停服请求仍会生效。确定性名字被非所属对象占用时，Falcon 不会删除该对象。
-
-### 存储局部性
-
-同步 Pod 直接引用工作 PVC，首次供给时由 WFFC 决定落点，后续由已绑定 PV 的 node affinity 约束；Falcon 不写 `pod.spec.nodeName`，也不额外提供放置字段。
-
-快照克隆的来源链对调度器不可见，因此发布 Pod 的放置由 Falcon 从工作 PVC 所绑定的 PV 推导：
-
-- 常见的 `kubernetes.io/hostname In [...]` 约束转换为强制 `nodeSelector`；
-- 其他 required node affinity 原样复制，并在与用户约束冲突时以卷局部性为准；
-- 没有 node affinity 的共享存储不注入约束，可自由部署多个副本；
-- 工作 PVC 或 PV 尚不可解析时不创建发布 Deployment，以免 Pod 在错误节点启动。
-
-该约束会在每次 reconcile 重新推导，但内容不变时不会触发额外滚动。具体的 Kubernetes 行为与版本边界见 [Kubernetes 约定](k8s.md)。
-
-### ProxyMirror 的发布
-
-ProxyMirror 没有同步、快照和代次切换：Falcon 直接维护 HTTP Deployment、Service 和 HTTPRoute。启用 cache 时另建 `<base>-cache` PVC，并以可写的 `proxy-cache` volume 注入 Pod；挂载路径仍由用户模板声明。关闭 cache 或 HTTP 服务会删除所属缓存 PVC，关闭 HTTP 服务也会删除发布负载和路由。
-
-ProxyMirror 不使用 finalizer，删除 CR 后由 owner-reference garbage collection 回收所有子资源。
-
-## Mirror 生命周期
-
-Mirror 的长期状态由活跃发布、最近一次已完成同步和下一次调度共同描述；正在进行的同步事务则单独保存在 `status.currentSync`。它们互不覆盖：例如新同步失败时，旧发布可以继续可用；新代次滚动时，旧 Pod 也可以继续处理请求。
+- 活跃发布：`status.activePVC`、`status.activeSnapshot`
+- 最近一次已完成同步：`status.lastSync`
+- 下一次调度：`status.nextSyncAt`
+- 正在进行的同步事务则单独保存在 `status.currentSync`。
 
 ### 创建与首次发布
 
@@ -523,7 +458,7 @@ Falcon 首次观察到 Mirror 时先添加 `mirrors.zjusct.io/storage-cleanup` f
 - `status.currentSync.syncRequest`：若由手动请求触发，则保存请求值；
 - `status.nextSyncAt`：清空，避免同一事务被定时器重复触发。
 
-`lastSync` 只记录已经结束的尝试，因此事务运行期间仍保留上一笔 `Succeeded` 或 `Failed` 结果。是否正在运行由 `currentSync` 表示，不使用持久化的 phase。
+`lastSync` 只记录已经结束的尝试，因此事务运行期间仍保留上一笔 `Succeeded` 或 `Failed` 结果。
 
 ### 一次同步事务
 
@@ -542,9 +477,85 @@ Falcon 首次观察到 Mirror 时先添加 `mirrors.zjusct.io/storage-cleanup` f
 
 时间戳以秒为精度。创建 Job 前，Falcon 会确认本 Mirror 没有同一时间戳的 Job、PVC 或 VolumeSnapshot；冲突时保留 `currentSync`，报告 `SnapshotTimestampConflict`，每分钟以同一事务身份重试，而不会静默改用另一时间戳。
 
+### Graceful switching for Falcon mirror publication
+
+SLA:
+
+> During publication, Falcon must preserve healthy in-flight requests and
+> avoid rollout-induced connection resets or HTTP 5xx responses. Each
+> response must be served entirely from one immutable mirror snapshot.
+> New requests may temporarily reach either the previous or new snapshot
+> during endpoint propagation, but traffic must converge to the new snapshot
+> within a bounded operational window.
+
+Typical rollout sequence:
+
+- Deployment creates new Pod
+
+    - `maxUnavailable: 0` ensures that the controller does not intentionally reduce available capacity during the update.
+    - `maxSurge: 1` allows an additional Pod to be created first.
+
+    This protects availability as long as:
+
+    - the old Pod remains healthy;
+    - the new Pod eventually passes readiness;
+    - there is enough cluster capacity;
+    - storage attachment and mounting succeed.
+
+    It does not protect against a node failure or an old Pod that crashes before the new Pod becomes ready.
+
+- new Pod passes readiness probe
+- EndpointSlice adds new ready endpoint
+- Service load balancing can send now connections to it
+- old Pod is marked terminating/unready
+- old endpoint is removed from normal new-connection selection
+- old Pod drains and exits
+
+    Pod termination sequence:
+
+    - Pod deletion begins.
+    - Kubernetes marks the Pod terminating and runs any configured `preStop` hook.
+    - The container receives `SIGTERM`.
+    - The Pod remains in termination for the grace period.
+    - If it has not exited, Kubernetes sends `SIGKILL`.
+
+Summary:
+
+- **The HTTPRoute normally does not change** between snapshot generations. It points to the stable Service(`backendRef`), whose selector is based on the mirror.
+- **The Service remains stable**. Its endpoint set changes as Pods become ready, unready, or terminating.
+- **Kubernetes handles readiness, endpoint publication, and rollout ordering**. The same mechanism works for HTTP, rsync, and other services. The control plane, kube-proxy, and gateway controller process these updates asynchronously. This creates a short convergence window in which different components may have slightly different endpoint views.
+- **The readiness probe must check real serving capability**, not merely process existence. For Falcon, the probe should verify that the expected mirror content can actually be served.
+
+### 发布的激活
+
 发布激活通过一次 status patch 完成：新代次成为 `activePVC` 和 `activeSnapshot`，`lastSync` 更新为 `Succeeded`，`lastPublishedAt` 记为当前时间，`nextSyncAt` 安排到一个 `interval` 之后，连续失败计数清零，手动请求值移入 `lastHandledSyncRequest`。若这是第一个 HTTP 发布，Deployment 激活后还需要等待 HTTPRoute 获得 Gateway 接受，Mirror 才会进入公开目录。
 
-`status.sizeBytes` 是激活时尽力获取的发布 PVC 用量。控制器从任一 Running 发布 Pod 找到节点，再读取该节点 kubelet stats summary 中的 `usedBytes`；暂时获取不到时不影响发布，空闲 reconcile 会继续尝试回填。发布 PVC 内容不可变，成功记录后无需周期刷新。
+`status.sizeBytes` 是激活时尽力获取的发布 PVC 用量：
+
+- 控制器从任一 Running 发布 Pod 找到节点，再读取该节点 kubelet stats summary 中的 `usedBytes`
+- 暂时获取不到时不影响发布，空闲 reconcile 会继续尝试回填
+- 一旦获取后不再刷新，因为发布 PVC 内容不可变
+
+### HTTPRoute
+
+启用 HTTP 服务且全局 `publish.hostnames` 非空时，Falcon 创建 `<base>-publish` HTTPRoute。它包含规范路径 `/<CR 名>`，Mirror 还会按声明顺序追加 `publish.http.aliases`；这些 PathPrefix match 共同指向 `<base>-publish-http` Service。路由的 Gateway、hostnames、labels 和 annotations 来自控制器的 `publish` 配置。
+
+Falcon 不自行裁决不同 HTTPRoute 之间的路径冲突，而是消费 Gateway API 状态。只有期望 parent 对当前 HTTPRoute generation 同时报告 `Accepted=True` 与 `ResolvedRefs=True` 时，HTTP 发布才可用；明确的 `False` 表示发布故障，缺失、`Unknown` 或旧 generation 的 condition 表示仍在收敛。
+
+移除某个 service key 会删除 Falcon 所属的对应 Deployment 和 Service；移除 HTTP 服务或关闭全局 HTTP 发布还会删除所属 HTTPRoute。清理发生在其余 spec 校验之前，因此即使一次编辑还包含其他无效字段，停服请求仍会生效。确定性名字被非所属对象占用时，Falcon 不会删除该对象。
+
+### 存储局部性
+
+同步 Pod 直接引用工作 PVC，首次供给时由 WFFC 决定落点，后续由已绑定 PV 的 node affinity 约束；Falcon 不写 `pod.spec.nodeName`，也不额外提供放置字段。
+
+快照克隆的来源链对调度器不可见，因此发布 Pod 的放置由 Falcon 从工作 PVC 所绑定的 PV 推导：
+
+- 常见的 `kubernetes.io/hostname In [...]` 约束转换为强制 `nodeSelector`；
+- 其他 required node affinity 原样复制，并在与用户约束冲突时以卷局部性为准；
+- 没有 node affinity 的共享存储不注入约束，可自由部署多个副本；
+- 工作 PVC 或 PV 尚不可解析时不创建发布 Deployment，以免 Pod 在错误节点启动。
+
+该约束会在每次 reconcile 重新推导，但内容不变时不会触发额外滚动。具体的 Kubernetes 行为与版本边界见 [Kubernetes 约定](k8s.md)。
 
 ### 触发与调度
 
@@ -573,7 +584,7 @@ Falcon 首次观察到 Mirror 时先添加 `mirrors.zjusct.io/storage-cleanup` f
 
 ### 暂停与配置变更
 
-`spec.paused` 只禁止接受新的同步事务，不表示停止发布：
+`spec.sync.paused` 只禁止接受新的同步事务，不表示停止发布：
 
 - 已经接受的事务会继续完成，包括创建快照和激活新代次；
 - 已发布的 Deployment、Service 和 HTTPRoute 仍会被维护；
@@ -582,7 +593,7 @@ Falcon 首次观察到 Mirror 时先添加 `mirrors.zjusct.io/storage-cleanup` f
 
 Falcon 会先处理 service 的关闭请求，再校验完整 spec；随后才处理现有事务和暂停状态。无效 spec 会报告 `InvalidSpec`，但不会丢弃 `currentSync`，修复后从原阶段继续。
 
-`spec.services` 全为空时，Mirror 仍会同步、快照、克隆并激活发布 PVC，只是不创建任何对外负载，也不会被 `mirrorz.json` 收录。
+`spec.publish` 全为空时，Mirror 仍会同步、快照、克隆并激活发布 PVC，只是不创建任何对外负载，也不会被 `mirrorz.json` 收录。
 
 ### 重启与自愈
 
@@ -601,6 +612,12 @@ Mirror 空闲且已有活跃发布时，Falcon 保留当前代次及 `spec.stora
 失败 Job 不属于成功发布代次，另按 `spec.sync.keepFailedJobs` 保留最近若干个。该清理在每次同步进入终态时执行。
 
 删除 Mirror 时，`mirrors.zjusct.io/storage-cleanup` finalizer 保证先删除同 namespace、同 mirror label 的全部 PVC，再删除 VolumeSnapshot，最后才允许 CR 消失。清理范围按 label 而非 owner reference 选择，因此同 namespace 内的 Mirror 与 ProxyMirror 不应使用同一个名字。其余 Job、Deployment、Service 和 HTTPRoute 由 owner-reference garbage collection 回收。底层 PV 是否保留由 StorageClass 的 reclaim policy 决定。
+
+### ProxyMirror 的发布
+
+ProxyMirror 没有同步、快照和代次切换：Falcon 直接维护 HTTP Deployment、Service 和 HTTPRoute。启用 cache 时另建 `<base>-cache` PVC，并以可写的 `proxy-cache` volume 注入 Pod；挂载路径仍由用户模板声明。关闭 cache 或 HTTP 服务会删除所属缓存 PVC，关闭 HTTP 服务也会删除发布负载和路由。
+
+ProxyMirror 不使用 finalizer，删除 CR 后由 owner-reference garbage collection 回收所有子资源。
 
 ## 状态与可观测性
 
@@ -623,7 +640,7 @@ Mirror 和 ProxyMirror 都不保存单一 `phase`。`Ready`、`Progressing` 和 
 
 Mirror 的常见同步 reason 为 `SynchronizationStarted`、`SyncQueued`、`SyncJobRunning`、`Snapshotting`、`PublishRollout`、`SyncJobFailed`、`SnapshotFailed` 和 `SnapshotTimestampConflict`；发布 reason 为 `Published`、`PublishUnavailable`、`HTTPRoutePending`、`HTTPRouteRejected` 和 `HTTPRouteDisabled`。`InvalidSpec` 与 `DerivedResourceInvalid` 分别表示父 CR 语义校验失败和派生资源被 apiserver 拒绝。
 
-ProxyMirror 使用相同的三个 condition。没有 `services.http` 时，它以 `Ready=False, Progressing=False, Degraded=False` 表示主动停服；Deployment 或路由尚未收敛时为 Progressing；派生资源无效、全局 HTTP 发布关闭或路由明确拒绝时为 Degraded。
+ProxyMirror 使用相同的三个 condition。没有 `publish.http` 时，它以 `Ready=False, Progressing=False, Degraded=False` 表示主动停服；Deployment 或路由尚未收敛时为 Progressing；派生资源无效、全局 HTTP 发布关闭或路由明确拒绝时为 Degraded。
 
 ### Events
 

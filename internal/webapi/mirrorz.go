@@ -32,6 +32,7 @@ type mirrorzSite struct {
 	URL  string `json:"url"`
 	Abbr string `json:"abbr"`
 	Name string `json:"name,omitempty"`
+	Logo string `json:"logo,omitempty"`; LogoDarkmode string `json:"logo_darkmode,omitempty"`; Homepage string `json:"homepage,omitempty"`; Issue string `json:"issue,omitempty"`; Request string `json:"request,omitempty"`; Email string `json:"email,omitempty"`; Group string `json:"group,omitempty"`; Disk string `json:"disk,omitempty"`; Note string `json:"note,omitempty"`; Big string `json:"big,omitempty"`; Disable bool `json:"disable,omitempty"`
 }
 
 type mirrorzMirror struct {
@@ -98,7 +99,7 @@ func mirrorzStatusForMirror(m *mirrorv1alpha1.Mirror) string {
 		status = appendToken(status, "O", st.LastPublishedAt)
 		return appendCreationToken(status, m.CreationTimestamp)
 	}
-	if m.Spec.Paused {
+	if m.Spec.Sync.Paused {
 		// mirrorz-monitor uses the P timestamp as a freshness fallback. Report
 		// the immutable publication's activation time so a paused but still
 		// usable endpoint is judged by the content it actually serves.
@@ -219,7 +220,7 @@ func (s *Server) handleMirrorZ(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, "application/json", doc)
+	writeJSON(w, http.StatusOK, doc)
 }
 
 // listAll lists every Mirror and ProxyMirror across all namespaces.
@@ -253,7 +254,7 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 		// that the controller has declared Ready for this exact CR
 		// generation. Sync-only, disabled, stale and unhealthy endpoints are
 		// omitted so MirrorZ consumers are never directed to them.
-		if m.Spec.Services.HTTP == nil || !readyForCurrentGeneration(m.Status.Conditions, m.Generation) {
+		if m.Spec.Publish.HTTP == nil || !readyForCurrentGeneration(m.Status.Conditions, m.Generation) {
 			continue
 		}
 		entries = append(entries, mirrorzMirror{
@@ -267,7 +268,7 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 	}
 	for i := range proxies.Items {
 		p := &proxies.Items[i]
-		if p.Spec.Services.HTTP == nil || !readyForCurrentGeneration(p.Status.Conditions, p.Generation) {
+		if p.Spec.Publish.HTTP == nil || !readyForCurrentGeneration(p.Status.Conditions, p.Generation) {
 			continue
 		}
 		entries = append(entries, mirrorzMirror{
@@ -286,6 +287,7 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 			URL:  baseURL,
 			Abbr: s.Site.Abbr,
 			Name: s.Site.Name,
+			Logo:s.Site.Logo, LogoDarkmode:s.Site.LogoDarkmode, Homepage:s.Site.Homepage, Issue:s.Site.Issue, Request:s.Site.Request, Email:s.Site.Email, Group:s.Site.Group, Disk:s.Site.Disk, Note:s.Site.Note, Big:s.Site.Big, Disable:s.Site.Disable,
 		},
 		Info:    []struct{}{},
 		Mirrors: entries,

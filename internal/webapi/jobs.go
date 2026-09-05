@@ -109,7 +109,7 @@ func mirrorPresentationPhase(m *mirrorv1alpha1.Mirror) string {
 		}
 		return mirrorv1alpha1.PhaseSyncing
 	}
-	if m.Spec.Paused {
+	if m.Spec.Sync.Paused {
 		return mirrorv1alpha1.PhasePaused
 	}
 	if degraded != nil && degraded.Status == metav1.ConditionTrue {
@@ -143,7 +143,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, "application/json", entries)
+	writeJSON(w, http.StatusOK, entries)
 }
 
 func (s *Server) listJobs(ctx context.Context) ([]JobEntry, error) {

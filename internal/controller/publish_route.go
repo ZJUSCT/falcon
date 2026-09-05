@@ -21,7 +21,7 @@ import (
 	"github.com/ZJUSCT/falcon/internal/config"
 )
 
-// Publish service keys allowed under spec.services. Only an enabled "http"
+// Publish service keys allowed under spec.publish. Only an enabled "http"
 // service gets a publish HTTPRoute; "rsync" is exposed through its Service
 // only (no route, no TCPRoute). "git" is not a key on purpose: git publishing
 // uses HTTP (a fastcgi-style container) expressed through the "http" key.
@@ -66,7 +66,7 @@ func publishAppProtocol(protocol string) *string {
 // publishHTTPEnabled reports whether the "http" publish service is enabled —
 // the only service that receives a publish HTTPRoute.
 func publishHTTPEnabled(mirror *mirrorv1alpha1.Mirror) bool {
-	return mirror.Spec.Services.HTTP != nil
+	return mirror.Spec.Publish.HTTP != nil
 }
 
 // validatePublishPodTemplate checks the user-written pod template of an
@@ -142,7 +142,14 @@ func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record
 
 	op, err := controllerutil.CreateOrUpdate(ctx, c, route, func() error {
 		route.Labels = labels
-		route.Annotations = maps.Clone(cfg.Publish.Annotations)
+		// Keep an absent annotations field absent. Assigning a non-nil empty map
+		// makes the API server persist `{}`, after which every reconcile compares
+		// it with the desired empty map and writes the HTTPRoute again.
+		if len(cfg.Publish.Annotations) == 0 {
+			route.Annotations = nil
+		} else {
+			route.Annotations = maps.Clone(cfg.Publish.Annotations)
+		}
 		route.Spec = gatewayv1.HTTPRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{publishGatewayParentRef(cfg, owner.GetNamespace())},
@@ -158,6 +165,7 @@ func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record
 							Name:  gatewayv1.ObjectName(httpServiceName),
 							Port:  ptr.To(gatewayv1.PortNumber(publishServicePort)),
 						},
+						Weight: ptr.To(int32(1)), // Gateway API defaults this to 1; set it explicitly for idempotence.
 					},
 				}},
 			}},
@@ -253,7 +261,7 @@ func deletePublishRouteFor(ctx context.Context, c client.Client, owner client.Ob
 // in declaration order. The rsync service has no path representation.
 func mirrorRoutePaths(mirror *mirrorv1alpha1.Mirror) []string {
 	paths := []string{"/" + mirror.Name}
-	if http := mirror.Spec.Services.HTTP; http != nil {
+	if http := mirror.Spec.Publish.HTTP; http != nil {
 		for _, alias := range http.Aliases {
 			paths = append(paths, string(alias))
 		}

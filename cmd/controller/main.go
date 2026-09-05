@@ -31,14 +31,11 @@ import (
 
 var scheme = runtime.NewScheme()
 
-func init() {
+func main() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(snapshotv1.AddToScheme(scheme))
-	utilruntime.Must(gatewayv1.AddToScheme(scheme))
+	utilruntime.Must(gatewayv1.Install(scheme))
 	utilruntime.Must(mirrorv1alpha1.AddToScheme(scheme))
-}
-
-func main() {
 	// The Deployment carries no business flags: everything lives in the
 	// config file (mounted from the falcon-config ConfigMap).
 	var configPath string
@@ -128,7 +125,7 @@ func main() {
 	if cfg.API.WebapiBindAddress != "0" {
 		apiServer := &webapi.Server{
 			Client:           mgr.GetClient(),
-			Site:             webapi.SiteConfig{URL: cfg.Site.URL, Abbr: cfg.Site.Abbr, Name: cfg.Site.Name},
+			Site: webapi.SiteConfig{URL: cfg.Site.URL, Abbr: cfg.Site.Abbr, Name: cfg.Site.Name, Logo: cfg.Site.Logo, LogoDarkmode: cfg.Site.LogoDarkmode, Homepage: cfg.Site.Homepage, Issue: cfg.Site.Issue, Request: cfg.Site.Request, Email: cfg.Site.Email, Group: cfg.Site.Group, Disk: cfg.Site.Disk, Note: cfg.Site.Note, Big: cfg.Site.Big, Disable: cfg.Site.Disable},
 			PublishHostnames: cfg.Publish.Hostnames,
 			CatalogEnabled:   cfg.Catalog.Enabled,
 		}

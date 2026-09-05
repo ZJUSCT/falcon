@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,17 +70,17 @@ func (r *ProxyMirrorReconciler) ensureCachePVC(ctx context.Context, proxy *mirro
 }
 
 func (r *ProxyMirrorReconciler) cleanupDisabledProxyChildren(ctx context.Context, proxy *mirrorv1alpha1.ProxyMirror) error {
-	if proxy.Spec.Services.HTTP == nil {
+	if proxy.Spec.Publish.HTTP == nil {
 		if err := deletePublishEntry(ctx, r.Client, proxy, PublishProtocolHTTP); err != nil {
 			return err
 		}
 	}
-	if proxy.Spec.Services.HTTP == nil || !r.Config.PublishEnabled() {
+	if proxy.Spec.Publish.HTTP == nil || !r.Config.PublishEnabled() {
 		if err := deletePublishRouteFor(ctx, r.Client, proxy); err != nil {
 			return err
 		}
 	}
-	if proxy.Spec.Services.HTTP == nil || !proxyCacheEnabled(proxy) {
+	if proxy.Spec.Publish.HTTP == nil || !proxyCacheEnabled(proxy) {
 		claim := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 			Namespace: proxy.Namespace,
 			Name:      resourceName(childBase(proxy.Name), "cache"),
@@ -98,14 +99,14 @@ func (r *ProxyMirrorReconciler) cleanupDisabledProxyChildren(ctx context.Context
 }
 
 // ensureProxyPublish maintains the Deployment and Service of the ENABLED
-// spec.services.http entry of a ProxyMirror (the key is enabled when present).
+// spec.publish.http entry of a ProxyMirror (the key is enabled when present).
 // It mirrors the Mirror publish entry, minus the data volume: a proxy has no
 // snapshot-derived data PVC — only the optional writable cache (injected as
 // the reserved `proxy-cache` volume, volumes only, when enabled). The pair is
 // named `<base>-publish-http` with per-service pod labels. It reports the
 // Deployment's rollout readiness.
 func (r *ProxyMirrorReconciler) ensureProxyPublish(ctx context.Context, proxy *mirrorv1alpha1.ProxyMirror) (bool, error) {
-	http := proxy.Spec.Services.HTTP
+	http := proxy.Spec.Publish.HTTP
 	if http == nil {
 		return true, nil
 	}

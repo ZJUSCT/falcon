@@ -46,7 +46,7 @@ type ProxyMirrorProxySpec struct {
 }
 
 // ProxyMirrorServiceSpec is the HTTP publish service of a ProxyMirror,
-// addressed by the fixed "http" key under spec.services. The key is enabled
+// addressed by the fixed "http" key under spec.publish. The key is enabled
 // when it appears (a valid enable requires podTemplate.spec, CEL-enforced) and disabled when absent. A proxy
 // has no data volume to mount; when the cache is enabled the WRITABLE
 // `proxy-cache` PVC volume is injected into spec.volumes only — mounting it,
@@ -77,18 +77,18 @@ type ProxyMirrorServicesSpec struct {
 }
 
 // ProxyMirrorSpec groups the proxy mirror configuration. ProxyMirror has no
-// paused concept (unlike Mirror); removing services.http takes its endpoint
+// paused concept; removing publish.http takes its endpoint
 // offline while preserving the CR.
 type ProxyMirrorSpec struct {
 	Info  ProxyMirrorInfo      `json:"info"`
 	Proxy ProxyMirrorProxySpec `json:"proxy,omitempty"`
-	// Services declares the publish workload through the fixed "http" key
+	// Publish declares the publish workload through the fixed "http" key
 	// (see ProxyMirrorServicesSpec). With the key absent (including an
 	// entirely absent services object) nothing is deployed: the proxy is not
 	// published. An enabled http service gets Deployment/Service
 	// `<name>-publish-http` plus the publish HTTPRoute (once Ready).
 	// +optional
-	Services ProxyMirrorServicesSpec `json:"services,omitempty"`
+	Publish ProxyMirrorServicesSpec `json:"publish,omitempty"`
 }
 
 type ProxyMirrorStatus struct {

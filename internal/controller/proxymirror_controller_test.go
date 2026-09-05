@@ -45,7 +45,7 @@ func testProxyMirror() *mirrorv1alpha1.ProxyMirror {
 					Size:             resource.MustParse("100Gi"),
 				},
 			},
-			Services: mirrorv1alpha1.ProxyMirrorServicesSpec{
+			Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{
 				HTTP: &mirrorv1alpha1.ProxyMirrorServiceSpec{
 					PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
@@ -66,7 +66,7 @@ func testProxyScheme(t *testing.T) *runtime.Scheme {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("add core scheme: %v", err)
 	}
-	if err := gatewayv1.AddToScheme(scheme); err != nil {
+	if err := gatewayv1.Install(scheme); err != nil {
 		t.Fatalf("add gateway scheme: %v", err)
 	}
 	if err := mirrorv1alpha1.AddToScheme(scheme); err != nil {
@@ -211,8 +211,8 @@ func TestProxyMirrorInvalidCacheSpecIsDegraded(t *testing.T) {
 // no publish workload or cache is retained.
 func TestProxyMirrorDisabledHTTPDeploysNothing(t *testing.T) {
 	for name, mutate := range map[string]func(*mirrorv1alpha1.ProxyMirror){
-		"absent-services": func(p *mirrorv1alpha1.ProxyMirror) { p.Spec.Services = mirrorv1alpha1.ProxyMirrorServicesSpec{} },
-		"absent-http-key": func(p *mirrorv1alpha1.ProxyMirror) { p.Spec.Services.HTTP = nil },
+		"absent-services": func(p *mirrorv1alpha1.ProxyMirror) { p.Spec.Publish = mirrorv1alpha1.ProxyMirrorServicesSpec{} },
+		"absent-http-key": func(p *mirrorv1alpha1.ProxyMirror) { p.Spec.Publish.HTTP = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
@@ -251,7 +251,7 @@ func TestProxyMirrorDisabledHTTPDeploysNothing(t *testing.T) {
 // declare a volume named proxy-cache (the controller injects it itself).
 func TestProxyMirrorReservedCacheVolumeRejected(t *testing.T) {
 	proxy := testProxyMirror()
-	proxy.Spec.Services.HTTP.PodTemplate.Spec.Volumes = []corev1.Volume{{
+	proxy.Spec.Publish.HTTP.PodTemplate.Spec.Volumes = []corev1.Volume{{
 		Name:         "proxy-cache",
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	}}

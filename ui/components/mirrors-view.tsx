@@ -212,9 +212,6 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                     >
                       <td className="px-3 py-2 align-top">
                         <div className="font-mono text-sm">{job.id}</div>
-                        {job.namespace && (
-                          <div className="mt-0.5 text-[11px] text-muted-foreground font-mono">{job.namespace}</div>
-                        )}
                         <div className="mt-0.5 text-[11px] text-muted-foreground md:hidden">
                           <span className="uppercase tracking-wide">Next </span>
                           <RelativeTime date={job.next_attempt_at} variant="countdown" />

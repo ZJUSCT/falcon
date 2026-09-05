@@ -74,9 +74,7 @@ spec:
                 - name
                 - upstream
                 type: object
-              paused:
-                type: boolean
-              services:
+              publish:
                 description: |-
                   Services declares how the active snapshot clone is published, through
                   the fixed keys "http" and "rsync" (see MirrorServicesSpec). With every
@@ -17472,8 +17470,12 @@ spec:
                   Job, symmetric to the publish services' podTemplate. There are no placement
                   fields: sync pods reference the sync PVC, so the scheduler handles locality
                   natively (WaitForFirstConsumer decides the volume's node on first supply;
-                  the bound PV's nodeAffinity pins every later sync pod) — see spec/k8s.md.
+                  the bound PV's nodeAffinity pins every later sync pod) — see
+                  docs/spec/k8s.md.
                 properties:
+                  paused:
+                    description: Prevents new synchronization runs while preserving published content.
+                    type: boolean
                   failureRetryLimit:
                     default: 3
                     description: |-

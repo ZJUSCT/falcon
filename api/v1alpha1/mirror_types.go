@@ -41,8 +41,11 @@ type MirrorInfo struct {
 // Job, symmetric to the publish services' podTemplate. There are no placement
 // fields: sync pods reference the sync PVC, so the scheduler handles locality
 // natively (WaitForFirstConsumer decides the volume's node on first supply;
-// the bound PV's nodeAffinity pins every later sync pod) — see spec/k8s.md.
+// the bound PV's nodeAffinity pins every later sync pod) — see docs/spec/k8s.md.
 type MirrorSyncSpec struct {
+	// Paused prevents the controller from starting new synchronization runs.
+	// Published content and its serving workloads remain available.
+	Paused bool `json:"paused,omitempty"`
 	Interval metav1.Duration `json:"interval"`
 	// RetryInterval is the delay before the next synchronization attempt
 	// after a *failed* run. It applies while status.consecutiveFailures is
@@ -113,10 +116,10 @@ type MirrorStorageSpec struct {
 }
 
 // MirrorServiceSpec is one publish service of a Mirror, addressed by a fixed
-// key under spec.services ("http" or "rsync"). There is no third "git" key on
+// key under spec.publish ("http" or "rsync"). There is no third "git" key on
 // purpose: git publishing uses HTTP (a fastcgi-style container behind
 // the web server), so it is expressed through the "http" key. A key that
-// appears under spec.services is ENABLED — a valid enable requires podTemplate.spec (CEL-enforced, an empty block is rejected at admission); an absent
+// appears under spec.publish is ENABLED — a valid enable requires podTemplate.spec (CEL-enforced, an empty block is rejected at admission); an absent
 // key is disabled. Each enabled service gets a Deployment and a Service named
 // `<mirror>-publish-<key>`; only an enabled "http" service additionally gets
 // the publish HTTPRoute (rsync is Service-only; a future RsyncRoute is out of
@@ -190,18 +193,17 @@ func (s MirrorServicesSpec) AnyEnabled() bool {
 }
 
 type MirrorSpec struct {
-	Paused  bool              `json:"paused,omitempty"`
 	Info    MirrorInfo        `json:"info"`
 	Sync    MirrorSyncSpec    `json:"sync"`
 	Storage MirrorStorageSpec `json:"storage"`
-	// Services declares how the active snapshot clone is published, through
+	// Publish declares how the active snapshot clone is published, through
 	// the fixed keys "http" and "rsync" (see MirrorServicesSpec). With every
 	// key absent (including an entirely absent services object) the mirror
 	// is sync-only: the sync/snapshot pipeline still runs and the publish PVC
 	// is still produced, but no publish Deployment/Service/HTTPRoute is
 	// created.
 	// +optional
-	Services MirrorServicesSpec `json:"services,omitempty"`
+	Publish MirrorServicesSpec `json:"publish,omitempty"`
 }
 
 type MirrorSyncStatus struct {

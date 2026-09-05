@@ -122,7 +122,7 @@ func TestHostOnlyStripsPort(t *testing.T) {
 	}
 }
 
-// httpService is the enabled (declared) http spec.services key the catalog
+// httpService is the enabled (declared) http spec.publish key the catalog
 // fixtures use (a Mirror with every key absent is sync-only and must be
 // omitted).
 func httpService() mirrorv1alpha1.MirrorServicesSpec {
@@ -153,7 +153,7 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 				Description: localized("Debian 发行版软件包镜像", "Debian archive mirror"),
 				Upstream:    "rsync://ftp.debian.org/debian/",
 			},
-			Services: httpService(),
+			Publish: httpService(),
 		},
 		Status: mirrorv1alpha1.MirrorStatus{
 			ActivePVC:  "debian-sync-1",
@@ -167,7 +167,7 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 		ObjectMeta: metav1.ObjectMeta{Name: "ubuntu", Namespace: "mirrors"},
 		Spec: mirrorv1alpha1.MirrorSpec{
 			Info:     mirrorv1alpha1.MirrorInfo{Upstream: "rsync://archive.ubuntu.com/ubuntu/"},
-			Services: httpService(),
+			Publish: httpService(),
 		},
 		Status: mirrorv1alpha1.MirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionFalse)}},
 	}
@@ -182,7 +182,7 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 	}
 	syncing := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "arch", Namespace: "mirrors"},
-		Spec:       mirrorv1alpha1.MirrorSpec{Services: httpService()},
+		Spec:       mirrorv1alpha1.MirrorSpec{Publish: httpService()},
 		Status: mirrorv1alpha1.MirrorStatus{
 			ActivePVC:   "arch-sync-2",
 			CurrentSync: &mirrorv1alpha1.MirrorCurrentSyncStatus{},
@@ -196,7 +196,7 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 				Description: localized("PyPI 缓存代理", "Caching proxy for PyPI"),
 				Upstream:    "https://pypi.org/simple/",
 			},
-			Services: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: &mirrorv1alpha1.ProxyMirrorServiceSpec{}},
+			Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: &mirrorv1alpha1.ProxyMirrorServiceSpec{}},
 		},
 		Status: mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
 	}
@@ -345,7 +345,7 @@ func singleMirrorServer(t *testing.T, hostnames []string) *Server {
 	t.Helper()
 	m := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors"},
-		Spec:       mirrorv1alpha1.MirrorSpec{Services: httpService()},
+		Spec:       mirrorv1alpha1.MirrorSpec{Publish: httpService()},
 		Status: mirrorv1alpha1.MirrorStatus{
 			ActivePVC:  "debian-sync-1",
 			LastSync:   &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded},

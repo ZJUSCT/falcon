@@ -87,5 +87,5 @@ func (s *Server) writeSpec(w http.ResponseWriter, asYAML bool, spec interface{})
 		_, _ = w.Write(data)
 		return
 	}
-	writeJSON(w, http.StatusOK, "application/json", spec)
+	writeJSON(w, http.StatusOK, spec)
 }

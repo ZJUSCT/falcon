@@ -73,15 +73,15 @@ func (r *ProxyMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		logger.Info("ProxyMirror specification is invalid", "errors", message)
 		return r.patchStatus(ctx, proxy, func() {
 			proxy.Status.ObservedGeneration = proxy.Generation
-			setProxyCondition(proxy, conditionReady, conditionStatus(proxy.Spec.Services.HTTP != nil && proxyWasReady(proxy)), "InvalidSpec", message)
+			setProxyCondition(proxy, conditionReady, conditionStatus(proxy.Spec.Publish.HTTP != nil && proxyWasReady(proxy)), "InvalidSpec", message)
 			setProxyCondition(proxy, conditionProgressing, metav1.ConditionFalse, "InvalidSpec", message)
 			setProxyCondition(proxy, conditionDegraded, metav1.ConditionTrue, "InvalidSpec", message)
 		})
 	}
-	if proxy.Spec.Services.HTTP == nil {
+	if proxy.Spec.Publish.HTTP == nil {
 		return r.patchStatus(ctx, proxy, func() {
 			proxy.Status.ObservedGeneration = proxy.Generation
-			setProxyCondition(proxy, conditionReady, metav1.ConditionFalse, "HTTPDisabled", "spec.services.http is not configured")
+			setProxyCondition(proxy, conditionReady, metav1.ConditionFalse, "HTTPDisabled", "spec.publish.http is not configured")
 			setProxyCondition(proxy, conditionProgressing, metav1.ConditionFalse, "HTTPDisabled", "no publish service is requested")
 			setProxyCondition(proxy, conditionDegraded, metav1.ConditionFalse, "HTTPDisabled", "")
 		})
@@ -170,7 +170,7 @@ func validateProxyMirror(proxy *mirrorv1alpha1.ProxyMirror) field.ErrorList {
 	var errs field.ErrorList
 	// Only an ENABLED http service is validated (an absent key may park
 	// nothing — absent = disabled).
-	if http := proxy.Spec.Services.HTTP; http != nil {
+	if http := proxy.Spec.Publish.HTTP; http != nil {
 		errs = append(errs, validatePublishPodTemplate(&http.PodTemplate,
 			path.Child("services", "http", "podTemplate"), ProxyCacheVolumeName)...)
 	}

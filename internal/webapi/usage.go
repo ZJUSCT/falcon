@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode"
 
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,7 +22,6 @@ import (
 
 	mirrorv1alpha1 "github.com/ZJUSCT/falcon/api/v1alpha1"
 	"github.com/ZJUSCT/falcon/internal/zfsagent"
-	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 )
 
 // The zfs-agent contract is deliberately not configurable: the port and the
@@ -526,5 +526,5 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, "application/json", usage)
+	writeJSON(w, http.StatusOK, usage)
 }

@@ -187,6 +187,12 @@ site:
   {{- with $cfg.site.name }}
   name: {{ . | quote }}
   {{- end }}
+  {{- range $k := list "logo" "logo_darkmode" "homepage" "issue" "request" "email" "group" "disk" "note" "big" }}
+  {{- with index $cfg.site $k }}
+  {{ $k }}: {{ . | quote }}
+  {{- end }}
+  {{- end }}
+  disable: {{ $cfg.site.disable | default false }}
 catalog:
   enabled: {{ $cfg.catalog.enabled }}
 sync:

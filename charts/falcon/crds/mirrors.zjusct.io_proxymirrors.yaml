@@ -110,7 +110,7 @@ spec:
                         type: string
                     type: object
                 type: object
-              services:
+              publish:
                 description: |-
                   Services declares the publish workload through the fixed "http" key
                   (see ProxyMirrorServicesSpec). With the key absent (including an
@@ -121,7 +121,7 @@ spec:
                   http:
                     description: |-
                       ProxyMirrorServiceSpec is the HTTP publish service of a ProxyMirror,
-                      addressed by the fixed "http" key under spec.services. The key is enabled
+                      addressed by the fixed "http" key under spec.publish. The key is enabled
                       when it appears (a valid enable requires podTemplate.spec, CEL-enforced) and disabled when absent. A proxy
                       has no data volume to mount; when the cache is enabled the WRITABLE
                       `proxy-cache` PVC volume is injected into spec.volumes only — mounting it,

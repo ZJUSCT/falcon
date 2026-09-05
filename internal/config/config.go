@@ -61,6 +61,17 @@ type Config struct {
 		URL  string `json:"url"`
 		Abbr string `json:"abbr,omitempty"`
 		Name string `json:"name,omitempty"`
+		Logo string `json:"logo,omitempty"`
+		LogoDarkmode string `json:"logo_darkmode,omitempty"`
+		Homepage string `json:"homepage,omitempty"`
+		Issue string `json:"issue,omitempty"`
+		Request string `json:"request,omitempty"`
+		Email string `json:"email,omitempty"`
+		Group string `json:"group,omitempty"`
+		Disk string `json:"disk,omitempty"`
+		Note string `json:"note,omitempty"`
+		Big string `json:"big,omitempty"`
+		Disable bool `json:"disable,omitempty"`
 	} `json:"site"`
 
 	Catalog struct {
@@ -79,9 +90,11 @@ type Config struct {
 
 // Default returns a Config filled with the built-in defaults. Load applies the
 // same defaults after decoding, so a sparse file yields a usable config.
+const defaultLogLevel = "info"
+
 func Default() *Config {
 	cfg := &Config{}
-	cfg.Log.Level = "info"
+	cfg.Log.Level = defaultLogLevel
 	cfg.API.MetricsBindAddress = ":8080"
 	cfg.API.HealthProbeBindAddress = ":8081"
 	cfg.API.WebapiBindAddress = ":8082"
