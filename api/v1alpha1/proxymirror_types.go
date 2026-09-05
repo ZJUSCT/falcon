@@ -2,7 +2,6 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -29,13 +28,10 @@ type ProxyMirrorInfo struct {
 type ProxyMirrorCacheSpec struct {
 	// +kubebuilder:default=false
 	Enabled *bool `json:"enabled,omitempty"`
-	// StorageClassName provisions the cache PVC via a standard StorageClass.
-	// Required when Enabled is true; validated by the controller (Degraded).
-	// +optional
-	StorageClassName string `json:"storageClassName,omitempty"`
-	// Size is the requested cache PVC capacity. Required when Enabled is true.
-	// +optional
-	Size resource.Quantity `json:"size,omitempty"`
+	// PVCSpec is the canonical Kubernetes PVC specification for the cache.
+	// Falcon manages the claim name and rejects binding/source fields that do
+	// not apply to this generated cache PVC.
+	PVCSpec corev1.PersistentVolumeClaimSpec `json:"pvcTemplate"`
 }
 
 // ProxyMirrorProxySpec groups proxy-specific behaviour. Cache bypass lists and
@@ -59,10 +55,8 @@ type ProxyMirrorServiceSpec struct {
 	Replicas *int32 `json:"replicas,omitempty"`
 	// PodTemplate is the FULL pod template of the publish Deployment
 	// (Deployment .spec.template). The controller forces the naming/label/
-	// selector identity and injects defaults only where the template is
-	// silent (TCP readiness probe on the first container port, a /tmp
-	// emptyDir, readOnlyRootFilesystem and the restricted-profile security
-	// defaults); the optional cache PVC is still provisioned and injected as
+	// selector identity; no workload fields are defaulted or rewritten. The
+	// optional cache PVC is still provisioned and injected as
 	// the reserved `proxy-cache` volume (volumes only — no mount) when
 	// spec.proxy.cache.enabled is true.
 	// +optional

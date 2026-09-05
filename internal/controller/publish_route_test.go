@@ -297,15 +297,16 @@ func TestMirrorDataVolumeInjectedVolumeOnly(t *testing.T) {
 	if volume == nil || volume.PersistentVolumeClaim == nil || !volume.PersistentVolumeClaim.ReadOnly {
 		t.Fatalf("mirror-data volume source must be a read-only PVC reference, got %#v", volume)
 	}
-	// The user-declared mount is preserved verbatim; the controller appended
-	// nothing except the default /tmp emptyDir mount.
+	// The user-declared mount is preserved verbatim; the controller appends
+	// nothing of its own (no /tmp emptyDir mount since workload defaults were
+	// dropped).
 	mount := findMount(deployment.Spec.Template.Spec.Containers[0], "mirror-data")
 	if mount == nil || mount.MountPath != "/srv/www/debian" || !mount.ReadOnly {
 		t.Fatalf("user mirror-data mount = %#v, want preserved read-only /srv/www/debian", mount)
 	}
 	mounts := deployment.Spec.Template.Spec.Containers[0].VolumeMounts
-	if len(mounts) != 2 || mounts[0].MountPath != "/srv/www/debian" || mounts[1].MountPath != "/tmp" {
-		t.Fatalf("the controller must append only the default /tmp mount, got %#v", mounts)
+	if len(mounts) != 1 || mounts[0].MountPath != "/srv/www/debian" {
+		t.Fatalf("the controller must append no mounts of its own, got %#v", mounts)
 	}
 
 	// A template silent about mirror-data gets the volume anyway — and no
@@ -341,9 +342,9 @@ func TestMirrorDataVolumeInjectedVolumeOnly(t *testing.T) {
 
 // TestServicesRenderPerKey: every ENABLED fixed key gets its own Deployment
 // and Service named <base>-publish-<key> with per-service pod labels, but only
-// the "http" key gets the publish HTTPRoute. The first container port is
-// renamed to the key and targeted by the Service; the rsync Service carries no
-// appProtocol.
+// the "http" key gets the publish HTTPRoute. Declared container ports are
+// preserved verbatim and the Service targets the first one by number; the
+// rsync Service carries no appProtocol.
 func TestServicesRenderPerKey(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
@@ -396,8 +397,8 @@ func TestServicesRenderPerKey(t *testing.T) {
 	}
 	rsyncContainer := rsyncDeployment.Spec.Template.Spec.Containers[0]
 	rsyncPorts := rsyncContainer.Ports
-	if len(rsyncPorts) != 2 || rsyncPorts[0].Name != "rsync" || rsyncPorts[0].ContainerPort != 8730 || rsyncPorts[1].Name != "metrics" {
-		t.Fatalf("rsync container ports = %#v; want the first port renamed to rsync and the second kept", rsyncPorts)
+	if len(rsyncPorts) != 2 || rsyncPorts[0].Name != "ignored" || rsyncPorts[0].ContainerPort != 8730 || rsyncPorts[1].Name != "metrics" {
+		t.Fatalf("rsync container ports = %#v; want the declared ports preserved", rsyncPorts)
 	}
 	// The controller injects the mirror-data volume only: no mount of it is
 	// added to the rsync container either.
@@ -419,8 +420,8 @@ func TestServicesRenderPerKey(t *testing.T) {
 	if rsyncService.Spec.Ports[0].AppProtocol != nil {
 		t.Fatalf("rsync Service appProtocol = %v, want unset", rsyncService.Spec.Ports[0].AppProtocol)
 	}
-	if rsyncService.Spec.Ports[0].TargetPort.Type != intstr.String || rsyncService.Spec.Ports[0].TargetPort.StrVal != "rsync" {
-		t.Fatalf("rsync Service targetPort = %#v, want named port rsync", rsyncService.Spec.Ports[0].TargetPort)
+	if rsyncService.Spec.Ports[0].TargetPort.Type != intstr.Int || rsyncService.Spec.Ports[0].TargetPort.IntVal != 8730 {
+		t.Fatalf("rsync Service targetPort = %#v, want the declared first container port by number", rsyncService.Spec.Ports[0].TargetPort)
 	}
 
 	// The single route (created with the workload) targets the http service.
@@ -579,69 +580,26 @@ func TestAbsentOrDisabledServicesCreateNoWorkload(t *testing.T) {
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, &gatewayv1.HTTPRoute{})
 }
 
-// TestPublishDefaultsInjectedWhereSilent pins the default injections into a
-// bare user pod template: TCP readiness probe on the renamed first port, /tmp
-// emptyDir, readOnlyRootFilesystem, allowPrivilegeEscalation false, drop ALL,
-// runAsNonRoot, seccomp RuntimeDefault, automountServiceAccountToken false.
-func TestPublishDefaultsInjectedWhereSilent(t *testing.T) {
+// TestPublishTemplateIsPreserved verifies Falcon leaves operator workload fields unchanged.
+func TestPublishTemplateIsPreserved(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
 	mirror.Finalizers = []string{MirrorFinalizer}
-	mirror.Status = mirrorv1alpha1.MirrorStatus{
-		ObservedGeneration: mirror.Generation,
-		WorkPVC:            "smoke-sync",
-		ActivePVC:          "smoke-snap-1756147200",
-	}
+	mirror.Status = mirrorv1alpha1.MirrorStatus{ObservedGeneration: mirror.Generation, WorkPVC: "smoke-sync", ActivePVC: "smoke-snap-1756147200"}
 	scheme := testScheme(t)
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
-		WithObjects(mirror).
-		Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).WithObjects(mirror).Build()
 	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
-	reconciler := &MirrorReconciler{
-		Client: fakeClient, Scheme: scheme,
-		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
-	}
+	reconciler := &MirrorReconciler{Client: fakeClient, Scheme: scheme, Config: testConfig(), SyncLimiter: NewSyncLimiter(0)}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
 	reconcile(t, ctx, reconciler, request)
-
 	deployment := &appsv1.Deployment{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
-	podSpec := deployment.Spec.Template.Spec
-	if ptr.Deref(podSpec.AutomountServiceAccountToken, true) {
-		t.Fatal("automountServiceAccountToken must default to false")
+	first := deployment.Spec.Template.Spec.Containers[0]
+	if first.ReadinessProbe != nil || first.SecurityContext != nil || deployment.Spec.Template.Spec.SecurityContext != nil {
+		t.Fatalf("Falcon must preserve absent workload defaults: %#v", deployment.Spec.Template.Spec)
 	}
-	if !ptr.Deref(podSpec.SecurityContext.RunAsNonRoot, false) {
-		t.Fatal("runAsNonRoot must default to true")
-	}
-	if podSpec.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
-		t.Fatalf("seccomp must default to RuntimeDefault, got %v", podSpec.SecurityContext.SeccompProfile.Type)
-	}
-	first := podSpec.Containers[0]
-	if !ptr.Deref(first.SecurityContext.ReadOnlyRootFilesystem, false) {
-		t.Fatal("readOnlyRootFilesystem must default to true")
-	}
-	if ptr.Deref(first.SecurityContext.AllowPrivilegeEscalation, true) {
-		t.Fatal("allowPrivilegeEscalation must default to false")
-	}
-	if len(first.SecurityContext.Capabilities.Drop) != 1 || first.SecurityContext.Capabilities.Drop[0] != "ALL" {
-		t.Fatalf("capabilities must default to drop ALL, got %#v", first.SecurityContext.Capabilities)
-	}
-	if first.ReadinessProbe == nil || first.ReadinessProbe.TCPSocket == nil {
-		t.Fatalf("a silent template must get the TCP readiness probe, got %#v", first.ReadinessProbe)
-	}
-	if got := first.ReadinessProbe.TCPSocket.Port.StrVal; got != "http" {
-		t.Fatalf("TCP readiness probe port = %q, want the renamed service-key port http", got)
-	}
-	if first.LivenessProbe != nil {
-		t.Fatalf("no liveness probe may be injected, got %#v", first.LivenessProbe)
-	}
-	if v := findVolume(podSpec.Volumes, "tmp"); v == nil || v.EmptyDir == nil {
-		t.Fatalf("a silent template must get the /tmp emptyDir volume, got %#v", v)
-	}
-	if m := findMount(first, "tmp"); m == nil || m.MountPath != "/tmp" {
-		t.Fatalf("a silent template must get the /tmp mount, got %#v", m)
+	if findVolume(deployment.Spec.Template.Spec.Volumes, "tmp") != nil {
+		t.Fatal("Falcon must not inject a tmp volume")
 	}
 }
 

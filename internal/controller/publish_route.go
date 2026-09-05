@@ -71,8 +71,8 @@ func publishHTTPEnabled(mirror *mirrorv1alpha1.Mirror) bool {
 
 // validatePublishPodTemplate checks the user-written pod template of an
 // enabled publish service: at least one container, whose first declared
-// container port becomes the Service target (the controller renames it to the
-// service key), and no user-declared volume clashing with a volume name the
+// container port becomes the Service target (targeted by number), and no
+// user-declared volume clashing with a volume name the
 // controller injects itself. The CRD additionally enforces the
 // declaration-time podTemplate.spec presence rule at admission; the
 // controller-side check keeps the InvalidSpec path complete for specs that
@@ -86,7 +86,7 @@ func validatePublishPodTemplate(template *corev1.PodTemplateSpec, path *field.Pa
 	}
 	if len(containers[0].Ports) == 0 {
 		errs = append(errs, field.Required(path.Child("spec", "containers").Index(0).Child("ports"),
-			"must declare at least one container port on the first container (the first port is the Service target and is renamed to the service key)"))
+			"must declare at least one container port on the first container (the first port is the Service target)"))
 	}
 	reserved := make(map[string]bool, len(reservedVolumeNames))
 	for _, name := range reservedVolumeNames {

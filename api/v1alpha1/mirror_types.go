@@ -2,7 +2,6 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -72,14 +71,13 @@ type MirrorSyncSpec struct {
 	// PodTemplate is the FULL pod template of the sync Job (Job
 	// .spec.template): the user declares every container, image, command,
 	// args, env, probe, volume and so on — ConfigMap/Secret inputs included,
-	// as plain volumes/mounts. The controller forces the sync pipeline
+	// as plain volumes/mounts. Falcon manages the sync pipeline
 	// identity (the WRITABLE `sync-data` PVC volume in spec.volumes —
 	// mounting it, and where, is the user's own declaration —,
-	// restartPolicy Never, the sync labels, the Job deadline) and injects
-	// defaults only where the template is silent (restricted-profile
-	// security defaults, a /tmp emptyDir, imagePullPolicy IfNotPresent). No
-	// probes or environment variables are injected: data location and every
-	// other input the sync process needs are explicit user declarations.
+	// restartPolicy Never, the sync labels, and the Job deadline). No workload
+	// fields are defaulted or rewritten: security context, filesystem, probes,
+	// image policy, environment, and all other inputs are explicit operator
+	// declarations.
 	// No placement is injected: volume locality is the scheduler's job.
 	// +optional
 	PodTemplate corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
@@ -93,20 +91,18 @@ type MirrorRetentionSpec struct {
 }
 
 type MirrorStorageSpec struct {
-	// StorageClassName provisions the stable sync PVC. A Retain policy is
-	// appropriate when synchronized data must survive accidental CR deletion.
-	StorageClassName string `json:"storageClassName"`
+	// PVCSpec contains common Kubernetes PVC properties for the sync and
+	// publish claims. StorageClassName is managed by the explicit fields below.
+	PVCSpec corev1.PersistentVolumeClaimSpec `json:"pvcTemplate"`
+	// SyncStorageClassName provisions the stable writable synchronization PVC.
+	SyncStorageClassName string `json:"syncStorageClassName"`
 	// PublishStorageClassName provisions disposable snapshot-derived
 	// publish PVCs. It must provision from the same storage backend and
-	// topology as StorageClassName (under local-PV semantics: the same node),
+	// topology as SyncStorageClassName (under local-PV semantics: the same node),
 	// otherwise the VolumeSnapshot `dataSource` clone cannot be provisioned.
 	// It normally uses reclaimPolicy: Delete so snapshot pruning reclaims the
-	// underlying backend volumes. When omitted, StorageClassName is used.
-	PublishStorageClassName string            `json:"publishStorageClassName,omitempty"`
-	Capacity                resource.Quantity `json:"capacity"`
-	// +kubebuilder:default=ReadWriteOnce
-	// +kubebuilder:validation:Enum=ReadWriteOnce;ReadWriteMany;ReadOnlyMany;ReadWriteOncePod
-	AccessMode corev1.PersistentVolumeAccessMode `json:"accessMode,omitempty"`
+	// underlying backend volumes. When omitted, SyncStorageClassName is used.
+	PublishStorageClassName string `json:"publishStorageClassName,omitempty"`
 	// VolumeSnapshotClassName snapshots the sync PVC after every successful
 	// sync; it must be served by the same storage backend as the
 	// StorageClasses above. Required: atomic publication depends on it.
@@ -132,13 +128,12 @@ type MirrorServiceSpec struct {
 	Replicas *int32 `json:"replicas,omitempty"`
 	// PodTemplate is the FULL pod template of the publish Deployment
 	// (Deployment .spec.template): the user declares every container, port,
-	// probe, volume, affinity and so on. The controller forces the
+	// probe, volume, affinity and so on. Falcon manages the
 	// data-integrity constraints (the read-only `mirror-data` publish PVC
 	// volume in spec.volumes — mounting it, and where, is the user's own
 	// declaration —, pod labels/annotations, placement, naming/selector
-	// identity) and injects defaults only where the template is silent (TCP
-	// readiness probe on the first container port, a /tmp emptyDir,
-	// readOnlyRootFilesystem and the restricted-profile security defaults).
+	// identity). No workload fields are defaulted or rewritten; the operator
+	// owns security context, probes, ports, filesystem, and sidecars.
 	// +optional
 	PodTemplate corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }

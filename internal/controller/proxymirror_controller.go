@@ -175,11 +175,17 @@ func validateProxyMirror(proxy *mirrorv1alpha1.ProxyMirror) field.ErrorList {
 			path.Child("services", "http", "podTemplate"), ProxyCacheVolumeName)...)
 	}
 	if proxyCacheEnabled(proxy) {
-		if proxy.Spec.Proxy.Cache.StorageClassName == "" {
-			errs = append(errs, field.Required(path.Child("proxy", "cache", "storageClassName"), "must not be empty when cache is enabled"))
+		cachePath := path.Child("proxy", "cache", "pvcTemplate")
+		spec := proxy.Spec.Proxy.Cache.PVCSpec
+		if len(spec.AccessModes) == 0 {
+			errs = append(errs, field.Required(cachePath.Child("accessModes"), "must declare at least one access mode when cache is enabled"))
 		}
-		if proxy.Spec.Proxy.Cache.Size.IsZero() || proxy.Spec.Proxy.Cache.Size.Sign() < 0 {
-			errs = append(errs, field.Invalid(path.Child("proxy", "cache", "size"), proxy.Spec.Proxy.Cache.Size.String(), "must be greater than zero when cache is enabled"))
+		requestedStorage := spec.Resources.Requests[corev1.ResourceStorage]
+		if requestedStorage.IsZero() || requestedStorage.Sign() < 0 {
+			errs = append(errs, field.Required(cachePath.Child("resources", "requests", string(corev1.ResourceStorage)), "must be greater than zero when cache is enabled"))
+		}
+		if spec.DataSource != nil || spec.DataSourceRef != nil || spec.VolumeName != "" || spec.Selector != nil {
+			errs = append(errs, field.Invalid(cachePath, spec, "dataSource, dataSourceRef, volumeName, and selector are unsupported for the cache PVC"))
 		}
 	}
 	return errs

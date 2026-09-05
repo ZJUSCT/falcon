@@ -84,13 +84,13 @@ Go 提交检查还需要本机安装 `golangci-lint`。pre-commit 会运行 `gol
 - e2e 测试 CI 化
 - Before the next OpenEBS ZFS LocalPV release: enable snapshotter creation metadata, verify ZFS annotations, and align Falcon zfs-agent handling
 
-## 与同步工具/容器的关系
+## 与同步/服务容器的关系
 
-同步的行为取决于具体的同步工具。Falcon 作为编排器，尽可能在这方面为各工具留出可配置的空间。
+同步/服务的行为取决于具体的同步工具。Falcon 作为编排器，尽可能在这方面为各工具留出可配置的空间。
 
 我们实际使用过 [tuna/tunasync-scripts](https://github.com/tuna/tunasync-scripts) 和 [ustclug/ustcmirror-images](https://github.com/ustclug/ustcmirror-images)，这里记录一些使用经验。
 
-### tunasync-scripts
+### 同步：tunasync-scripts
 
 TUNA 为裸机服务。该仓库由每个上游一个的独立同步脚本组成，Python、Shell Script 各半。这些脚本一致性较好，都按照 tunasync 的设计编写：
 
@@ -98,16 +98,20 @@ TUNA 为裸机服务。该仓库由每个上游一个的独立同步脚本组成
     - `TUNASYNC_WORKING_DIR`：内容输出目录
     - `TUNASYNC_UPSTREAM_URL`：上游地址
 - 日志：
-    - 输出统一：`echo` 到 stdout，能够由 K8s 可观测性基础设施直接收集
+    - 输出统一：`echo` 到 stdout，符合一般 K8s 应用的习惯，容易由可观测性基础设施直接收集
     - 格式统一：`%Y-%m-%dT%H:%M:%S - 文件:行号 [级别] 消息`
 - 退出码：脚本默认宽容部分同步的退出码，tunasync worker 除退出码外还按 `failOnMatch` 正则扫描日志判败
 
-### ustcmirror-images
+### 同步：ustcmirror-images
 
 USTC 全面容器化。不同的同步容器约定不同，但文档详尽。有大致统一的框架：
 
 - 在 `base` 镜像中固定 entry 为 `upstream.sh`、`pre-sync.sh`、`sync.sh` 等一系列固定流程
 - 日志统一文件写入 `/log`
+
+### HTTP 服务：nginx
+
+### Rsync 服务：rsyncd
 
 ## 许可证
 

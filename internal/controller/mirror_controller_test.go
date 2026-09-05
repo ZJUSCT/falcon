@@ -157,11 +157,11 @@ func TestAtomicPublicationUsesStableSyncPVCAndSnapshotClone(t *testing.T) {
 	if dataMount := findMount(deployment.Spec.Template.Spec.Containers[0], "mirror-data"); dataMount != nil {
 		t.Fatalf("the controller must not mount mirror-data itself, got %#v", dataMount)
 	}
-	// The first container port is the Service target; the controller renames
-	// it to the service key so the Service and probes reference a named port.
+	// Declared container ports remain operator-owned; the first one is the
+	// numeric Service target.
 	containerPorts := deployment.Spec.Template.Spec.Containers[0].Ports
-	if len(containerPorts) != 1 || containerPorts[0].Name != "http" || containerPorts[0].ContainerPort != 8080 {
-		t.Fatalf("publish container ports = %#v; want the single declared port renamed to http", containerPorts)
+	if len(containerPorts) != 1 || containerPorts[0].Name != "web" || containerPorts[0].ContainerPort != 8080 {
+		t.Fatalf("publish container ports = %#v; want the single declared port preserved", containerPorts)
 	}
 	if deployment.Spec.Template.Spec.NodeName != "" {
 		t.Fatalf("publish Deployment bypasses the scheduler with spec.nodeName %q", deployment.Spec.Template.Spec.NodeName)
@@ -306,10 +306,12 @@ func testMirror() *mirrorv1alpha1.Mirror {
 				}},
 			},
 			Storage: mirrorv1alpha1.MirrorStorageSpec{
-				StorageClassName:        "retain-class",
+				PVCSpec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
+				},
+				SyncStorageClassName:    "retain-class",
 				PublishStorageClassName: "delete-class",
-				Capacity:                resource.MustParse("1Gi"),
-				AccessMode:              corev1.ReadWriteOnce,
 				VolumeSnapshotClassName: "snapshot-class",
 				Retention:               mirrorv1alpha1.MirrorRetentionSpec{PreviousSnapshots: 1},
 			},
@@ -399,7 +401,7 @@ func TestSnapshotTimestampConflictDegradesAndKeepsTransaction(t *testing.T) {
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
-				corev1.ResourceStorage: mirror.Spec.Storage.Capacity.DeepCopy(),
+				corev1.ResourceStorage: mirror.Spec.Storage.PVCSpec.Resources.Requests[corev1.ResourceStorage].DeepCopy(),
 			}},
 		},
 	}
@@ -1089,18 +1091,12 @@ func TestSyncPodTemplateDefaultsAndInjection(t *testing.T) {
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncJobName(current)}, job)
 	podSpec := job.Spec.Template.Spec
 	first := podSpec.Containers[0]
-	// Silent fields got the sync defaults.
-	if first.ImagePullPolicy != corev1.PullIfNotPresent {
-		t.Fatalf("imagePullPolicy must default to IfNotPresent, got %q", first.ImagePullPolicy)
+	// Workload fields remain exactly as declared by the operator.
+	if first.ImagePullPolicy != "" || first.SecurityContext != nil || podSpec.SecurityContext != nil {
+		t.Fatalf("Falcon must not inject workload defaults: %#v", podSpec)
 	}
-	if got := ptr.Deref(podSpec.SecurityContext.RunAsUser, 0); got != 65532 {
-		t.Fatalf("runAsUser must default to 65532, got %d", got)
-	}
-	if !ptr.Deref(first.SecurityContext.ReadOnlyRootFilesystem, false) || ptr.Deref(first.SecurityContext.AllowPrivilegeEscalation, true) {
-		t.Fatalf("restricted-profile container defaults missing: %#v", first.SecurityContext)
-	}
-	if v := findVolume(podSpec.Volumes, "tmp"); v == nil || v.EmptyDir == nil {
-		t.Fatalf("a silent template must get the /tmp emptyDir volume, got %#v", v)
+	if v := findVolume(podSpec.Volumes, "tmp"); v != nil {
+		t.Fatalf("Falcon must not inject a /tmp volume: %#v", v)
 	}
 	// Job-level pipeline identity is forced.
 	if podSpec.RestartPolicy != corev1.RestartPolicyNever {

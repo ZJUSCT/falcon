@@ -40,9 +40,12 @@ func testProxyMirror() *mirrorv1alpha1.ProxyMirror {
 			},
 			Proxy: mirrorv1alpha1.ProxyMirrorProxySpec{
 				Cache: mirrorv1alpha1.ProxyMirrorCacheSpec{
-					Enabled:          ptr.To(true),
-					StorageClassName: "delete-class",
-					Size:             resource.MustParse("100Gi"),
+					Enabled: ptr.To(true),
+					PVCSpec: corev1.PersistentVolumeClaimSpec{
+						StorageClassName: ptr.To("delete-class"),
+						AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("100Gi")}},
+					},
 				},
 			},
 			Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{
@@ -141,17 +144,13 @@ func TestProxyMirrorHappyPathPublishesAndProvisionsCache(t *testing.T) {
 	if !cacheVolume {
 		t.Fatal("proxy Deployment must inject the cache PVC as the proxy-cache volume")
 	}
-	if len(deployment.Spec.Template.Spec.Volumes) != 2 { // cache + tmp emptyDir, no data volume
+	if len(deployment.Spec.Template.Spec.Volumes) != 1 { // cache only, no data volume
 		t.Fatalf("proxy Deployment must have no data volume, got %#v", deployment.Spec.Template.Spec.Volumes)
 	}
-	// The default injections apply to the proxy as well: TCP readiness probe
-	// on the renamed first port and a writable-root-free security posture.
+	// Falcon preserves operator workload fields; only the cache volume is injected.
 	first := deployment.Spec.Template.Spec.Containers[0]
-	if first.ReadinessProbe == nil || first.ReadinessProbe.TCPSocket == nil || first.ReadinessProbe.TCPSocket.Port.StrVal != "http" {
-		t.Fatalf("proxy pod must get the default TCP readiness probe on the http port, got %#v", first.ReadinessProbe)
-	}
-	if !ptr.Deref(first.SecurityContext.ReadOnlyRootFilesystem, false) {
-		t.Fatal("readOnlyRootFilesystem must default to true on the proxy container")
+	if first.ReadinessProbe != nil || first.SecurityContext != nil {
+		t.Fatalf("Falcon must not inject workload defaults: %#v", first)
 	}
 	// The controller adds no mounts: proxy-cache is volumes-only (the nginx
 	// proxy_cache directory is the user's declaration).
@@ -181,7 +180,7 @@ func TestProxyMirrorHappyPathPublishesAndProvisionsCache(t *testing.T) {
 func TestProxyMirrorInvalidCacheSpecIsDegraded(t *testing.T) {
 	ctx := context.Background()
 	proxy := testProxyMirror()
-	proxy.Spec.Proxy.Cache.StorageClassName = ""
+	proxy.Spec.Proxy.Cache.PVCSpec.AccessModes = nil
 	scheme := testProxyScheme(t)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).

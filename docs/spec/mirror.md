@@ -6,6 +6,16 @@
 
 API 组 `mirrors.zjusct.io`，版本 `v1alpha1`，kind `Mirror`（复数 `mirrors`，无短名） 和 `ProxyMirror`（复数 `proxymirrors`，无短名），均为 namespaced。
 
+本 spec 中 CRD 的备注格式：
+
+```yaml
+field:
+# <类型>：<字段的含义>
+# <必填/可选>：<默认值>
+# 校验（<校验器>）：<规则>
+# 备注：<其他说明>
+```
+
 ### Mirror
 
 镜像 CRD 回答四个问题：
@@ -24,9 +34,6 @@ metadata:
   # 必填
   # 校验（K8s 内置）：符合 RFC 1123 subdomain，允许 [a-z0-9]、[-.]
 spec:
-  paused: false
-  # bool：不再发起新的同步
-  # 可选
   info:
     # 必填
     name:
@@ -42,7 +49,9 @@ spec:
     # string：上游来源描述
     # 必填
   sync:
-    # 必填
+    paused: false
+    # bool：不再发起新的同步，但保留已发布内容和发布负载
+    # 可选
     interval: 6h
     # duration：同步周期
     # 必填
@@ -65,58 +74,43 @@ spec:
     # 可选：默认 1
     # 校验（schema）：Minimum=0
     podTemplate:
-      # PodTemplateSpec：同步容器的完整声明，控制器管理部分字段
-      # 挂载与否、挂载路径由用户自行声明
-      # 可选
+      # PodTemplateSpec：同步 Job 的完整 PodTemplate
+      # 可选；
       # 对应：同步 Job spec.template
       # 校验（控制器）：至少一个容器且第一个容器 image 非空；volumes 不得使用保留卷名 sync-data
-      # 强制覆盖（每次 reconcile 覆写/叠加）：
+      # Falcon 仅组合编排所需字段：sync-data PVC 卷、restartPolicy=Never、同步标签和 Job 超时。
+      # 安全上下文、镜像拉取策略、文件系统、探针、环境变量、sidecar、init 容器等均由用户声明，Falcon 不注入或覆写。
+      # 不注入放置约束（WFFC + 绑定 PV affinity 原生约束，见「存储局部性」）。
       spec:
         restartPolicy: Never
-        terminationGracePeriodSeconds: 30
-      spec.volumes:
-        - name: sync-data
-          persistentVolumeClaim:
-            claimName: <base>-sync
-      #   模板 labels 叠加同步标签（component: sync，含 sync-timestamp 标签）
-      #   放置不注入（WFFC + 绑定 PV affinity 原生约束，见「存储局部性」）
-      # 默认注入（模板 silent 才注入，写了以用户为准）：
-      spec.automountServiceAccountToken: false
-      spec.securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532
-        seccompProfile: { type: RuntimeDefault }
-      containers[].securityContext（未设字段）:
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        capabilities.drop: [ALL]
-      containers[0].imagePullPolicy: IfNotPresent
-      # 另注入 /tmp emptyDir 卷 + 挂载；不注入任何探针与环境变量
-      # （数据位置外的输入由用户 env 显式传入）
+        volumes:
+          - name: sync-data
+            persistentVolumeClaim:
+              claimName: <base>-sync
+        metadata:
+          labels:
+            mirror: <base>
+            component: sync
+            sync-timestamp: <ts>
   storage:
-    # 必填
-    storageClassName: ...
-    # string：同步 PVC 使用的 SC
-    # 必填
-    # 对应：同步 PVC spec.storageClassName
-    # 校验（控制器）：非空
-    # 备注：建议 reclaimPolicy: Retain 以避免误删导致的数据丢失
+    pvcTemplate:
+      # PersistentVolumeClaimSpec：同步和发布 PVC 共享的标准 Kubernetes PVC 配置
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 500Gi
+      volumeMode: Filesystem
+      # storageClassName、dataSource、dataSourceRef、selector、volumeName 不支持，由 Falcon 管理或保留
+    syncStorageClassName: ...
+    # string：同步 PVC 使用的 StorageClass
+    # 必填；对应同步 PVC spec.storageClassName
     publishStorageClassName: ...
     # string：快照克隆得到的发布 PVC 用的 SC
-    # 可选：缺省回落 storageClassName
-    # 对应：发布 PVC spec.storageClassName
+    # 可选：缺省继承 syncStorageClassName
+    # 发布 PVC 继承 sync 的 PersistentVolumeClaimSpec；此字段仅覆盖其 storageClassName
     # 备注：建议 reclaimPolicy: Delete 以及时清理快照；须与快照/StorageClass 同后端同拓扑
     # （本地 PV 语义下即同节点）
-    capacity: 500Gi
-    # Quantity：同步 PVC 容量
-    # 必填
-    # 对应：同步 PVC spec.resources.requests.storage
-    # 校验（控制器）：> 0
-    accessMode: ReadWriteOnce
-    # string：PVC accessMode
-    # 可选：默认 ReadWriteOnce
-    # 对应：同步 PVC spec.accessModes
-    # 校验（schema）：K8s 内置枚举
     volumeSnapshotClassName: ...
     # string：快照用的 VolumeSnapshotClass（原子发布依赖），须由同一存储后端提供
     # 必填，无默认值
@@ -148,43 +142,25 @@ spec:
       # 校验（控制器）：无重复、不等于规范路径 /<CR名>、逐项语法（/ 开头、不以 / 结尾、
       # 无 //、无空白；大小写敏感、允许大写）
       podTemplate:
-        # PodTemplateSpec：发布容器的完整声明；控制器仅向 volumes 注入 mirror-data 卷
-        # （只读卷源），挂载与否、挂载路径由用户自行声明
-        # 可选
+        # PodTemplateSpec：发布 Deployment 的完整 PodTemplate，由运维人员声明全部工作负载字段
         # 对应：发布 Deployment spec.template
         # 校验（CEL）：key 出现时 podTemplate.spec 存在
-        # 校验（控制器）：至少一容器、第一容器至少一个 containerPort；volumes 不得含
-        # 保留卷名 mirror-data，对其挂载必须 readOnly
-        # 强制覆盖（每次 reconcile 覆写/叠加）：
-        spec.volumes:
-          - name: mirror-data
-            persistentVolumeClaim:
-              claimName: <所服务 PVC>
-              readOnly: true
-        #   （只读卷源；保留卷名，用户不得声明同名 volume；挂载与否、挂载路径由用户自行声明）
-        #   模板 labels 叠加 {mirror: <base>, component: publish-<key>}（用户同名 label 被覆写）
-        #   节点放置见「存储局部性」：hostname selector 强制合入（该 key 用户不可覆盖）；
-        #     非 hostname 拓扑拷入 affinity（用户自带时 falcon 项优先并发 Warning）；
-        #     共享存储不注入；源 PVC/PV 不可读时本 reconcile 不创建 Deployment
-        # 默认注入（模板 silent 才注入，写了以用户为准）：
-        spec.automountServiceAccountToken: false
-        spec.securityContext:
-          runAsNonRoot: true
-          seccompProfile: { type: RuntimeDefault }
-        containers[].securityContext（未设字段）:
-          readOnlyRootFilesystem: true
-          allowPrivilegeEscalation: false
-          capabilities.drop: [ALL]
-        containers[0].readinessProbe（未设时）:
-          tcpSocket: { port: <key> }
-          periodSeconds: 5
-          timeoutSeconds: 2
-          failureThreshold: 3
-        # 另注入 /tmp emptyDir 卷 + 挂载
+        # 校验（控制器）：至少一容器、第一容器至少一个 containerPort；volumes 不得含保留卷名 mirror-data；
+        # 对其挂载必须 readOnly
+        # Falcon 管理只读 mirror-data PVC 卷、控制器标签和存储局部性约束；不注入或覆写安全设置、探针、端口、
+        # /tmp、镜像策略或其他工作负载字段。Service 的 targetPort 使用第一容器声明的第一个 containerPort。
+        spec:
+          volumes:
+            - name: mirror-data
+              persistentVolumeClaim:
+                claimName: <active-pvc>
+                readOnly: true
+          nodeSelector: <source-pv locality, when required>
+        metadata:
+          labels:
+            mirror: <base>
+            component: publish-http
     rsync:
-      # 合法启用至少需 podTemplate.spec（空块会被 CEL 拒绝）。
-      # 形状同 http 但无 aliases（rsync 无路径概念）
-      # 没有 git key：git 发布 = http + fastcgi 容器
       podTemplate:
         spec:
           containers:
@@ -270,15 +246,16 @@ spec:
       enabled: false
       # bool：是否启用缓存
       # 可选：默认 false
-      storageClassName: ...
-      # string：缓存 PVC 用的 SC
-      # 可选；缓存启用时必填
-      # 校验（控制器）：缓存启用时非空
-      size: ...
-      # Quantity：缓存 PVC 容量
-      # 可选；缓存启用时必填
-      # 对应：缓存 PVC spec.resources.requests.storage
-      # 校验（控制器）：缓存启用时 > 0
+      pvcTemplate:
+        # PersistentVolumeClaimSpec：缓存 PVC 的标准 Kubernetes PVC 配置
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 20Gi
+        storageClassName: ...
+        volumeMode: Filesystem
+        # dataSource、dataSourceRef、selector、volumeName 不支持，由 Falcon 管理或保留
   publish:
     # 仅 http 一个 key（代理即 HTTP 发布者）；key 未出现 = 不部署负载，代理不对外发布
     http:
@@ -289,17 +266,17 @@ spec:
         # 可选
         # 对应：发布 Deployment spec.template
         # 校验（控制器）：至少一容器、第一容器至少一个 containerPort
-        # 强制覆盖（每次 reconcile 覆写/叠加）：
+        # Falcon 管理的字段（每次 reconcile 覆写/叠加）：
         spec.volumes:
           - name: proxy-cache
             persistentVolumeClaim:
               claimName: <base>-cache
-        #   （仅缓存启用时注入；可写卷源——缓存本身就是写入目标；保留卷名，
+        #   （仅缓存启用时管理；可写卷源——缓存本身就是写入目标；保留卷名，
         #   用户不得声明同名 volume；挂载与否、挂载路径由用户自行声明）
+        # 代理 Deployment/Pod 的其他字段同样完全来自运维人员的 PodTemplate；Falcon 只注入上述缓存卷和控制器标签。
         # 模板 labels 叠加 {mirror: <base>, component: publish-http}
         # 节点放置不注入（代理无数据卷，局部性无从推导，调度由用户决定）
-        # 默认注入（模板 silent 才注入，写了以用户为准）：
-        #   同 Mirror 发布侧（安全默认、/tmp emptyDir、readinessProbe）
+        # 无工作负载默认注入；安全策略由集群准入策略或用户 PodTemplate 管理。
         # 备注：nginx proxy_cache 惯用缓存目录 /var/cache/nginx/proxy，
         #   由用户在 template 中自行挂载，控制器不注入挂载
 status:
@@ -429,12 +406,10 @@ publish:
     name: ""
     namespace: ""
     sectionName: ""
-  hostnames: []                    # 空 ⇒ HTTPRoute 生成整体关闭；裸主机名（无 / 与空白）
+  hostnames: []                    # 空 ⇒ HTTPRoute 生成整体关闭
   labels: {}                       # 盖到每条发布 HTTPRoute
   annotations: {}
 ```
-
-fail-fast 校验（启动时，非法拒绝启动）：归一化（site.url TrimSpace 去末尾 `/`；log.level 空补 info）后检查——log.level 枚举；site.url 非空且含 `://`；hostnames 非空时 gatewayRef.name 必填；hostnames 不含空白项、不含 `/`（裸主机名）。文件不可读/非法 YAML 报错（前缀 `read config` / `parse config`），stderr + 退出码 1。
 
 ## Mirror 生命周期
 
@@ -473,7 +448,7 @@ Falcon 首次观察到 Mirror 时先添加 `mirrors.zjusct.io/storage-cleanup` f
 | 发布 | 将所有启用的 Deployment 滚动到新 PVC | 各 Deployment 收敛；等待时为 `PublishRollout` |
 | 激活 | 更新 `activePVC`、`activeSnapshot` 和同步结果 | 清除 `currentSync`，事务结束 |
 
-同步 Job 强制使用 `backoffLimit: 0`，其 `activeDeadlineSeconds` 来自 `spec.sync.timeout`。Pod 模板、工作卷和安全默认值以 CRD 章节为准。Job 进入终态后立即释放并发配额；快照、克隆和发布阶段不占用该配额。
+同步 Job 强制使用 `backoffLimit: 0`，其 `activeDeadlineSeconds` 来自 `spec.sync.timeout`。Pod 模板和工作卷以 CRD 章节为准，安全策略由集群准入策略或 PodTemplate 管理。Job 进入终态后立即释放并发配额；快照、克隆和发布阶段不占用该配额。
 
 时间戳以秒为精度。创建 Job 前，Falcon 会确认本 Mirror 没有同一时间戳的 Job、PVC 或 VolumeSnapshot；冲突时保留 `currentSync`，报告 `SnapshotTimestampConflict`，每分钟以同一事务身份重试，而不会静默改用另一时间戳。
 

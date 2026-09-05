@@ -39,9 +39,10 @@ func (r *ProxyMirrorReconciler) ensureCachePVC(ctx context.Context, proxy *mirro
 			return nil
 		}
 		current := claim.Spec.Resources.Requests[corev1.ResourceStorage]
-		if current.Cmp(proxy.Spec.Proxy.Cache.Size) < 0 {
+		desired := proxy.Spec.Proxy.Cache.PVCSpec.Resources.Requests[corev1.ResourceStorage]
+		if current.Cmp(desired) < 0 {
 			before := claim.DeepCopy()
-			claim.Spec.Resources.Requests[corev1.ResourceStorage] = proxy.Spec.Proxy.Cache.Size.DeepCopy()
+			claim.Spec.Resources.Requests[corev1.ResourceStorage] = desired.DeepCopy()
 			return r.Patch(ctx, claim, client.MergeFrom(before))
 		}
 		return nil
@@ -55,13 +56,7 @@ func (r *ProxyMirrorReconciler) ensureCachePVC(ctx context.Context, proxy *mirro
 			Name:      name,
 			Labels:    objectLabels(base, ProxyCacheRoleLabel),
 		},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			StorageClassName: stringPtr(proxy.Spec.Proxy.Cache.StorageClassName),
-			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
-				corev1.ResourceStorage: proxy.Spec.Proxy.Cache.Size.DeepCopy(),
-			}},
-		},
+		Spec: *proxy.Spec.Proxy.Cache.PVCSpec.DeepCopy(),
 	}
 	if err := controllerutil.SetControllerReference(proxy, claim, r.Scheme); err != nil {
 		return err
@@ -120,8 +115,7 @@ func (r *ProxyMirrorReconciler) ensureProxyPublish(ctx context.Context, proxy *m
 
 // ensureProxyPublishEntry maintains the http publish entry of a ProxyMirror:
 // Deployment/Service `<base>-publish-http`, the optional cache volume
-// (injected volumes-only when the cache is enabled) plus the default
-// injections from applyPublishPodDefaults, and per-service pod labels.
+// (injected volumes-only when the cache is enabled), and per-service pod labels.
 func (r *ProxyMirrorReconciler) ensureProxyPublishEntry(ctx context.Context, proxy *mirrorv1alpha1.ProxyMirror, base string, service *mirrorv1alpha1.ProxyMirrorServiceSpec) (bool, error) {
 	role := publishRole(PublishProtocolHTTP)
 
@@ -135,8 +129,6 @@ func (r *ProxyMirrorReconciler) ensureProxyPublishEntry(ctx context.Context, pro
 	spec := &template.Spec
 
 	// A ProxyMirror has no placement fields: scheduling is the user's choice.
-
-	applyPublishPodDefaults(spec, PublishProtocolHTTP)
 
 	// The cache PVC is injected when enabled — as a VOLUME only (writable:
 	// it IS a cache). Mounting it, and where, is the user's own declaration.

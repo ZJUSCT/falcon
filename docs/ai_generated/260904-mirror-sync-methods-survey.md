@@ -82,4 +82,3 @@ ustcmirror-images 的契约在进程模型上与 K8s Job 天然契合，但 Dock
 | `RETRY` 容器内重试 | Job `backoffLimit` / 控制器重调度 | 二者取其一：容器内静默重试会让控制器失去失败可见性，建议 `RETRY=0`，重试上收到 Falcon |
 | ftpsync/`.~tmp~/` 锁假设同一持久目录 | 同一同步 PVC + Job 不并发 | Falcon 调度需保证同镜像 Job 互斥；快照/发布 PVC 只读侧不受影响 |
 | 一次性容器 + 退出码 | Job 退出码 | ftpsync、rsync 24 等「退出码 0 但失败」场景仍需按类别实测 |
-

@@ -17,7 +17,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -49,10 +48,6 @@ const (
 	// volume of this name themselves, and any mount of it — declared entirely
 	// by the user — must be read-only.
 	PublishDataVolumeName = "mirror-data"
-	// PublishTmpVolumeName is the name of the default /tmp emptyDir the
-	// controller injects into a publish pod only when the user template does
-	// not declare a volume of this name and does not mount /tmp itself.
-	PublishTmpVolumeName = "tmp"
 )
 
 func (r *MirrorReconciler) ensureSnapshot(ctx context.Context, mirror *mirrorv1alpha1.Mirror) (bool, string, error) {
@@ -102,9 +97,10 @@ func (r *MirrorReconciler) ensureSyncPVC(ctx context.Context, mirror *mirrorv1al
 			return fmt.Errorf("sync PVC %s is still terminating", claim.Name)
 		}
 		current := claim.Spec.Resources.Requests[corev1.ResourceStorage]
-		if current.Cmp(mirror.Spec.Storage.Capacity) < 0 {
+		desired := mirror.Spec.Storage.PVCSpec.Resources.Requests[corev1.ResourceStorage]
+		if current.Cmp(desired) < 0 {
 			before := claim.DeepCopy()
-			claim.Spec.Resources.Requests[corev1.ResourceStorage] = mirror.Spec.Storage.Capacity.DeepCopy()
+			claim.Spec.Resources.Requests[corev1.ResourceStorage] = desired.DeepCopy()
 			return r.Patch(ctx, claim, client.MergeFrom(before))
 		}
 		return nil
@@ -156,13 +152,10 @@ func (r *MirrorReconciler) ensurePublishPVC(ctx context.Context, mirror *mirrorv
 // snapshot-scoped (the stable sync PVC).
 func newDataClaim(mirror *mirrorv1alpha1.Mirror, name string, syncTimestamp int64, role string) *corev1.PersistentVolumeClaim {
 	labels := childLabels(mirror, syncTimestamp, role)
-	accessMode := mirror.Spec.Storage.AccessMode
-	if accessMode == "" {
-		accessMode = corev1.ReadWriteOnce
-	}
-	storageClassName := mirror.Spec.Storage.StorageClassName
+	spec := mirror.Spec.Storage.PVCSpec.DeepCopy()
+	spec.StorageClassName = stringPtr(mirror.Spec.Storage.SyncStorageClassName)
 	if role == "publish-data" && mirror.Spec.Storage.PublishStorageClassName != "" {
-		storageClassName = mirror.Spec.Storage.PublishStorageClassName
+		spec.StorageClassName = stringPtr(mirror.Spec.Storage.PublishStorageClassName)
 	}
 	return &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -170,13 +163,7 @@ func newDataClaim(mirror *mirrorv1alpha1.Mirror, name string, syncTimestamp int6
 			Name:      name,
 			Labels:    labels,
 		},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes:      []corev1.PersistentVolumeAccessMode{accessMode},
-			StorageClassName: stringPtr(storageClassName),
-			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
-				corev1.ResourceStorage: mirror.Spec.Storage.Capacity.DeepCopy(),
-			}},
-		},
+		Spec: *spec,
 	}
 }
 
@@ -281,12 +268,10 @@ func (r *MirrorReconciler) checkSyncTimestampConflict(ctx context.Context, mirro
 //
 // The pod template is the user's spec.sync.podTemplate with
 //
-//   - forced sync pipeline identity: the WRITABLE `sync-data` PVC volume
+//   - Falcon-managed sync pipeline identity: the WRITABLE `sync-data` PVC volume
 //     injected into spec.volumes (mounting it, and where, is the user's own
-//     declaration), restartPolicy Never, terminationGracePeriodSeconds 30,
-//     the sync labels;
-//   - defaults injected only where the template is silent (see
-//     applySyncPodDefaults).
+//     declaration), restartPolicy Never, and the sync labels;
+//   - no workload defaults are injected: the PodTemplate is operator-owned.
 //
 // Job-level: backoffLimit 0 and activeDeadlineSeconds = spec.sync.timeout.
 // Placement is NOT injected (see the spec comment inside).
@@ -296,7 +281,6 @@ func (r *MirrorReconciler) createSyncJob(ctx context.Context, mirror *mirrorv1al
 		deadline = 1
 	}
 	backoffLimit := int32(0)
-	terminationGrace := int64(30)
 
 	// The Job carries the sync-timestamp label from creation: it embeds the
 	// same Unix seconds timestamp as its name and is the identity the
@@ -317,11 +301,8 @@ func (r *MirrorReconciler) createSyncJob(ctx context.Context, mirror *mirrorv1al
 	// nodeAffinity pins every later sync pod). pod.spec.nodeName stays unset —
 	// it would bypass the scheduler and break WaitForFirstConsumer binding.
 	spec.RestartPolicy = corev1.RestartPolicyNever
-	spec.TerminationGracePeriodSeconds = &terminationGrace
 
-	applySyncPodDefaults(spec)
-
-	// The writable sync data volume is forced, never optional — as a VOLUME
+	// The writable sync data volume is Falcon-managed and always present — as a VOLUME
 	// only: mounting it, and where, is the user's own declaration in the pod
 	// template. Like the publish-side mirror-data the volume name is
 	// reserved; unlike it there is no read-only constraint (it is the sync
@@ -349,28 +330,6 @@ func (r *MirrorReconciler) createSyncJob(ctx context.Context, mirror *mirrorv1al
 		return err
 	}
 	return r.Create(ctx, job)
-}
-
-// applySyncPodDefaults injects the overridable sync defaults into a
-// user-provided pod template: values are only filled in where the template is
-// silent (nil fields / absent entries), so any explicit user setting wins.
-//
-//   - runAsUser 65532 (the mirror-scoped uid the sync data dirs are writable
-//     by) on top of the shared restricted-profile defaults;
-//   - first container: imagePullPolicy IfNotPresent when unset;
-//   - a `/tmp` emptyDir volume + mount on the first container — ftpsync-style
-//     scripts expect HOME=/tmp to stay writable, which the emptyDir guarantees
-//     under the readOnlyRootFilesystem default.
-//
-// No probes are injected: a sync container has no service port to probe.
-func applySyncPodDefaults(spec *corev1.PodSpec) {
-	applyPodSecurityAndTmpDefaults(spec)
-	if spec.SecurityContext != nil && spec.SecurityContext.RunAsUser == nil {
-		spec.SecurityContext.RunAsUser = ptr.To(int64(65532))
-	}
-	if len(spec.Containers) > 0 && spec.Containers[0].ImagePullPolicy == "" {
-		spec.Containers[0].ImagePullPolicy = corev1.PullIfNotPresent
-	}
 }
 
 // ensurePublish maintains the Deployment and Service of every ENABLED
@@ -591,12 +550,11 @@ func hostnameFromNodeSelectorTerms(required *corev1.NodeSelector) (string, bool)
 //
 // The pod template is the user's spec.publish.<key>.podTemplate with
 //
-//   - forced data-integrity constraints layered on top: the read-only
+//   - Falcon-managed data-integrity constraints layered on top: the read-only
 //     `mirror-data` publish PVC volume injected into spec.volumes (mounting
 //     it, and where, is the user's own declaration), the PV-derived node
 //     constraint and the pod identity labels;
-//   - defaults injected only where the user template is silent (see
-//     applyPublishPodDefaults).
+//   - no workload defaults are injected: the PodTemplate is operator-owned.
 func (r *MirrorReconciler) ensurePublishEntry(ctx context.Context, mirror *mirrorv1alpha1.Mirror, serviceKey string, service *mirrorv1alpha1.MirrorServiceSpec, claimName string, nodeSelector map[string]string, affinity *corev1.NodeSelector) (bool, error) {
 	base := childBase(mirror.Name)
 	role := publishRole(serviceKey)
@@ -610,7 +568,7 @@ func (r *MirrorReconciler) ensurePublishEntry(ctx context.Context, mirror *mirro
 	}
 	spec := &template.Spec
 
-	// Node constraint derived from the source PV, forced (not a default): the
+	// Node constraint derived from the source PV, Falcon-managed (not a default): the
 	// snapshot clone's locality is invisible to the scheduler, falcon must
 	// supply it. The hostname key always wins over the user template; other
 	// user nodeSelector keys merge.
@@ -640,9 +598,7 @@ func (r *MirrorReconciler) ensurePublishEntry(ctx context.Context, mirror *mirro
 		spec.Affinity.NodeAffinity = &corev1.NodeAffinity{RequiredDuringSchedulingIgnoredDuringExecution: affinity.DeepCopy()}
 	}
 
-	applyPublishPodDefaults(spec, serviceKey)
-
-	// The publish data volume is forced, never optional — as a VOLUME only,
+	// The publish data volume is Falcon-managed and always present — as a VOLUME only,
 	// with a read-only volume source: mounting it, and where, is the user's
 	// own declaration. The controller never adds mounts; any user mount of
 	// mirror-data must be read-only (validateMirrorService).
@@ -659,9 +615,9 @@ func (r *MirrorReconciler) ensurePublishEntry(ctx context.Context, mirror *mirro
 
 // ensurePublishServiceAndDeployment maintains the Service/Deployment pair of
 // one enabled publish service key ("http"/"rsync") for owner (a Mirror or a
-// ProxyMirror): Service `<base>-publish-<key>` (port 80 -> named target port
-// <key>), Deployment `<base>-publish-<key>` carrying the fully merged pod
-// template. It reports the Deployment rollout readiness.
+// ProxyMirror): Service `<base>-publish-<key>` (port 80 -> the first declared
+// port on the operator-owned template), and Deployment `<base>-publish-<key>`.
+// It reports the Deployment rollout readiness.
 func ensurePublishServiceAndDeployment(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, base, serviceKey string, replicas int32, podTemplate corev1.PodTemplateSpec) (bool, error) {
 	childName := publishChildName(base, serviceKey)
 	role := publishRole(serviceKey)
@@ -673,7 +629,7 @@ func ensurePublishServiceAndDeployment(ctx context.Context, c client.Client, sch
 		svc.Spec.Ports = []corev1.ServicePort{{
 			Name:        serviceKey,
 			Port:        publishServicePort,
-			TargetPort:  intstr.FromString(serviceKey),
+			TargetPort:  intstr.FromInt32(podTemplate.Spec.Containers[0].Ports[0].ContainerPort),
 			Protocol:    corev1.ProtocolTCP,
 			AppProtocol: publishAppProtocol(serviceKey),
 		}}
@@ -709,98 +665,6 @@ func ensurePublishServiceAndDeployment(ctx context.Context, c client.Client, sch
 		return false, nil
 	}
 	return deployment.Status.AvailableReplicas >= replicas && deployment.Status.UpdatedReplicas >= replicas, nil
-}
-
-// applyPodSecurityAndTmpDefaults injects the restricted-profile defaults
-// shared by the sync and publish pod templates: values are only filled in
-// where the template is silent (nil fields / absent entries), so any explicit
-// user setting wins.
-//
-//   - automountServiceAccountToken: false (pod);
-//   - runAsNonRoot: true and seccompProfile RuntimeDefault (pod security
-//     context);
-//   - per container: allowPrivilegeEscalation false, readOnlyRootFilesystem
-//     true, capabilities drop ALL;
-//   - a `/tmp` emptyDir volume + mount on the first container (nginx & friends
-//     and ftpsync-style HOME=/tmp need a writable /tmp under
-//     readOnlyRootFilesystem).
-func applyPodSecurityAndTmpDefaults(spec *corev1.PodSpec) {
-	if spec.AutomountServiceAccountToken == nil {
-		spec.AutomountServiceAccountToken = ptr.To(false)
-	}
-	if spec.SecurityContext == nil {
-		spec.SecurityContext = &corev1.PodSecurityContext{}
-	}
-	if spec.SecurityContext.RunAsNonRoot == nil {
-		spec.SecurityContext.RunAsNonRoot = ptr.To(true)
-	}
-	if spec.SecurityContext.SeccompProfile == nil {
-		spec.SecurityContext.SeccompProfile = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}
-	}
-	for i := range spec.Containers {
-		securityContext := spec.Containers[i].SecurityContext
-		if securityContext == nil {
-			securityContext = &corev1.SecurityContext{}
-			spec.Containers[i].SecurityContext = securityContext
-		}
-		if securityContext.AllowPrivilegeEscalation == nil {
-			securityContext.AllowPrivilegeEscalation = ptr.To(false)
-		}
-		if securityContext.ReadOnlyRootFilesystem == nil {
-			securityContext.ReadOnlyRootFilesystem = ptr.To(true)
-		}
-		if securityContext.Capabilities == nil {
-			securityContext.Capabilities = &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}
-		}
-	}
-	if len(spec.Containers) == 0 {
-		return
-	}
-	first := &spec.Containers[0]
-	hasTmpVolume := false
-	for i := range spec.Volumes {
-		if spec.Volumes[i].Name == PublishTmpVolumeName {
-			hasTmpVolume = true
-		}
-	}
-	hasTmpMount := false
-	for i := range first.VolumeMounts {
-		if first.VolumeMounts[i].MountPath == "/tmp" {
-			hasTmpMount = true
-		}
-	}
-	if !hasTmpVolume && !hasTmpMount {
-		spec.Volumes = append(spec.Volumes, corev1.Volume{
-			Name:         PublishTmpVolumeName,
-			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-		})
-		first.VolumeMounts = append(first.VolumeMounts, corev1.VolumeMount{Name: PublishTmpVolumeName, MountPath: "/tmp"})
-	}
-}
-
-// applyPublishPodDefaults layers the publish-specific defaults on top of the
-// shared restricted-profile defaults.
-func applyPublishPodDefaults(spec *corev1.PodSpec, serviceKey string) {
-	applyPodSecurityAndTmpDefaults(spec)
-	if len(spec.Containers) == 0 {
-		return
-	}
-	first := &spec.Containers[0]
-	// Port convention (kept from the previous shape): the first container
-	// port of the first container is the Service target, so it is (re)named
-	// after the service key and the Service plus the default probe can
-	// reference it as a named port.
-	if len(first.Ports) > 0 {
-		first.Ports[0].Name = serviceKey
-	}
-	if first.ReadinessProbe == nil {
-		first.ReadinessProbe = &corev1.Probe{
-			ProbeHandler:     corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString(serviceKey)}},
-			PeriodSeconds:    5,
-			TimeoutSeconds:   2,
-			FailureThreshold: 3,
-		}
-	}
 }
 
 // pruneFailedJobs deletes failed sync Jobs of this Mirror beyond

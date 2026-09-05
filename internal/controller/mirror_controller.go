@@ -702,11 +702,19 @@ func validateMirror(mirror *mirrorv1alpha1.Mirror) field.ErrorList {
 				"this volume name is reserved: the controller injects it itself"))
 		}
 	}
-	if mirror.Spec.Storage.StorageClassName == "" {
-		errs = append(errs, field.Required(path.Child("storage", "storageClassName"), "must not be empty"))
+	storagePath := path.Child("storage", "pvcTemplate")
+	if len(mirror.Spec.Storage.PVCSpec.AccessModes) == 0 {
+		errs = append(errs, field.Required(storagePath.Child("accessModes"), "must declare at least one access mode"))
 	}
-	if mirror.Spec.Storage.Capacity.IsZero() || mirror.Spec.Storage.Capacity.Sign() < 0 {
-		errs = append(errs, field.Invalid(path.Child("storage", "capacity"), mirror.Spec.Storage.Capacity.String(), "must be greater than zero"))
+	requestedStorage := mirror.Spec.Storage.PVCSpec.Resources.Requests[corev1.ResourceStorage]
+	if requestedStorage.IsZero() || requestedStorage.Sign() < 0 {
+		errs = append(errs, field.Required(storagePath.Child("resources", "requests", string(corev1.ResourceStorage)), "must be greater than zero"))
+	}
+	if mirror.Spec.Storage.SyncStorageClassName == "" {
+		errs = append(errs, field.Required(path.Child("storage", "syncStorageClassName"), "must not be empty"))
+	}
+	if mirror.Spec.Storage.PVCSpec.StorageClassName != nil || mirror.Spec.Storage.PVCSpec.DataSource != nil || mirror.Spec.Storage.PVCSpec.DataSourceRef != nil || mirror.Spec.Storage.PVCSpec.VolumeName != "" || mirror.Spec.Storage.PVCSpec.Selector != nil {
+		errs = append(errs, field.Invalid(storagePath, mirror.Spec.Storage.PVCSpec, "storageClassName, dataSource, dataSourceRef, volumeName, and selector are Falcon-managed or unsupported in pvcTemplate"))
 	}
 	if mirror.Spec.Storage.VolumeSnapshotClassName == "" {
 		errs = append(errs, field.Required(path.Child("storage", "volumeSnapshotClassName"), "is required for atomic publication"))
