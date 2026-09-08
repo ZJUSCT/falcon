@@ -39,7 +39,7 @@ func TestDerivedResourceInvalidIsReportedOnMirror(t *testing.T) {
 	mirror := testMirror()
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status.WorkPVC = "smoke-sync"
-	mirror.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{StartedAt: timePtr(time.Unix(1788393600, 0))}
+	mirror.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{QueuedAt: timePtr(time.Unix(1788393600, 0))}
 	scheme := testScheme(t)
 	baseClient := fake.NewClientBuilder().
 		WithScheme(scheme).

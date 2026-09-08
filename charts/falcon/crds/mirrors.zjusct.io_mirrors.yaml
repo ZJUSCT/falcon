@@ -57,21 +57,20 @@ spec:
                   PathPrefix /<name>, mirrorz entry url <host>/<name>), so same-name CRs can
                   never collide and no per-CR URL bookkeeping is needed.
                 properties:
+                  cname:
+                    description: |-
+                      CName is the MirrorZ catalog grouping name, e.g. AOSP. It is not
+                      constrained to DNS names; upstream cname.json normalizes known aliases.
+                      It defaults to the CR name and does not change the HTTP path.
+                    minLength: 1
+                    type: string
                   description:
-                    additionalProperties:
-                      type: string
-                    minProperties: 1
-                    type: object
-                  name:
-                    additionalProperties:
-                      type: string
-                    minProperties: 1
-                    type: object
+                    description: Description is plain text for MirrorZ desc; no localization
+                      is performed.
+                    type: string
                   upstream:
                     type: string
                 required:
-                - description
-                - name
                 - upstream
                 type: object
               publish:
@@ -79,9 +78,8 @@ spec:
                   Publish declares how the active snapshot clone is published, through
                   the fixed keys "http" and "rsync" (see MirrorServicesSpec). With every
                   key absent (including an entirely absent services object) the mirror
-                  is sync-only: the sync/snapshot pipeline still runs and the publish PVC
-                  is still produced, but no publish Deployment/Service/HTTPRoute is
-                  created.
+                  is sync-only: synchronization produces a ready snapshot, without a clone
+                  PVC or publish Deployment/Service/HTTPRoute.
                 properties:
                   http:
                     description: |-
@@ -121,9 +119,10 @@ spec:
                           probe, volume, affinity and so on. Falcon manages the
                           data-integrity constraints (the read-only `mirror-data` publish PVC
                           volume in spec.volumes — mounting it, and where, is the user's own
-                          declaration —, pod labels/annotations, placement, naming/selector
-                          identity). No workload fields are defaulted or rewritten; the operator
-                          owns security context, probes, ports, filesystem, and sidecars.
+                          declaration —, pod labels/annotations, naming/selector identity). No
+                          workload fields are defaulted or rewritten; the operator owns security
+                          context, probes, ports, filesystem, sidecars, and placement (volume
+                          locality is the scheduler's job — the bound PV's nodeAffinity).
                         properties:
                           metadata:
                             description: |-
@@ -8771,9 +8770,10 @@ spec:
                           probe, volume, affinity and so on. Falcon manages the
                           data-integrity constraints (the read-only `mirror-data` publish PVC
                           volume in spec.volumes — mounting it, and where, is the user's own
-                          declaration —, pod labels/annotations, placement, naming/selector
-                          identity). No workload fields are defaulted or rewritten; the operator
-                          owns security context, probes, ports, filesystem, and sidecars.
+                          declaration —, pod labels/annotations, naming/selector identity). No
+                          workload fields are defaulted or rewritten; the operator owns security
+                          context, probes, ports, filesystem, sidecars, and placement (volume
+                          locality is the scheduler's job — the bound PV's nodeAffinity).
                         properties:
                           metadata:
                             description: |-
@@ -17414,16 +17414,33 @@ spec:
                   publishStorageClassName:
                     description: |-
                       PublishStorageClassName provisions disposable snapshot-derived
-                      publish PVCs. It must provision from the same storage backend and
-                      topology as SyncStorageClassName (under local-PV semantics: the same node),
-                      otherwise the VolumeSnapshot `dataSource` clone cannot be provisioned.
-                      It normally uses reclaimPolicy: Delete so snapshot pruning reclaims the
-                      underlying backend volumes. When omitted, SyncStorageClassName is used.
+                      publish PVCs. Required: the publish PVC (a snapshot clone) explicitly
+                      uses this StorageClass, an operational choice that is never inherited
+                      from SyncStorageClassName. An Immediate-binding class is recommended:
+                      under WaitForFirstConsumer the scheduler cannot see the snapshot
+                      clone's locality while placing the publish pod (Kubernetes <= 1.36),
+                      so the pod may be scheduled to a node where the clone cannot be
+                      provisioned — see the "存储的局部性" (storage locality) section of the
+                      documentation. It must provision from the same storage backend and
+                      topology as SyncStorageClassName (under local-PV semantics: the same
+                      node), otherwise the VolumeSnapshot `dataSource` clone cannot be
+                      provisioned, and it normally uses reclaimPolicy: Delete so snapshot
+                      pruning reclaims the underlying backend volumes.
+                    minLength: 1
                     type: string
                   pvcTemplate:
                     description: |-
                       PVCSpec contains common Kubernetes PVC properties for the sync and
-                      publish claims. StorageClassName is managed by the explicit fields below.
+                      publish claims. storageClassName is managed by the explicit fields
+                      below; dataSource, dataSourceRef, and selector are rejected.
+                      volumeName is honored by the SYNC claim only: it pre-binds the stable
+                      sync PVC to an existing PersistentVolume, e.g. when migrating a mirror
+                      across Falcon instances (delete the old Mirror, let its sync PV be
+                      retained, clear the PV's claimRef, then pre-bind the new instance's
+                      sync PVC here). The publish claims are snapshot clones provisioned
+                      through their dataSource and never carry volumeName: a preset
+                      volumeName keeps the clone Pending forever (the PV controller only
+                      dynamically provisions a claim whose volumeName is empty).
                     properties:
                       accessModes:
                         description: |-
@@ -17618,14 +17635,14 @@ spec:
                         type: string
                     type: object
                   retention:
-                    properties:
-                      previousSnapshots:
-                        default: 1
-                        format: int32
-                        maximum: 10
-                        minimum: 1
-                        type: integer
-                    type: object
+                    default: 1
+                    description: |-
+                      Retention counts historical ready snapshots in addition to the latest one,
+                      including sync-only generations. Live publication inputs are protected.
+                    format: int32
+                    maximum: 10
+                    minimum: 1
+                    type: integer
                   syncStorageClassName:
                     description: SyncStorageClassName provisions the stable writable
                       synchronization PVC.
@@ -17638,6 +17655,7 @@ spec:
                     minLength: 1
                     type: string
                 required:
+                - publishStorageClassName
                 - pvcTemplate
                 - syncStorageClassName
                 - volumeSnapshotClassName
@@ -17677,7 +17695,7 @@ spec:
                     type: integer
                   paused:
                     description: |-
-                      Paused prevents the controller from starting new synchronization runs.
+                      Paused disables automatic synchronization; explicit requests still run.
                       Published content and its serving workloads remain available.
                     type: boolean
                   podTemplate:
@@ -26250,9 +26268,9 @@ spec:
               activePVC:
                 description: |-
                   ActivePVC is the name of the publish PVC currently published. Names
-                  embed the sync task's start time as a Unix seconds timestamp, e.g.
+                  embed the transaction's queue entry time as a Unix seconds timestamp, e.g.
                   `<mirror>-snap-1756158000`; the timestamp is allocated once when the
-                  controller creates the sync task and is shared by the sync Job, the
+                  controller accepts the sync task and is shared by the sync Job, the
                   VolumeSnapshot and the publish PVC.
                 type: string
               activeSnapshot:
@@ -26317,33 +26335,52 @@ spec:
                 type: array
               consecutiveFailures:
                 description: |-
-                  ConsecutiveFailures counts failed synchronization runs since the last
-                  successful publication. It drives the failure retry cadence (retryInterval
+                  ConsecutiveFailures counts failed synchronization Jobs since the last
+                  successful Job. It drives the failure retry cadence (retryInterval
                   below failureRetryLimit, interval afterwards) and resets to zero on
                   every success.
                 format: int32
                 type: integer
               currentSync:
                 description: |-
-                  MirrorCurrentSyncStatus is the durable identity of the synchronization
-                  transaction currently in progress. Every child name is derived from the
-                  Unix seconds of StartedAt, so persisting each deterministic name separately
-                  would duplicate the same fact.
+                  MirrorCurrentSyncStatus identifies the accepted transaction. Child names use
+                  QueuedAt, which stays fixed while the transaction waits for a concurrency slot.
+                  Phase includes snapshot preparation after the Job; Job timestamps live in LastSync.
                 properties:
+                  manual:
+                    type: boolean
+                  phase:
+                    enum:
+                    - Pending
+                    - Running
+                    - Snapshotting
+                    - Cancelling
+                    type: string
+                  queuedAt:
+                    format: date-time
+                    type: string
                   startedAt:
                     format: date-time
                     type: string
-                  syncRequest:
-                    type: string
                 required:
-                - startedAt
+                - phase
+                - queuedAt
                 type: object
-              lastHandledSyncRequest:
+              lastAcceptedSpecHash:
+                description: |-
+                  LastAcceptedSpecHash identifies spec.sync accepted for the last
+                  synchronization, excluding paused.
                 type: string
-              lastPublishedAt:
+              lastAcceptedSyncAt:
+                description: LastAcceptedSyncAt reserves a generation second even
+                  if its queued run is cancelled.
                 format: date-time
                 type: string
-              lastSync:
+              lastAttempt:
+                description: |-
+                  LastAttempt records the last accepted synchronization request outcome,
+                  including cancellation before a Job starts. Success means a ready snapshot
+                  was delivered; LastSync separately records the Job result.
                 properties:
                   finishedAt:
                     format: date-time
@@ -26356,6 +26393,58 @@ spec:
                     enum:
                     - Succeeded
                     - Failed
+                    - Cancelled
+                    type: string
+                  startedAt:
+                    format: date-time
+                    type: string
+                required:
+                - jobName
+                - phase
+                type: object
+              lastPublishedAt:
+                format: date-time
+                type: string
+              lastSnapshot:
+                description: |-
+                  MirrorSnapshotStatus records the latest ready output of synchronization,
+                  including when publication is disabled. It can be published without a new Job.
+                properties:
+                  jobName:
+                    type: string
+                  name:
+                    type: string
+                  queuedAt:
+                    format: date-time
+                    type: string
+                required:
+                - jobName
+                - name
+                - queuedAt
+                type: object
+              lastSuccessfulSyncAt:
+                description: |-
+                  LastSuccessfulSyncAt retains the latest successful Job completion for
+                  MirrorZ's O token when a later Job is running or has failed.
+                  Required before publication; only absent before the first successful Job.
+                format: date-time
+                type: string
+              lastSync:
+                description: MirrorSyncStatus records a completed sync Job, independently
+                  of publication.
+                properties:
+                  finishedAt:
+                    format: date-time
+                    type: string
+                  jobName:
+                    type: string
+                  message:
+                    type: string
+                  phase:
+                    enum:
+                    - Succeeded
+                    - Failed
+                    - Cancelled
                     type: string
                   startedAt:
                     format: date-time
@@ -26370,9 +26459,76 @@ spec:
               observedGeneration:
                 format: int64
                 type: integer
+              pausedAt:
+                description: |-
+                  PausedAt is when the controller observed syncing stop under paused=true.
+                  Running Jobs drain first; publication proceeds independently.
+                format: date-time
+                type: string
+              publication:
+                description: |-
+                  MirrorPublicationStatus consumes a ready snapshot delivered by synchronization.
+                  Ready resources are recorded incrementally; ActivePVC/ActiveSnapshot continue
+                  to identify the last successfully served generation until the new one is ready.
+                properties:
+                  jobName:
+                    type: string
+                  phase:
+                    enum:
+                    - Restoring
+                    - RollingOut
+                    - Draining
+                    type: string
+                  pvc:
+                    type: string
+                  queuedAt:
+                    format: date-time
+                    type: string
+                  snapshot:
+                    type: string
+                required:
+                - jobName
+                - phase
+                - queuedAt
+                - snapshot
+                type: object
+              requestCleanup:
+                description: |-
+                  MirrorRequestCleanup is a durable receipt awaiting annotation cleanup.
+                  The metadata acknowledgement prevents a restart from removing a newer request.
+                properties:
+                  abort:
+                    type: boolean
+                  sync:
+                    type: boolean
+                  token:
+                    type: string
+                required:
+                - token
+                type: object
               sizeBytes:
                 format: int64
                 type: integer
+              sync:
+                description: MirrorSyncState describes scheduling/execution independently
+                  of publication.
+                properties:
+                  message:
+                    type: string
+                  phase:
+                    enum:
+                    - Waiting
+                    - Pending
+                    - Syncing
+                    - Snapshotting
+                    - Retrying
+                    - Cancelling
+                    type: string
+                  reason:
+                    type: string
+                required:
+                - phase
+                type: object
               workPVC:
                 type: string
             type: object

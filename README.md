@@ -8,39 +8,18 @@
 
 Falcon 是一个运行在 [Kubernetes](https://kubernetes.io/) 上的软件源镜像编排器。
 
-- **镜像编排**：每个镜像由一个 `Mirror` CR 声明，内容包括上游、同步周期、存储、发布方式等。控制器据此分配资源（同步 PVC、同步 Job、发布 PVC、Deployment、对外 Route 等），并按周期调度同步任务；`ProxyMirror` CR 以类似的方式描述只代理不同步（可选缓存）的上游。
-- **原子化发布**：同步任务成功完成后，基于 VolumeSnapshot 生成不可变的快照，并以快照克隆出只读发布 PVC，滚动替换实例。用户永远不会访问到同步的中间状态。
+- **镜像编排**：用 `Mirror` 声明镜像的存储、同步任务和发布服务，用 `ProxyMirror` 声明代理及其可选缓存。Falcon 创建并维护相应的 Kubernetes 资源。
+- **原子化发布**：同步任务写入独立的可写 PV；同步成功后，Falcon 创建 VolumeSnapshot 并从中克隆发布 PV。用户访问的内容不包含同步过程中的中间状态。
+- **滚动更新**：借助 K8s Service 机制，Falcon 在新旧发布之间平滑切换，现有请求在滚动更新的 grace period 内不被打断。
 - **`mirrorz.json`**：符合 [教育网联合镜像站（MirrorZ）](https://github.com/mirrorz-org/mirrorz) 标准。
 
-Falcon 使用 [规范驱动开发（SDD）](https://en.wikipedia.org/wiki/Specification-driven_development)，技术细节见由人工主导编写和维护的 `docs/spec` 下的内容。目前 Spec 仍主要是 AI 生成内容，且代码中可能存在较多防御性编程，正在缓慢整理优化中。
+![Falcon Overview](overview.png)
 
-![Falcon Overview](docs/spec/overview.png)
+Falcon 使用 [规范驱动开发（SDD）](https://en.wikipedia.org/wiki/Specification-driven_development)。本文的主要内容即为 Falcon 的设计规范，**必须由人类主导编写和维护**。
 
-## 快速开始
+本仓库采用 [Apache-2.0](LICENSE) 许可证。
 
-```sh
-helm install falcon oci://ghcr.io/zjusct/charts/falcon \
-  -n mirror --create-namespace -f my-values.yaml
-```
-
-- 镜像由 `Mirror` CR 描述；字段与示例见 [`docs/spec/mirror.md`](docs/spec/mirror.md)，也可在 [`crds.dev`](https://doc.crds.dev/github.com/ZJUSCT/falcon) 浏览。
-- CRD 随 chart 的 crds/ 目录在 install 时安装。helm upgrade 不更新 CRD，需手动 kubectl apply。
-- values 结构、RBAC 与部署细节见 [`docs/spec/chart.md`](docs/spec/chart.md)；管理前端见 [`docs/spec/ui.md`](docs/spec/ui.md)。
-
-## 开发检查
-
-提交前必须安装并运行 pre-commit：
-
-```sh
-pre-commit install
-pre-commit run --all-files
-```
-
-仓库的 pre-commit 配置会运行 YAML、Shell、Chart 校验以及完整的 Go 测试套件（`go test ./...`）。CI 使用相同的 Go 测试命令；修改 Go 类型或 CRD 后，请先通过本地 hook 再提交。
-
-Go 提交检查还需要本机安装 `golangci-lint`。pre-commit 会运行 `golangci-lint run`，其版本和配置以 `.golangci.yml` 为准。
-
-## 发布物
+以下是本仓库的 Artifacts：
 
 | 组件 | 地址 |
 | --- | --- |
@@ -51,68 +30,889 @@ Go 提交检查还需要本机安装 `golangci-lint`。pre-commit 会运行 `gol
 
 发版由推送 `v<semver>` git tag 触发 CI 构建全部 Artifacts，chart 版本按规范剥离 `v` 前缀。
 
-## 概念
+## 目录
 
-本项目的文档会使用下面几个词来描述资源的用途、可变性等性质：
+- [快速开始](#快速开始)
+- [K8s 基础](#k8s-基础)
+- [设计](#设计)
+  - [CRD](#crd)
+  - [镜像的生命周期](#镜像的生命周期)
+  - [映射到 MirrorZ](#映射到-mirrorz)
+  - [WebUI](#webui)
+  - [Helm Chart](#helm-chart)
+- [开发](#开发)
 
-- **同步**：可变
-- **发布**：镜像内容对用户可见，不可变
+## 快速开始
 
-下表中的时间戳是同步开始时的 UNIX 时间戳。该时间在控制器创建同步任务时生成，并传播到同步 Job、快照、发布 PVC 等对象的名称中。
+### 准备环境
 
-| 术语 | Kubernetes 对象 | 含义 |
+集群需要具备以下能力：
+
+- Kubernetes 和 Helm，以及创建 Falcon 所需资源的权限。
+- 支持 VolumeSnapshot 和从它克隆 PVC 的 CSI 驱动、VolumeSnapshot CRD 与快照控制器，以及对应的 StorageClass 和 VolumeSnapshotClass。
+- Gateway API CRD。通过特定协议（HTTP 或 Rsync）对外发布时，还需要可用的 Gateway 实现、Gateway 和域名解析；Gateway 的监听器应允许 Falcon 所在 namespace 的路由挂载。
+
+以 ZJU Mirror 的基础设施为例：
+
+| 组件 | 版本 |
+| --- | --- |
+| [K3s](https://github.com/k3s-io/k3s) | v1.36.3+k3s1 |
+| [openebs/zfs-localpv](https://github.com/openebs/zfs-localpv) | v2.11.0 |
+| [envoyproxy/gateway](https://github.com/envoyproxy/gateway) | v1.9.0 |
+
+### 安装 Falcon
+
+先按实际环境编写 `values.yaml`。以下域名和 Gateway 名称均为示例：
+
+```yaml
+global:
+  gatewayRef:
+    name: mirror-gateway
+    namespace: gateway-system
+    sectionName: https
+controller:
+  config:
+    site:
+      url: https://mirrors.example.org
+      abbr: EXAMPLE
+      name: 示例镜像站
+    publish:
+      hostnames:
+        - mirrors.example.org
+  metrics:
+    serviceMonitor:
+      enabled: false # 集群已安装 Prometheus Operator 时可启用
+catalog:
+  hosts:
+    - mirrors.example.org
+```
+
+```sh
+helm install falcon oci://ghcr.io/zjusct/charts/falcon \
+  -n mirror --create-namespace -f values.yaml
+```
+
+Chart 安装控制器和 Mirror、ProxyMirror CRD。具体镜像由运维人员另行创建。
+
+### 创建第一个 Mirror
+
+以下例子生成一个带时间戳的页面，用于验证“同步 → 快照 → 发布”的完整流程，不从真实软件源下载内容：
+
+```yaml
+apiVersion: mirrors.zjusct.io/v1alpha1
+kind: Mirror
+metadata:
+  name: demo
+  namespace: mirror
+spec:
+  info:
+    cname: demo
+    description: 验证同步与快照发布流程
+    upstream: 本地生成的演示内容
+  storage:
+    syncStorageClassName: <存储类名称>
+    publishStorageClassName: <存储类名称>
+    volumeSnapshotClassName: <快照类名称>
+    pvcTemplate:
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: 1Gi
+      volumeMode: Filesystem
+  sync:
+    interval: 6h
+    timeout: 5m
+    podTemplate:
+      spec:
+        containers:
+          - name: sync
+            image: busybox:1.37
+            command: [sh, -ec]
+            args:
+              - 'date -u > /data/index.html'
+            volumeMounts:
+              - name: sync-data
+                mountPath: /data
+  publish:
+    http:
+      podTemplate:
+        spec:
+          containers:
+            - name: nginx
+              image: nginx:stable-alpine
+              ports:
+                - containerPort: 80
+              volumeMounts:
+                - name: mirror-data
+                  mountPath: /usr/share/nginx/html/demo
+                  readOnly: true
+              readinessProbe:
+                httpGet:
+                  path: /demo/index.html
+                  port: 80
+```
+
+`sync-data` 和 `mirror-data` 的卷源由 Falcon 注入，用户只声明挂载位置。发布容器需要处理完整的 `/demo` 路径，Falcon 不自动移除路由前缀。
+
+```sh
+kubectl apply -f demo.yaml
+kubectl -n mirror get mirrors
+kubectl -n mirror describe mirror demo
+```
+
+首次同步、快照恢复及路由就绪后，可以访问 `https://mirrors.example.org/demo/index.html` 和 `https://mirrors.example.org/mirrorz.json`。
+
+该示例只用于验证流程。接入真实软件源时，应配置对应同步工具、服务配置、资源需求和退出行为。相关内容见 [TODO](TODO)。
+
+## K8s 基础
+
+在讨论 Falcon 的设计之前，让们先了解 K8s 提供的抽象和能力。从本质上说，Falcon 只是简单地围绕「镜像」这类对象创建、配置、管理相关的 K8s 资源，资源的调度、可用性、生命周期等都由 K8s 负责。
+
+### 存储快照与克隆（Snapshot & Clone）
+
+使用过 ZFS 的用户应当比较熟悉相关概念，恰好可以和 K8s 中的资源对应起来：
+
+| ZFS | K8s | 说明 |
 | --- | --- | --- |
-| 同步 PVC | `PersistentVolumeClaim`<br/>`<镜像名>-sync` | 一个镜像唯一可写的数据卷，同步 Job 的输出位置，不用于提供内容 |
-| 同步 Job | `Job`<br/>`<镜像名>-sync-<时间戳>` | 运行指定的同步镜像，把上游内容写入同步 PVC |
-| 快照 | `VolumeSnapshot`<br/>`<镜像名>-snap-<时间戳>` | 一次成功同步后的同步 PVC 的快照 |
-| 活跃快照 | `status.activeSnapshot` | 当前正在对外提供内容的那份快照 |
-| 发布 PVC | `PersistentVolumeClaim`<br/>`<镜像名>-snap-<时间戳>` | 从某个快照克隆出的只读数据卷 |
-| 活跃发布 PVC | `status.activePVC` | 当前正在对外提供内容的发布 PVC；除它之外的历史发布 PVC 按保留策略随各自快照一起清理 |
-| 发布服务 | `spec.publish` 的一个 key | 对外提供内容的方式，目前支持 http 和 rsync |
+| Dataset | PV | 可读写的数据卷 |
+| Snapshot | VolumeSnapshot | 只读快照 |
+| Clone | PVC dataSource = VolumeSnapshot | 从快照克隆出的只读卷 |
 
-## TODO
+快照和克隆使得原子化镜像发布成为可能：成功同步后打快照，用不可变的快照提供服务，同步继续进行。
 
-已经整理完成的 Spec：
+### 存储与 Workload 的亲和性（Affinity）
 
-- `common.md`
-- `mirror.md`
+Falcon 不关心后端是本地还是分布式存储。数据放在哪个节点由集群运维和 CSI 驱动决定，K8s 调度器会据此约束 Workload 的调度位置，Falcon 不参与这一过程。
 
-等待做的：
+- **PV nodeAffinity**：
 
-- Spec 全部整理
-- chart 和 pre-commit hook 等的校验完善
-- e2e 测试 CI 化
-- Before the next OpenEBS ZFS LocalPV release: enable snapshotter creation metadata, verify ZFS annotations, and align Falcon zfs-agent handling
+    - 创建 PV 时，CSI 驱动报告 PV 实际在哪里创建、可以在哪里访问，external-provisioner 将该信息写入 PV 的 `nodeAffinity`。
+    - Pod 使用 PV 时，调度器只会把它调度到满足该 PV 的 nodeAffinity 的节点上。
 
-## 与同步/服务容器的关系
+    > 以 zfs-localpv 为例，假设镜像的同步 PV 的 nodeAffinity 是 `openebs.io/nodeid In ["node-a"]`。由于同步 Pod 挂载了该 PV，调度器只会把它调度到 node-a 上。
 
-同步/服务的行为取决于具体的同步工具。Falcon 作为编排器，尽可能在这方面为各工具留出可配置的空间。
+- **StorageClass 的 volumeBindingMode**：
 
-我们实际使用过 [tuna/tunasync-scripts](https://github.com/tuna/tunasync-scripts) 和 [ustclug/ustcmirror-images](https://github.com/ustclug/ustcmirror-images)，这里记录一些使用经验。
+    StorageClass 具有 `volumeBindingMode`，该属性在 SC 创建后不可更改。可选值为：
 
-### 同步：tunasync-scripts
+    - `WaitForFirstConsumer`：Pod 调度 -> 为 Pod 选中节点 -> 在该节点上创建 PV。于是可以**通过约束 Pod 的调度位置来间接指定 PV 的位置**。
+    - `Immediate`：PVC 创建时立即创建 PV，Pod 的调度约束不参与，**无法通过 Pod 指定 PV 的位置**（绑定静态预创建的 PV 可用 `volumeName`/`selector`；动态 provision 可用 SC 的 `allowedTopologies` 限定范围）。
 
-TUNA 为裸机服务。该仓库由每个上游一个的独立同步脚本组成，Python、Shell Script 各半。这些脚本一致性较好，都按照 tunasync 的设计编写：
+    Falcon 建议：
 
-- env 稳定：
-    - `TUNASYNC_WORKING_DIR`：内容输出目录
-    - `TUNASYNC_UPSTREAM_URL`：上游地址
-- 日志：
-    - 输出统一：`echo` 到 stdout，符合一般 K8s 应用的习惯，容易由可观测性基础设施直接收集
-    - 格式统一：`%Y-%m-%dT%H:%M:%S - 文件:行号 [级别] 消息`
-- 退出码：脚本默认宽容部分同步的退出码，tunasync worker 除退出码外还按 `failOnMatch` 正则扫描日志判败
+    - `syncStorageClassName` 使用 WFFC，以便通过 `spec.sync.podTemplate.spec.nodeSelector` 或 `nodeAffinity` 指定镜像数据的存放位置。
+    - `publishStorageClassName` 使用 Immediate。
+        - 目前 VolumeSnapshot 不含拓扑信息，从它克隆 PVC 时也不参考快照的位置。以 zfs-localpv 为例，如果使用 WFFC，Pod 调度先于 PV 创建，而 zfs-localpv 始终在快照所属节点创建克隆，二者不一致时发布 Pod 会挂载失败。KEP-5943 将修复该问题。
+        - Immediate 在 PVC 创建时就触发供给，无需 Pod 先选择节点。Falcon 可以立即创建发布负载；调度器等待 PVC 绑定后，依据 PV nodeAffinity 放置 Pod。
 
-### 同步：ustcmirror-images
+> 参考资料：
+>
+> - [Topology - Kubernetes CSI Developer Documentation](https://kubernetes-csi.github.io/docs/topology.html)
+> - [Topology For Volume Snapshots | Kubernetes Contributors](https://www.kubernetes.dev/resources/keps/5943/)
+>
+>     KEP-5943 在 K8s v1.37 进入 Alpha 阶段，将解决快照拓扑感知问题（例如 [[cinder-csi-plugin] Snapshots not topology aware · Issue #1945 · kubernetes/cloud-provider-openstack](https://github.com/kubernetes/cloud-provider-openstack/issues/1945)）：
+>
+>     - VolumeSnapshotContent 增加 NodeAffinity
+>     - WFFC 和 Immediate 时根据快照的 NodeAffinity 创建 PV
+>
+>     需要等待规范 Alpha -> GA、CSI 驱动跟进实现快照拓扑能力，并且集群上部署 kubernetes-sigs/scheduler-plugins。
 
-USTC 全面容器化。不同的同步容器约定不同，但文档详尽。有大致统一的框架：
+### 滚动更新（Rolling Update）
 
-- 在 `base` 镜像中固定 entry 为 `upstream.sh`、`pre-sync.sh`、`sync.sh` 等一系列固定流程
-- 日志统一文件写入 `/log`
+Falcon 预期的 SLA 如下：
 
-### HTTP 服务：nginx
+> 发布新快照时，正常处理中的请求（in-flight requests）不被打断，不出现由滚动更新引起
+> 的连接重置或 HTTP 5xx；每个响应都必须完整地来自同一个不可变的镜像快照。Endpoint
+> 轮换期间，新请求可能暂时到达旧快照或新快照，但流量必须在有限时间内收敛到新快照。
 
-### Rsync 服务：rsyncd
+K8s 的机制保障了上述 SLA：
 
-## 许可证
+- Deployment 的 Rolling Update：
 
-[Apache-2.0](LICENSE)
+    - 顺序：Deployment 创建新 Pod -> 新 Pod 通过 readiness probe -> EndpointSlice 加入该 endpoint -> Service 负载均衡能够将新连接给它 -> 旧 Pod 标记 terminating -> 旧 endpoint 不再参与新连接 -> 旧 Pod 排空（drain）后退出。
+    - `maxUnavailable: 0` 保证更新期间不主动减少可用副本数；`maxSurge: 1` 允许先额外创建一个新 Pod。这是在 Deployment 仅使用一个实例的情况下保护可用性最简单的方式。如果资源充裕，当然也可以配置多个副本，进一步降低单点故障风险。
+
+- Pod 终止流程：开始删除 -> 标记 terminating 并执行 preStop hook -> 容器收到 **SIGTERM** -> 在 **grace period** 内退出 -> 超时则收到 **SIGKILL**。
+
+    Workload 需要遵守这套流程处理连接和请求，才能保证在滚动更新期间不丢失请求。
+
+- **HTTP/RsyncRoute 及其指向（`backendRef`）的 Service 一般不需要变动**
+
+Workload 需要善用 K8s 这套机制，合理设计 readiness probe、graceful shutdown 和 signal handling。
+
+## 设计
+
+### 零散、通用的设计点
+
+- **单命名空间部署**：集群上可能同时存在生产和测试实例。在配置妥当（例如指定的域名不冲突）的情况下，多个实例应该互不干扰、各自独立运行。K8s 一般使用 namespace 来隔离不同实例的资源，Falcon 总是将本实例的资源放在同一个 namespace 内。
+- **以 K8s API 为基准**：Falcon 主要遵守 K8s API 标准进行设计，不关心具体实现。例如在存储方面，Falcon 依赖 K8s 标准存储 API 定义的 VolumeSnapshot 等，而不关心其具体实现是 OpenEBS、Longhorn 还是 Ceph。
+- **状态持久化于 K8s**：编排进度保存在 CR 的 status、请求注解和子资源中；控制器重启后据此继续协调，已有同步 Job 和发布负载继续运行，仅调度和状态更新可能短暂延迟。
+- **适配具体实现**：为了实现 K8s 尚未或无法标准化的功能，Falcon 可能会依赖具体实现的特性。例如使用 OpenEBS ZFS LocalPV 作为存储后端时，Falcon 会使用 zfs-agent 获取 ZFS 的详细数据用于 UI 展示。
+- **暂不考虑支持多副本**：多副本一般是出于 Scaling 或 HA 需求。Falcon 目前的主要功能是 Reconcile，并不需要极高的可用性保障，也暂未观察到存在压力的场景，因此暂不考虑支持多副本。
+- **Fail Fast 而非隐式纠错**：在发现配置异常或不合法状态时，应立即显式报错并中断执行，而不是通过复杂的逻辑试图自动修正或忽略错误。这能防止错误扩散，显著降低排查成本。
+
+### 组件职责
+
+| 组件 | 负责的内容 |
+| --- | --- |
+| Falcon 控制器 | 调度同步、创建快照与发布资源、维护路由、更新状态、清理历史资源 |
+| 同步容器 | 从上游获取内容，判断同步是否成功，并以 Job 约定结果退出 |
+| 发布容器 | 提供特定协议（目前有 HTTP 和 Rsync）的内容服务，检查服务能力，处理连接和优雅退出 |
+| Kubernetes | 工作负载调度、Job 和 Deployment 生命周期、Service 端点维护、资源回收 |
+| CSI 与快照组件 | 卷供给、挂载、快照与恢复，以及后端拓扑约束 |
+| Gateway 实现 | 根据 Route 接收和转发外部请求 |
+| WebUI 与 zfs-agent | 展示镜像状态；采集 ZFS 存储信息 |
+
+### 配置文件
+
+Falcon 只有一个 flag `--config` 用于指定配置文件，默认 `/etc/falcon/config.yaml`。
+
+```yaml
+log:
+  level: info                      # debug | info | warn | error（zap）；空补 info
+api:
+  metricsBindAddress: ":8080"
+  healthProbeBindAddress: ":8081"
+  webapiBindAddress: ":8082"       # "0" 关闭 webapi
+site:
+  url: https://mirrors.example.org # 必填，必须带 scheme；mirrorz site 段与回落 baseURL
+  abbr: ""                         # 可选
+  name: ""                         # 可选
+catalog:
+  enabled: false                   # /mirrorz.json 开关（chart 默认 true）
+sync:
+  maxConcurrent: 0                 # 全局同步并发上限；<= 0 = 不限
+publish:
+  gatewayRef:                      # hostnames 非空时 name 必填
+    name: ""
+    namespace: ""
+    sectionName: ""
+  hostnames: []                    # 空 ⇒ HTTPRoute 生成整体关闭
+  labels: {}                       # 盖到每条发布 HTTPRoute
+  annotations: {}
+```
+
+### CRD
+
+镜像 CRD 需要回答四个问题：
+
+- 怎么存储
+- 怎么同步
+- 怎么服务
+- 其他信息
+
+自然产生了 `spec` 中的 `storage`、`sync`、`publish`、`info` 四个 map。并且这些内容 K8s 已经有了对应的抽象：Job、PVC、VolumeSnapshot、Deployment、Service 等，只需要把这些内容组合起来，再加上一些镜像编排的内容，就形成了可以描述镜像的 CRD。
+
+API 组 `mirrors.zjusct.io`，版本 `v1alpha1`，kind `Mirror`（复数 `mirrors`，无短名）和 `ProxyMirror`（复数 `proxymirrors`，无短名），均为 namespaced。
+
+本 spec 中 CRD 的备注格式：
+
+```yaml
+field:
+# <类型>：<字段的含义>
+# <必填/可选>：<默认值>
+# 校验（<校验器>）：<规则>
+# 备注：<其他说明>
+```
+
+#### Mirror
+
+```yaml
+metadata:
+  name: <base>
+  # string：镜像唯一标识符
+  # 必填
+  # 校验（K8s 内置）：符合 RFC 1123 subdomain，允许 [a-z0-9]、[-.]
+spec:
+  info:
+    # 必填；该部分主要用于 MirrorZ
+    cname: debian
+    # string：MirrorZ 用于跨站点归组的镜像名，不受 CR 命名规则限制
+    # MirrorZ 的 cname.json 归一化已知别名，未命中的名称保留原值
+    # 可选：未设置时使用 metadata.name
+    # 校验（schema）：指定时非空（MinLength=1）
+    description: Debian 发行版软件包镜像
+    # string：镜像描述，直接用于 MirrorZ desc
+    # 可选；为空时不输出 desc
+    upstream: rsync://...
+    # string：上游来源描述
+    # 必填
+  sync:
+    paused: false
+    # bool：暂停自动同步
+    # 可选
+    interval: 6h
+    # duration：同步周期
+    # 必填
+    # 校验（控制器）：> 0
+    retryInterval: 15m
+    # duration：快速重试间隔
+    # 可选：默认 15m
+    # 校验（控制器）：> 0
+    timeout: 24h
+    # duration：单次同步超时
+    # 必填
+    # 对应：同步 Job spec.activeDeadlineSeconds
+    # 校验（控制器）：> 0
+    failureRetryLimit: 3
+    # int32：快速重试次数上限；0 = 无快速重试
+    # 可选：默认 3
+    # 校验（schema）：Minimum=0
+    keepFailedJobs: 1
+    # int32：按创建时间保留的最近失败 Job 数
+    # 可选：默认 1
+    # 校验（schema）：Minimum=0
+    podTemplate:
+      # PodTemplateSpec：同步 Job 的完整 PodTemplate
+      # schema 可省略，但控制器要求有效模板
+      # 对应：同步 Job spec.template
+      # 校验（控制器）：至少一个容器且第一个容器 image 非空；volumes 不得使用保留卷名 sync-data
+      # Falcon 仅组合编排所需字段：sync-data PVC 卷、restartPolicy=Never、同步标签和 Job 超时。
+      # 安全上下文、镜像拉取策略、文件系统、探针、环境变量、sidecar、init 容器等均由用户声明，Falcon 不注入或覆写。
+      # 不注入放置约束（WFFC + 绑定 PV affinity 原生约束，见「存储局部性」）。
+      # 以下 metadata/spec 仅示意控制器注入后的字段，不是用户输入。
+      # 用户只声明 sync-data 的 volumeMounts，不得声明同名 volume。
+      metadata:
+        labels:
+          app.kubernetes.io/name: falcon
+          app.kubernetes.io/managed-by: falcon-controller
+          mirrors.zjusct.io/mirror: <base>
+          app.kubernetes.io/component: sync
+          mirrors.zjusct.io/sync-timestamp: <ts>
+      spec:
+        restartPolicy: Never
+        volumes:
+          - name: sync-data
+            persistentVolumeClaim:
+              claimName: <base>-sync
+  storage:
+    pvcTemplate:
+      # PersistentVolumeClaimSpec：同步和发布 PVC 共享的标准 Kubernetes PVC 配置
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 500Gi
+      volumeMode: Filesystem
+      volumeName: <existing-pv>
+      # 可选：仅同步 PVC 创建时使用，用于绑定现有 PV；发布 PVC 不继承此字段
+      # 控制器拒绝 storageClassName、dataSource、dataSourceRef、selector
+      # 发布 PVC 的 dataSource 由 Falcon 指向本次 VolumeSnapshot
+      # 校验（控制器）：accessModes 至少一项，resources.requests.storage > 0
+    syncStorageClassName: ...
+    # string：同步 PVC 使用的 StorageClass
+    # 必填；对应同步 PVC spec.storageClassName
+    publishStorageClassName: ...
+    # string：快照克隆得到的发布 PVC 用的 SC，须与快照/StorageClass 同后端同拓扑
+    # 必填；对应发布 PVC spec.storageClassName
+    # 校验（schema、控制器）：非空
+    # 发布 PVC 复用 pvcTemplate，覆盖 storageClassName、清除 volumeName 并设置 dataSource
+    # 备注：建议 reclaimPolicy: Delete 以及时清理快照
+    # （本地 PV 语义下即同节点）
+    volumeSnapshotClassName: ...
+    # string：快照用的 VolumeSnapshotClass（原子发布依赖），须由同一存储后端提供
+    # 必填，无默认值
+    # 对应：VolumeSnapshot spec.volumeSnapshotClassName
+    # 校验（schema）：非空（MinLength=1）
+    # 校验（控制器）：非空
+    retention: 1
+    # int32：除最新就绪快照之外保留的历史快照代数；纯同步镜像同样适用
+    # 可选：默认 1
+    # 校验（schema）：1–10
+  publish:
+    # 可选；固定 key：http / rsync；key 出现 = 启用，不出现 = 禁用；
+    # 全禁用 = 纯同步镜像（保存就绪快照，跳过发布，不创建克隆 PVC）
+    http:
+      # 形状 = MirrorServiceSpec + aliases
+      replicas: 1
+      # int32：发布副本数
+      # 可选：默认 1
+      # 对应：发布 Deployment spec.replicas
+      # 校验（schema）：1–3
+      aliases:
+        - /git/debian
+      # []MirrorHTTPAlias：额外路由，用于补充 CR 名无法表达的合法路由，例如：
+      # 大写字母（AOSP）、多层路径（/git/linux.git）
+      # 可选
+      # 校验（schema）：最多 8 项、每项 ≤200 字符
+      # 校验（控制器）：无重复、不等于规范路径 /<CR 名>、逐项语法（/ 开头、不以 / 结尾、
+      # 无 //、无空白；大小写敏感、允许大写）
+      podTemplate:
+        # PodTemplateSpec：发布 Deployment 的完整 PodTemplate，由运维人员声明全部工作负载字段
+        # 对应：发布 Deployment spec.template
+        # 校验（CEL）：key 出现时 podTemplate.spec 存在
+        # 校验（控制器）：至少一容器、第一容器至少一个 containerPort；volumes 不得含保留卷名 mirror-data；
+        # 对其挂载必须 readOnly
+        # Falcon 管理只读 mirror-data PVC 卷和控制器标签；不注入放置约束、安全设置、探针、端口、
+        # /tmp、镜像策略或其他工作负载字段。Service 的 targetPort 使用第一容器声明的第一个 containerPort。
+        # 以下 metadata/spec 仅示意控制器注入后的字段，不是用户输入。
+        # 用户只声明 mirror-data 的只读 volumeMounts，不得声明同名 volume。
+        metadata:
+          labels:
+            mirrors.zjusct.io/mirror: <base>
+            app.kubernetes.io/component: publish-http
+        spec:
+          volumes:
+            - name: mirror-data
+              persistentVolumeClaim:
+                claimName: <publish-pvc>
+                readOnly: true
+    rsync:
+      podTemplate:
+        spec:
+          containers:
+            - name: rsyncd
+              ports:
+                - containerPort: 873
+status:
+  # 以下字段由控制器维护，均可省略；含义以当前已观察到的状态为准
+  observedGeneration: 1
+  # int64：控制器已观察的 generation，不代表该配置已成功完成
+  lastAcceptedSpecHash: ...
+  # string：最近接受的同步事务对应的 spec.sync 哈希，不包含 paused
+  lastAcceptedSyncAt: ...
+  # Time：最近接受的同步代次时间（秒精度）；取消后仍保留，避免同秒重复分配
+  workPVC: <base>-sync
+  # string：长期复用的可写同步 PVC
+  activePVC: <base>-snap-<ts>
+  # string：最近确认可以服务的发布 PVC；ts 为事务接受时间的 Unix 秒
+  activeSnapshot: <base>-snap-<ts>
+  # string：该活跃发布 PVC 来源的 VolumeSnapshot
+  sync:
+    phase: Waiting
+    # string：同步调度/执行状态；必填（sync 存在时）
+    # 校验（schema）：Waiting | Pending | Syncing | Snapshotting | Retrying | Cancelling
+    reason: ...
+    message: ...
+    # string：状态原因和说明；可选
+  currentSync:
+    queuedAt: ...
+    # Time：接受事务的时刻；必填，用于派生 Job、快照、发布 PVC 名
+    startedAt: ...
+    # Time：Kubernetes Job startTime；可选
+    phase: Pending
+    # string：同步进展（含 Job 结束后的快照准备）或取消状态；必填
+    # 校验（schema）：Pending | Running | Snapshotting | Cancelling
+    manual: true
+    # bool：本轮由手动请求触发，可在暂停模式下执行；可选，默认 false
+  # 当前同步请求，覆盖排队、Job 执行和快照准备；快照就绪并交付后清空
+  lastSnapshot:
+    name: <base>-snap-<ts>
+    # string：最近一次同步交付的 readyToUse 快照；必填
+    queuedAt: ...
+    # Time：来源同步请求的接受时刻；必填
+    jobName: ...
+    # string：来源同步 Job；必填
+  # 独立于最近成功发布的 activeSnapshot；未启用发布服务时也保留
+  publication:
+    queuedAt: ...
+    # Time：来源同步请求的接受时刻，用于派生资源名；必填
+    jobName: ...
+    # string：来源同步 Job；必填
+    phase: Restoring
+    # string：发布进展；必填
+    # 校验（schema）：Restoring | RollingOut | Draining
+    snapshot: <base>-snap-<ts>
+    # string：同步流程交付的 readyToUse 快照；必填
+    pvc: <base>-snap-<ts>
+    # string：本次发布已绑定的 PVC；可选
+  # 待完成的发布；与最近成功服务的 activeSnapshot/activePVC 分开记录
+  nextSyncAt: ...
+  # Time：下一次自动同步的计划时刻；不覆盖暂停设置
+  consecutiveFailures: 0
+  # int32：当前同步 Job 失败的重试计数，上限 failureRetryLimit
+  lastSuccessfulSyncAt: ...
+  # Time：最近成功的同步 Job 的完成时刻，独立于发布结果
+  pausedAt: ...
+  # Time：控制器观察到自动同步暂停生效的时刻
+  lastPublishedAt: ...
+  # Time：最近一次确认新代次可以服务的时刻，不包含旧 Pod 排空时间
+  requestCleanup:
+    token: ...
+    # string：请求清理凭据；必填，由控制器维护
+    sync: true
+    abort: false
+    # bool：待清理的请求注解；可选，默认 false
+  # 操作已完成但注解尚待清理的记录，清理后移除；用于控制器重启恢复
+  sizeBytes: 0
+  # int64：活跃发布 PVC 的 kubelet usedBytes；未知时省略，0 也按未知处理
+  # 切换 activePVC 时不继承上一代用量；后续可回填当前 PVC 的用量
+  lastSync:
+    jobName: ...
+    # string：Job 名；必填
+    phase: Succeeded
+    # string：Job 结果；必填；校验（schema）：Succeeded | Failed | Cancelled
+    startedAt: ...
+    # Time：Job 开始时刻；可选
+    finishedAt: ...
+    # Time：Job 结束或取消确认时刻；可选
+    message: ...
+    # string：附加信息；可选
+  # 最近完成的同步 Job；取消尚未开始的任务时保留原值
+  lastAttempt:
+    jobName: ...
+    # string：事务对应的 Job 名，Job 可能尚未创建；必填
+    phase: Succeeded
+    # string：同步请求结果；必填；校验（schema）：Succeeded | Failed | Cancelled
+    startedAt: ...
+    # Time：事务接受时刻；可选
+    finishedAt: ...
+    # Time：事务结束时刻；可选
+    message: ...
+    # string：附加信息；可选
+  # 最近结束的同步请求，成功表示已交付就绪快照；包括尚未创建 Job 就被取消的请求，不包含发布结果
+  conditions: []
+  # []Condition：Ready / Progressing / Degraded，分别描述可用性、进展和异常
+```
+
+打印列：Ready condition、Active PVC、Last Sync（`.status.lastSync.finishedAt`）、Age。
+
+#### ProxyMirror
+
+- `spec.info`、`spec.publish.http` 与 Mirror 相同
+- 没有 `sync` 或 `storage`，可通过 `cache` 配置缓存存储
+- 没有 finalizer，删除 CR 时靠 owner-reference GC 回收全部子资源
+
+```yaml
+spec:
+  cache:
+    # 可选；出现即启用缓存存储，移除则删除缓存 PVC；与 HTTP 发布开关独立
+    # 仅控制 PVC；nginx 等代理行为由发布 Pod 的配置文件声明
+    pvcTemplate:
+      # PersistentVolumeClaimSpec：必填
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 20Gi
+      storageClassName: ...
+      volumeMode: Filesystem
+      # 校验（控制器）：accessModes 至少一项，resources.requests.storage > 0
+      # dataSource、dataSourceRef、selector、volumeName 不支持
+  publish:
+    # 仅 http 一个 key（代理即 HTTP 发布者）；key 未出现 = 不部署负载，代理不对外发布
+    http:
+      replicas: 1
+      # 同 Mirror（略）
+      podTemplate:
+        # PodTemplateSpec：发布容器的完整声明
+        # 启用 http 时必填；校验（CEL）：podTemplate.spec 必须存在
+        # 对应：发布 Deployment spec.template
+        # 校验（控制器）：至少一容器、第一容器至少一个 containerPort
+        # 以下仅示意控制器注入后的字段，不是用户输入；不得声明同名 volume。
+        spec:
+          volumes:
+            - name: proxy-cache
+              persistentVolumeClaim:
+                claimName: <base>-cache
+        #   （仅缓存启用时管理；可写卷源——缓存本身就是写入目标；保留卷名，
+        #   用户不得声明同名 volume；挂载与否、挂载路径由用户自行声明）
+        # 代理 Deployment/Pod 的其他字段同样完全来自运维人员的 PodTemplate；Falcon 只注入上述缓存卷和控制器标签。
+        # 模板 labels 叠加 mirrors.zjusct.io/mirror: <base>、app.kubernetes.io/component: publish-http
+        # 节点放置不注入（代理无数据卷，局部性无从推导，调度由用户决定）
+        # 无工作负载默认注入；安全策略由集群准入策略或用户 PodTemplate 管理。
+        # 备注：nginx proxy_cache 惯用缓存目录 /var/cache/nginx/proxy，
+        #   由用户在 template 中自行挂载，控制器不注入挂载
+status:
+  observedGeneration: 1
+  conditions: []
+  # Ready / Progressing / Degraded；派生资源名均可由 CR 名与 spec 确定，不重复写入 status
+```
+
+打印列：Ready condition、Age。
+
+#### 校验
+
+各字段的校验规则已在上文 YAML 注释中描述，这里对相关机制和设计意图进行说明：
+
+- **schema**：kubebuilder 标记（必填/枚举/范围/数量），apiserver 写入时拦截。
+- **CEL**：准入求值，与 schema 同层拦截。CEL 不应编写复杂规则，因其难以在编写时发现错误。
+- **控制器校验**：覆盖 Falcon 自身语义中需迭代列表的规则（如保留卷名）；失败状态置 `Degraded`。
+
+Falcon 仅对 CRD 做基础校验，派生资源的校验由其他组件负责，Falcon 消费相关事件。例如：
+
+- Falcon 不对 `spec.publish.http.aliases` 与其他 Mirror 路径的重叠做校验，而是交给 Gateway 规范和具体实现。HTTPRoute 明确报告 `Accepted=False` 或 `ResolvedRefs=False` 时，Falcon 设置 `Degraded=True/HTTPRouteRejected` 并保留网关的 reason/message 上下文。
+- Falcon 不预检派生资源名长度。创建或更新派生资源被 apiserver 以 `Invalid` 拒绝时，Falcon 将原始错误转述到父 CR 的 `Degraded/DerivedResourceInvalid` condition，并记录同名 Warning Event。
+
+#### 资源和术语
+
+名字后缀表：
+
+| 资源或术语 | 字段或命名 | 说明 |
+| --- | --- | --- |
+| 同步 PVC | `<base>-sync` | 同步任务的可写卷；不用于对外服务 |
+| 同步 Job | `<base>-sync-<Unix秒>` | 运行同步工具，更新同步 PVC 中的内容 |
+| VolumeSnapshot | `<base>-snap-<Unix秒>` | 同步成功后保存的快照 |
+| 发布 PVC | `<base>-snap-<Unix秒>` | 从快照克隆的只读数据卷，挂载到发布容器 |
+| 发布 Deployment、Service、Route 等 | `<base>-publish-<protocol>` | 提供内容服务的相关资源 |
+| 缓存 PVC | `<base>-cache` | ProxyMirror 镜像的缓存数据卷 |
+| 发布代次 | UNIX 时间戳 | 以同步事务开始时分配的时间戳标识 |
+| 活跃发布 | `status.activeSnapshot`、`status.activePVC` | 控制器最近确认激活的代次 |
+
+- 一个 Mirror 对应一个长期复用的同步卷和若干发布代次。每代内容来自一次成功同步后的快照。
+- 时间戳是**控制器接受同步事务时**的 UNIX 时间戳，并传播到同步 Job、快照、发布 PVC 的名字与标签。
+- Service 名和 label 值受最长 63 字符的 DNS label 约束，超长会被 K8s 拒绝。
+
+子资源 Label：
+
+- `app.kubernetes.io/name: falcon`
+- `app.kubernetes.io/managed-by: falcon-controller`
+- `mirrors.zjusct.io/mirror: <base>`
+- `app.kubernetes.io/component: <sync|snapshot|publish-data|publish-http|publish-rsync|proxy-cache>`：用于 Service 选 Pod
+
+快照代次子资源（发布 PVC、VolumeSnapshot、同步 Job）另带
+
+- `mirrors.zjusct.io/sync-timestamp: <Unix秒>`：用于排序、批量选择等
+
+发布 Pod 模板不注入代次注解。发布 PVC 名内嵌时间戳，代次信息由其唯一承载；切换发布代次时，`mirror-data` 卷的 `claimName` 变化会改变 Pod 模板并触发 Deployment 滚动。
+
+### 镜像的生命周期
+
+#### 首次创建
+
+Falcon 首次处理 Mirror 时添加存储清理 finalizer。配置有效、未暂停且尚无完成记录时，自动开始首次同步。
+
+ProxyMirror 不存在同步和发布流程。Falcon 按照其配置创建好相关资源、确认就绪后就完事了。
+
+#### 同步和发布流程
+
+同步和发布是两个独立互斥的流程：
+
+- 同步：
+    - 控制器在满足触发条件后接受一轮同步，并分配秒级时间戳作为代次标识
+        - 首次同步：镜像尚无已完成的同步记录。
+        - 周期同步：到达下一次计划同步时间。
+        - 失败重试：Job 失败后到达快速重试时间；达到重试上限后恢复普通周期。快照错误保留当前同步流程并报告 `Degraded`，不触发新的 Job。
+        - 同步配置变更：`spec.sync` 中除 `paused` 外的配置与上次接受的配置不同；信息、存储、发布配置不参与。
+        - 手动请求：存在 `mirrors.zjusct.io/sync-request: "true"`；WebUI 的 Sync Now 写入该注解。
+        - 暂停仅限制上述自动触发，手动请求仍可执行；所有同步均需等待上一轮同步和发布（含旧 Pod 清理）完成。
+        - 同一镜像同一秒只接受一个同步代次，多次触发不产生多个同秒代次。例如，一轮同步在等待配额时被取消，同秒又收到新请求，则保留新请求，等到下一秒再接受，避免复用已取消代次的时间戳和资源名。时间戳从同步延续到快照和发布，Job 的实际开始、结束时间另行记录。
+    - 等待并发任务配额
+    - 创建 Job
+    - Job 结束，记录 Job 结果并释放并发配额
+    - 成功后创建快照，等待 `readyToUse=true`
+    - 保存 `lastSnapshot`（启用发布服务时还包括 `publication.snapshot`），交付 readyToUse 的快照作为本次同步的产物
+- 发布：没有配置 `publish` 时直接跳过
+    - 接收同步流程交付的就绪快照
+    - 克隆 PVC
+    - 创建/更新发布 Deployment
+    - 滚动更新
+    - 旧 Pod 排空
+    - 记录发布结果
+
+相互关系：
+
+- 成功的同步触发发布
+- 未完成的发布阻塞下一轮同步，避免覆盖待发布的数据或积累更多代次。
+
+没有进行中的同步或发布流程时，控制器仍维护已启用的发布 Deployment、Service 和 HTTPRoute。
+
+其他边边角角的 case：
+
+- 添加发布服务：直接使用 `lastSnapshot` 启动发布，无需先做一次同步，不受同步暂停影响。
+- 移除发布服务：尚未完成的旧 Pod 清理仍阻塞下一轮同步。
+
+#### 镜像的状态
+
+`status.conditions` 主要关注镜像的服务状态。按照 K8s 的设计，该字段各个条目描述相互独立的事实，值为 `True`、`False` 或 `Unknown`；多条可以同时为 `True`。每条带有 `reason`、`message`、`observedGeneration` 和 `lastTransitionTime`。
+
+| Condition | 含义 |
+| --- | --- |
+| `Ready` | HTTP endpoint 可对外提供服务，与 MirrorZ 收录条件一致；新发布失败不必使仍可用的旧内容离线。纯同步、仅 Rsync 镜像不满足此条件。 |
+| `Progressing` | 发布仍未完成，包括克隆、初次部署、滚动更新、路由等待和旧 Pod 排空；不表示同步 Job 正在运行。 |
+| `Degraded` | 存在已报告的异常，原因和消息说明其来源。 |
+
+举例：镜像的 HTTP 服务正常（`Ready`），同时出现了其他错误（`Degraded`）
+
+`status.sync.phase` 描述同步调度与执行，暂停模式由 `spec.sync.paused` 独立表示。ProxyMirror 没有同步状态。
+
+| Phase | 含义 |
+| --- | --- |
+| `Waiting` | 没有待执行的同步请求，等待下一次触发。 |
+| `Pending` | 同步已触发，等待发布完成、并发配额或 Job 开始。 |
+| `Syncing` | 同步 Job 正在执行。 |
+| `Snapshotting` | Job 已成功，等待快照就绪；快照错误时保留此阶段并报告 `Degraded`。 |
+| `Retrying` | 上次 Job 失败，等待快速重试；暂停模式下不会自动开始。 |
+| `Cancelling` | 已请求取消，等待同步工作负载停止。 |
+
+#### 同步暂停、其他触发条件和强制终止
+
+暂停自动同步：设置`spec.sync.paused: true`。暂停不影响服务和手动同步。
+
+手动请求同步：点击 WebUI 上的按钮或设置 `mirrors.zjusct.io/sync-request: "true"`。Annotation 在同步流程结束后移除。快照错误时保留请求并报告 `Degraded`。注解存在期间重复写入 `"true"` 合并为一次请求。
+
+配置变更：仅 `spec.sync` 中除 `paused` 外的变更触发自动同步，通过 `lastAcceptedSpecHash` 记录已接受的配置。信息、存储和发布配置的变更不触发同步；自动同步仍受暂停模式和发布完成的约束。
+
+强制终止：
+
+- 设置 `mirrors.zjusct.io/abort-request: "true"`，目标为控制器处理时的当前同步流程。
+- 仅 `status.currentSync.phase` 为 `Pending` 或 `Running` 的同步流程可请求 Abort，进入 `Cancelling` 后，由控制器以 foreground propagation 删除当前 Job。不符合条件的请求被忽略并移除。
+- 注解保留至工作负载停止且取消结果已记录，期间重复请求合并；取消手动同步时一并移除其 `sync-request`，不会再次启动该请求。
+
+#### 停止服务
+
+移除 `spec.publish.http` 或 `spec.publish.rsync` 会删除对应的发布 Deployment 和 Service。移除 HTTP 服务还会删除所属 HTTPRoute。
+
+停服不关闭自动同步，存储仍按保留策略管理。ProxyMirror 移除 HTTP 服务时，只要 `spec.cache` 仍存在，就保留缓存 PVC。
+
+K8s 已接受的停服配置不会被其他字段的控制器校验错误或尚未完成的同步取消所阻塞；移除 HTTP 后 `Ready=False`。
+
+#### 镜像的删除与数据保留
+
+删除 Mirror 时，Falcon 按「同步 Job 和发布 Deployment → PVC → VolumeSnapshot」的顺序删除属于该 Mirror 的资源，各阶段等待对应资源消失后再继续，最后移除 finalizer。工作负载使用 foreground deletion，等待其 Pod 正常终止；Service 和 HTTPRoute 由 owner-reference GC 回收。
+
+ProxyMirror 无此 finalizer，其子资源统一由 owner-reference GC 回收。
+
+Falcon 不直接管理 PV 或后端数据；PVC 消失不表示后端卷已完成删除。数据是否保留由各资源自身的策略决定：
+
+| 资源 | 保留策略 |
+| --- | --- |
+| 同步 PV、发布 PV、缓存 PV | 各 PV 的 `spec.persistentVolumeReclaimPolicy`：`Retain` 或 `Delete` |
+| VolumeSnapshotContent 及后端快照 | `VolumeSnapshotContent.spec.deletionPolicy`：`Retain` 或 `Delete` |
+
+动态供给时，上述策略分别来自 StorageClass 和 VolumeSnapshotClass；修改 Class 不会自动改变已有资源的策略。若希望删除 Mirror 后仅保留同步 PV，应将同步 PV 设为 `Retain`，发布 PV 和快照内容设为 `Delete`。`storage.retention` 只控制 Mirror 存续期间的历史代数，不阻止删除 Mirror 时清理其 PVC 和 VolumeSnapshot。
+
+在同一集群的 Falcon 实例间迁移镜像，可复用保留的同步 PV：先确认其回收策略为 `Retain`，删除原 Mirror 并等待旧工作负载和 PVC 消失；由运维人员清除或重新指定 PV 的旧 `claimRef`，再创建新 Mirror，将 `storage.pvcTemplate.volumeName` 指向该 PV，并使用兼容的存储配置。仅指定 `volumeName` 不会解除 PV 与旧 PVC 的绑定。
+
+### 映射到 MirrorZ
+
+`GET /mirrorz.json` 的输出按 [mirrorz-org/mirrorz](https://github.com/mirrorz-org/mirrorz) 构造。[`mirrorz-monitor`](https://github.com/mirrorz-org/mirrorz-monitor) 监控所有镜像站的 `/mirrorz.json` 并决定重定向，它的行为决定了 Falcon 如何设计该输出：
+
+- 一旦镜像被收录到 `mirrorz.json`，就有可能被重定向，也就是说**收录表示可用**。因此，Falcon 仅在镜像的 HTTP endpoint 可用时才收录。
+- status 表示**同步新鲜度**，用于计算重定向权重。
+
+MirrorZ 字段与 Falcon 字段的映射：
+
+```jsonc
+// 收录条件：spec.publish.http 已配置，且当前 metadata.generation 对应的 Ready condition 为 True。
+// 排序：按 cname 字典序。
+{
+  "version": 1.7,
+  "site": {
+    // 请求 Host 命中 publish.hostnames 时回显该 Host，否则为配置值
+    "url": "controller.config.site.url（去末尾 /）",
+    "abbr": "controller.config.site.abbr",
+    "name": "controller.config.site.name"
+    // 此处省略 logo/homepage/issue/request/email/group/... 等更多字段
+  },
+  "info": [],   // 分类视图，Falcon 恒为空数组
+  "mirrors": [
+    // 一个 Mirror 或 ProxyMirror 对应一个条目：
+    {
+      "cname": "spec.info.cname（未设置时使用 metadata.name）",
+      "desc": "spec.info.description", // 普通字符串，为空则省略
+      "url": "site.url + \"/\" + metadata.name", // 同样受 Host 回显影响
+      "status": "", // 见下表
+      "upstream": "spec.info.upstream",
+      "size": "status.sizeBytes" // 字节转可读格式（1024 进制，两位小数）；未知则省略
+    }
+    // "help" 与 "disable" 字段 Falcon 暂不输出（TODO）
+  ]
+}
+```
+
+| 情况 | 条件 | 完整 status |
+| --- | --- | --- |
+| 手动模式，暂停已生效 | `sync.paused && pausedAt != nil && (currentSync == nil || currentSync.phase == "Pending")` | `P<pausedAt>N<creationTimestamp>` |
+| 正在排队／取消尚未开始的同步 | `currentSync.phase == "Pending"`，或 `currentSync.phase == "Cancelling" && currentSync.startedAt == nil` | `D<currentSync.queuedAt>N<creationTimestamp>` |
+| 正在同步／等待运行中的同步终止 | `currentSync.phase == "Running"`，或 `currentSync.phase == "Cancelling" && currentSync.startedAt != nil` | `Y<currentSync.startedAt>O<lastSuccessfulSyncAt>N<creationTimestamp>` |
+| 最近同步成功 | `lastSync.phase == "Succeeded"` | `S<lastSync.finishedAt>[X<nextSyncAt>]N<creationTimestamp>` |
+| 最近同步失败／已中止 | `lastSync.phase` 为 `Failed` 或 `Cancelled` | `F<lastSync.startedAt>O<lastSuccessfulSyncAt>[X<nextSyncAt>]N<creationTimestamp>` |
+| ProxyMirror：缓存启用 | `spec.cache` 存在 | `CN<creationTimestamp>` |
+| ProxyMirror：无缓存 | `spec.cache` 未设置 | `RN<creationTimestamp>` |
+
+Falcon 不输出 `D`：首次成功前 Ready=False，条目不会进入目录；周期同步的等待态则用上一笔已完成结果 `S` 或 `F` 表达，比 `D` 更准确。同步或失败期间的 `O` 让 monitor 使用旧的成功发布时间判断仍在服务的 immutable snapshot 是否新鲜。
+
+其他：
+
+- 条目 url 恒为 CR 名，`publish.http.aliases` 别名不出现在 mirrorz 输出中。
+
+### zfs-agent
+
+本仓库还实现了 zfs-agent，它作为 DaemonSet 运行，采集节点 ZFS 存储的详细信息。zfs-agent 是可选的，Falcon 不依赖它。
+
+- `mirrorz.json` 中的容量信息直接走 K8s API 获取发布 PVC 的使用量，无需额外采集。
+- K8s 无法采集 ZFS refer、written 等详细信息，这些主要供 Falcon WebUI 展示。
+- zfs-agent 还采集其他 ZFS 指标，尤其是性能数据，使用 OpenTelemetry 协议上报，供 ZFS 性能分析使用。
+
+### WebUI
+
+镜像及其同步信息不是很好用 Grafana Dashboard 之类的现成方案展示，所以 Falcon 设计了 WebUI。
+
+Falcon WebUI 不设计用户系统。鉴权使用 GitHub OAuth，在配置文件中指定可访问 WebUI 的 GitHub 用户 ID。
+
+Falcon 的 `/api` 仅供 WebUI 使用。
+
+页面：
+
+- Overview：时钟轮盘表示的 24 小时镜像同步状态。
+- Mirrors：详细的镜像列表，Conditions 列展示所有为 True 的条件，Sync phase 列独立展示同步状态（ProxyMirror 不适用）。
+    - 列表提供的控制操作：
+        - Pause/Resume：暂停或恢复镜像的周期同步。
+        - Sync Now：立即发起一次同步。
+        - Abort：立即终止正在运行的同步事务。
+    - 镜像详情页面显示：
+        - 同步状态
+        - 存储占用：总容量和每个快照的增量
+        - 同步日志：当前或上次的 Job 日志，显示方式和功能直接抄 Headlamp。
+        - 该镜像的 CR YAML
+- Storage（ZFS）：根据 zfs-agent 上报的数据显示各节点 ZFS 情况。
+
+### Helm Chart
+
+Helm Chart 在命名空间中安装一个 Falcon 实例，包括 WebUI、zfs-agent、Service、RBAC、CRD 等。
+
+根据部署使用的工具，Chart 中的 CRD（`charts/falcon/crds`）可能需要手动执行升级：
+
+- ArgoCD 会自动升级 CRD
+- CRD 对 Helm 来说是 install-only：升级不会更新它们，卸载也不会删除它们。
+
+## 开发
+
+### 测试规范
+
+审慎编写单元测试，过度设计的测试只会增加维护负担，不要以测试数量或覆盖率作为目标。
+
+检查分为静态检查与构建、单元/组件测试、E2E 三个层次。
+
+| 检查组（Compose service） | 范围与内容 |
+| --- | --- |
+| `hygiene` | 仓库文件：YAML、Shell、空白、冲突标记及文件大小检查 |
+| `go-checks` | Falcon 与 zfs-agent：golangci-lint、`go test -race -count=1 ./...`、两个 Go 二进制的构建 |
+| `verify-generated` | CRD 与 deepcopy：重新生成并比较，发现遗漏更新时报错 |
+| `ui-checks` | Falcon UI：`npm ci`、`npm run build`（含 TypeScript 与 ESLint） |
+| `chart-checks` | Helm lint、默认配置及全组件配置的渲染校验、Chart 打包 |
+
+### 执行检查
+
+宿主机只需 Git、GNU Make、Docker（含 Compose v2 和 BuildKit），无需安装 Go、Node、Helm 或 controller-gen。工具版本及基础镜像 digest 固定在 `scripts/checks/Dockerfile` 和 `.pre-commit-hygiene.yaml` 中，本地与 CI 使用相同入口：
+
+```sh
+make check                   # 全部提交检查，任一失败则退出非零；直接 make 也相同
+make go-checks               # 只检查 Go
+make ui-checks chart-checks  # 选择多个检查组
+```
+
+也可使用 `docker compose run --rm go-checks` 等直接运行单组检查；首次使用自动构建镜像，工具定义变更后应先 `docker compose build`。各组均检查当前工作区（含未暂存修改及未被 Git 忽略的新文件），在临时副本中运行，不修改源码或 Git index；构建产物随容器移除，依赖及编译缓存保存在 Docker volumes 中。首次运行需要联网下载镜像和依赖。
+
+pre-commit 为可选的提交入口：安装后运行 `pre-commit install` 即可在提交时调用 `make check`，也可手动 `pre-commit run --all-files`；CI 始终执行完整检查。
+
+### 生成与格式化
+
+检查只报告问题，写回源码需显式执行：
+
+```sh
+make generate  # 修改 api/v1alpha1 后更新 deepcopy 和 CRD
+make format    # Go 格式化及仓库文件格式修复
+```
+
+写入容器以当前用户的 UID/GID 运行，保留已有暂存区，修改后仍需 review 并自行 stage。格式修复不能自动解决的错误仍会报告；修复后重新执行检查。
+
+### Roadmap & Todo
+
+- [ ] zfs-agent：在 Grafana 中对采集的信息进行校验，并制作 Dashboard。
+- [ ] 设计 e2e 测试并在 CI 中运行
+
+未排期：
+
+- Before the next OpenEBS ZFS LocalPV release: enable snapshotter creation metadata, verify ZFS annotations, and align Falcon zfs-agent handling（好像已经发布了包含该特性的 commit）

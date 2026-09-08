@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 
 import { formatDuration } from '@/lib/utils';
 import { apiClient } from '@/lib/api';
-import { UsageResponse } from '@/types';
+import { StorageResponse, UsageResponse } from '@/types';
 
 /**
  * Provides the current time, updated every second. Powers the clock wheel
@@ -76,4 +76,32 @@ export function useUsage() {
   }, []);
 
   return usage;
+}
+
+/**
+ * Per-node ZFS inventory (GET /api/storage), polled every 30 s like
+ * useUsage — the same agent-side aggregation backs both endpoints, so it
+ * is equally expensive. Same degradation contract: the endpoint 404s when
+ * the usage feature is not deployed, and any other failure behaves like a
+ * network error; both cases degrade silently to "no data" (console.warn
+ * only): null is returned until the first success, and a failure after a
+ * success keeps the last good snapshot.
+ */
+export function useStorage() {
+  const [storage, setStorage] = useState<StorageResponse | null>(null);
+
+  useEffect(() => {
+    const fetchStorage = () => {
+      apiClient
+        .getStorage()
+        .then(setStorage)
+        .catch(err => console.warn('Background storage refresh failed (feature disabled or unreachable):', err));
+    };
+
+    fetchStorage();
+    const interval = setInterval(fetchStorage, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  return storage;
 }

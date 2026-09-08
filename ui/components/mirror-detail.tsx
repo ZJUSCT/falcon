@@ -17,6 +17,8 @@
 // picks that up).
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { SyncLogs } from '@/components/sync-logs';
+import { ConditionBadges } from '@/components/condition-badges';
 import { StatusBadge } from '@/components/status-badge';
 import { RelativeTime } from '@/components/relative-time';
 import { apiClient } from '@/lib/api';
@@ -213,7 +215,7 @@ export function MirrorDetail({ mirrorId, onBack }: MirrorDetailProps) {
               >
                 {job.kind || 'Mirror'}
               </span>
-              <StatusBadge status={job.status} />
+              <ConditionBadges conditions={job.conditions} />
             </>
           )}
         </div>
@@ -230,15 +232,15 @@ export function MirrorDetail({ mirrorId, onBack }: MirrorDetailProps) {
         </div>
       ) : job ? (
         <div className="rounded-lg border border-border bg-card p-4 space-y-3">
-          <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Sync Status</h3>
+          <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Mirror State</h3>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 text-sm">
             <div>
-              <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Status</div>
-              <StatusBadge status={job.status} />
+              <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Conditions</div>
+              <ConditionBadges conditions={job.conditions} />
             </div>
             <div>
-              <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Phase</div>
-              <div className="font-mono">{job.phase || '—'}</div>
+              <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Sync phase</div>
+              <div className="font-mono">{job.sync_phase || '—'}</div>
             </div>
             <div>
               <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Last Action</div>
@@ -278,6 +280,8 @@ export function MirrorDetail({ mirrorId, onBack }: MirrorDetailProps) {
 
       {/* Storage Usage (GET /api/usage, 30s poll; silent degrade when absent) */}
       <StorageUsageCard mirrorId={mirrorId} kind={job?.kind} syncTime={job?.last_finished_at} />
+
+      {job?.kind === 'Mirror' && <SyncLogs key={mirrorId} mirrorId={mirrorId} />}
 
       {/* CRD spec, read-only */}
       <SpecViewer mirrorId={mirrorId} />

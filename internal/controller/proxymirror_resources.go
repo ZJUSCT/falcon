@@ -25,7 +25,7 @@ const (
 	ProxyCacheVolumeName = "proxy-cache"
 )
 
-// ensureCachePVC provisions the cache PVC when spec.proxy.cache.enabled is
+// ensureCachePVC provisions the cache PVC when spec.cache is
 // true. The claim grows on capacity increases, mirroring ensureSyncPVC.
 func (r *ProxyMirrorReconciler) ensureCachePVC(ctx context.Context, proxy *mirrorv1alpha1.ProxyMirror) error {
 	if !proxyCacheEnabled(proxy) {
@@ -39,7 +39,7 @@ func (r *ProxyMirrorReconciler) ensureCachePVC(ctx context.Context, proxy *mirro
 			return nil
 		}
 		current := claim.Spec.Resources.Requests[corev1.ResourceStorage]
-		desired := proxy.Spec.Proxy.Cache.PVCSpec.Resources.Requests[corev1.ResourceStorage]
+		desired := proxy.Spec.Cache.PVCSpec.Resources.Requests[corev1.ResourceStorage]
 		if current.Cmp(desired) < 0 {
 			before := claim.DeepCopy()
 			claim.Spec.Resources.Requests[corev1.ResourceStorage] = desired.DeepCopy()
@@ -56,7 +56,7 @@ func (r *ProxyMirrorReconciler) ensureCachePVC(ctx context.Context, proxy *mirro
 			Name:      name,
 			Labels:    objectLabels(base, ProxyCacheRoleLabel),
 		},
-		Spec: *proxy.Spec.Proxy.Cache.PVCSpec.DeepCopy(),
+		Spec: *proxy.Spec.Cache.PVCSpec.DeepCopy(),
 	}
 	if err := controllerutil.SetControllerReference(proxy, claim, r.Scheme); err != nil {
 		return err
@@ -75,7 +75,7 @@ func (r *ProxyMirrorReconciler) cleanupDisabledProxyChildren(ctx context.Context
 			return err
 		}
 	}
-	if proxy.Spec.Publish.HTTP == nil || !proxyCacheEnabled(proxy) {
+	if !proxyCacheEnabled(proxy) {
 		claim := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 			Namespace: proxy.Namespace,
 			Name:      resourceName(childBase(proxy.Name), "cache"),

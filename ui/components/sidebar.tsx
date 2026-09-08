@@ -3,15 +3,17 @@
 import { useState, useEffect } from 'react';
 import { cn } from '@/lib/utils';
 import {
-  BarChart3, Disc3, ExternalLink, PanelLeftClose, PanelLeft, Menu, X,
+  BarChart3, Disc3, ExternalLink, HardDrive, PanelLeftClose, PanelLeft, Menu, X,
   Sun, Moon, MonitorSmartphone,
 } from 'lucide-react';
 
-// The admin UI is read-only: two pages instead of the legacy seven.
-// Workers, Storage, Queue, Actions and Configs views were removed along with
-// their backend endpoints (the Kubernetes controller serves a strictly
-// read-only API).
-export type PageId = 'overview' | 'mirrors';
+// The admin UI is read-only: three pages instead of the legacy seven.
+// Storage is the one removed view that came back — as a read-only ZFS
+// inventory (GET /api/storage, agent-backed usage aggregation) instead of
+// the legacy mutation-capable panel. Workers, Queue, Actions and Configs
+// stay removed along with their backend endpoints (the Kubernetes
+// controller serves a strictly read-only API).
+export type PageId = 'overview' | 'mirrors' | 'storage';
 
 interface SidebarProps {
   activePage: PageId;
@@ -21,18 +23,21 @@ interface SidebarProps {
 const navItems: { id: PageId; label: string; icon: typeof BarChart3 }[] = [
   { id: 'overview', label: 'Overview', icon: BarChart3 },
   { id: 'mirrors', label: 'Mirrors', icon: Disc3 },
+  { id: 'storage', label: 'Storage (ZFS)', icon: HardDrive },
 ];
 
 export function Sidebar({ activePage, onNavigate }: SidebarProps) {
   const [namespace, setNamespace] = useState<string>('');
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [theme, setThemeState] = useState<'dark' | 'light' | 'system'>('dark');
+  const [theme, setThemeState] = useState<'dark' | 'light' | 'system'>('system');
 
   useEffect(() => {
-    const saved = localStorage.getItem('falcon-theme') || 'dark';
-    setThemeState(saved as any);
-    applyTheme(saved as any);
+    let saved: string | null = null;
+    try { saved = localStorage.getItem('falcon-theme'); } catch { /* Storage may be disabled. */ }
+    const preference = saved === 'dark' || saved === 'light' ? saved : 'system';
+    setThemeState(preference);
+    applyTheme(preference);
   }, []);
 
   useEffect(() => {
@@ -66,7 +71,7 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
   function cycleTheme() {
     const next = theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark';
     setThemeState(next);
-    localStorage.setItem('falcon-theme', next);
+    try { localStorage.setItem('falcon-theme', next); } catch { /* Keep the selection for this session. */ }
     applyTheme(next);
   }
 

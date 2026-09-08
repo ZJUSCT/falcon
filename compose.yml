@@ -1,0 +1,110 @@
+# Batch checks; no application services or cluster access are required.
+x-check: &check
+  working_dir: /source
+  entrypoint:
+    - bash
+    - -c
+    - 'cp /source/scripts/checks/run.sh /tmp/falcon-check.sh && exec bash /tmp/falcon-check.sh "$$@"'
+    - --
+  volumes:
+    - .:/source:ro
+  environment:
+    HOME: /tmp
+  init: true
+
+x-go: &go
+  <<: *check
+  build:
+    context: .
+    dockerfile: scripts/checks/Dockerfile
+    target: go-tools
+  volumes:
+    - .:/source:ro
+    - go-modules:/go/pkg/mod
+    - go-build:/cache/go-build
+    - go-lint:/cache/go-lint
+  environment:
+    HOME: /tmp
+    GOCACHE: /cache/go-build
+    GOLANGCI_LINT_CACHE: /cache/go-lint
+
+x-manifests: &manifests
+  <<: *check
+  build:
+    context: .
+    dockerfile: scripts/checks/Dockerfile
+    target: manifest-tools
+  volumes:
+    - .:/source:ro
+    - pre-commit:/cache/pre-commit
+  environment:
+    HOME: /tmp
+    PRE_COMMIT_HOME: /cache/pre-commit
+
+services:
+  go-checks:
+    <<: *go
+    command: [go-checks]
+  verify-generated:
+    <<: *go
+    command: [verify-generated]
+  ui-checks:
+    <<: *check
+    build:
+      context: .
+      dockerfile: scripts/checks/Dockerfile
+      target: ui-tools
+    command: [ui-checks]
+    volumes:
+      - .:/source:ro
+      - npm:/cache/npm
+    environment:
+      HOME: /tmp
+      npm_config_cache: /cache/npm
+  chart-checks:
+    <<: *manifests
+    command: [chart-checks]
+  hygiene:
+    <<: *manifests
+    command: [hygiene]
+  generate:
+    <<: *go
+    profiles: [write]
+    command: [generate]
+    user: "${FALCON_UID:-1000}:${FALCON_GID:-1000}"
+    volumes:
+      - .:/source:ro
+      - .:/output
+    environment:
+      HOME: /tmp
+      GOPATH: /tmp/go
+      GOCACHE: /tmp/go-build
+  format-go:
+    <<: *go
+    profiles: [write]
+    command: [format-go]
+    user: "${FALCON_UID:-1000}:${FALCON_GID:-1000}"
+    volumes:
+      - .:/source:ro
+      - .:/output
+    environment:
+      HOME: /tmp
+      GOPATH: /tmp/go
+      GOCACHE: /tmp/go-build
+  format-hygiene:
+    <<: *manifests
+    profiles: [write]
+    command: [format-hygiene]
+    user: "${FALCON_UID:-1000}:${FALCON_GID:-1000}"
+    volumes:
+      - .:/source:ro
+      - .:/output
+    environment:
+      HOME: /tmp
+
+volumes:
+  go-modules:
+  go-build:
+  go-lint:
+  npm:
+  pre-commit:

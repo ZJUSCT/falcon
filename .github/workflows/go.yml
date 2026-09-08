@@ -1,4 +1,4 @@
-name: Go
+name: Checks
 
 on:
   pull_request:
@@ -10,23 +10,12 @@ on:
   workflow_call:
 
 jobs:
-  build:
-    name: Build and lint
+  checks:
+    name: Containerized checks
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
         uses: actions/checkout@v4
 
-      - name: Set up Go 1.x
-        uses: actions/setup-go@v5
-        with:
-          go-version: ^1.26
-          cache: true
-
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: latest
-
-      - name: Run tests
-        run: go test -race -v ./...
+      - name: Run the same checks as local development
+        run: make check

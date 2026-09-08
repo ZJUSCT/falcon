@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -13,11 +14,6 @@ import (
 
 	mirrorv1alpha1 "github.com/ZJUSCT/falcon/api/v1alpha1"
 )
-
-// localized builds a LocalizedString for tests.
-func localized(zh, en string) mirrorv1alpha1.LocalizedString {
-	return mirrorv1alpha1.LocalizedString{"zh": zh, "en": en}
-}
 
 // parseMirrorZBody decodes a served mirrorz.json body.
 func parseMirrorZBody(body []byte) (map[string]any, error) {
@@ -28,63 +24,84 @@ func parseMirrorZBody(body []byte) (map[string]any, error) {
 	return doc, nil
 }
 
-func TestMirrorzStatusForMirror(t *testing.T) {
-	finished := metav1.Unix(1788388984, 0)
-	started := metav1.Unix(1788380000, 0)
-	published := metav1.Unix(1788300000, 0)
-	next := metav1.Unix(1788400000, 0)
-	created := metav1.Unix(1788000000, 0)
+// Fake clients do not populate apiserver timestamps. Valid catalog fixtures
+// explicitly carry the creation and successful completion persisted in reality.
+func catalogMirrorTimes(m *mirrorv1alpha1.Mirror) {
+	m.CreationTimestamp = metav1.Unix(1788000000, 0)
+	success := metav1.Unix(1788300000, 0)
+	m.Status.LastSuccessfulSyncAt = &success
+	if m.Status.LastSync == nil {
+		m.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded}
+	}
+	if m.Status.LastSync != nil {
+		m.Status.LastSync.FinishedAt = success.DeepCopy()
+	}
+	if m.Status.CurrentSync != nil {
+		m.Status.CurrentSync.StartedAt = func() *metav1.Time { t := metav1.Unix(1788380000, 0); return &t }()
+	}
+}
 
+func TestMirrorzStatusForMirror(t *testing.T) {
+	finished, started, next := metav1.Unix(1788388984, 0), metav1.Unix(1788380000, 0), metav1.Unix(1788400000, 0)
 	cases := []struct {
 		name   string
-		mirror mirrorv1alpha1.Mirror
+		mutate func(*mirrorv1alpha1.Mirror)
 		want   string
 	}{
-		{
-			name: "successful completed transaction",
-			mirror: mirrorv1alpha1.Mirror{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: created}, Status: mirrorv1alpha1.MirrorStatus{
-				LastPublishedAt: &published,
-				NextSyncAt:      &next,
-				LastSync:        &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded, FinishedAt: &finished},
-			}},
-			want: "S1788300000X1788400000N1788000000",
-		},
-		{
-			name: "current transaction has no next-sync token",
-			mirror: mirrorv1alpha1.Mirror{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: created}, Status: mirrorv1alpha1.MirrorStatus{
-				LastPublishedAt: &published,
-				NextSyncAt:      &next,
-				CurrentSync:     &mirrorv1alpha1.MirrorCurrentSyncStatus{StartedAt: &started},
-			}},
-			want: "Y1788380000O1788300000N1788000000",
-		},
-		{
-			name: "paused uses the last publication time for freshness",
-			mirror: mirrorv1alpha1.Mirror{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: created}, Spec: mirrorv1alpha1.MirrorSpec{Sync: mirrorv1alpha1.MirrorSyncSpec{Paused: true}}, Status: mirrorv1alpha1.MirrorStatus{
-				LastPublishedAt: &published,
-				NextSyncAt:      &next,
-			}},
-			want: "P1788300000N1788000000",
-		},
-		{
-			name: "failed transaction carries old success and retry time",
-			mirror: mirrorv1alpha1.Mirror{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: created}, Status: mirrorv1alpha1.MirrorStatus{
-				LastPublishedAt: &published,
-				NextSyncAt:      &next,
-				LastSync:        &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseFailed, FinishedAt: &finished},
-			}},
-			want: "F1788388984O1788300000X1788400000N1788000000",
-		},
-		{
-			name:   "unclassified state is unknown rather than pending",
-			mirror: mirrorv1alpha1.Mirror{},
-			want:   "U",
-		},
+		{"successful sync", func(m *mirrorv1alpha1.Mirror) {
+			m.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded, FinishedAt: &finished}
+			m.Status.NextSyncAt = &next
+		}, "S1788388984X1788400000N1788000000"},
+		{"syncing retains old success without stale schedule", func(m *mirrorv1alpha1.Mirror) {
+			m.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{Phase: mirrorv1alpha1.SyncPhaseRunning, StartedAt: &started}
+			m.Status.NextSyncAt = &next
+		}, "Y1788380000O1788300000N1788000000"},
+		{"paused uses pause time without stale schedule", func(m *mirrorv1alpha1.Mirror) {
+			m.Spec.Sync.Paused = true
+			m.Status.PausedAt = &finished
+			m.Status.NextSyncAt = &next
+		}, "P1788388984N1788000000"},
+		{"failed sync retains old success and retry", func(m *mirrorv1alpha1.Mirror) {
+			m.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseFailed, StartedAt: &started, FinishedAt: &finished}
+			m.Status.NextSyncAt = &next
+		}, "F1788380000O1788300000X1788400000N1788000000"},
+		{"queued excludes old success and stale schedule", func(m *mirrorv1alpha1.Mirror) {
+			m.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{Phase: mirrorv1alpha1.SyncPhasePending, QueuedAt: &started}
+			m.Status.NextSyncAt = &next
+		}, "D1788380000N1788000000"},
+		{"snapshotting is not a running Job even with pause requested", func(m *mirrorv1alpha1.Mirror) {
+			m.Spec.Sync.Paused = true
+			m.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSnapshotting}
+			m.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded, FinishedAt: &finished}
+		}, "S1788388984N1788000000"},
+		{"publication failure preserves sync success", func(m *mirrorv1alpha1.Mirror) {
+			m.Status.LastAttempt = &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseFailed}
+			m.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded, FinishedAt: &finished}
+			m.Status.NextSyncAt = &next
+		}, "S1788388984X1788400000N1788000000"},
+		{"unknown result retains schedule", func(m *mirrorv1alpha1.Mirror) { m.Status.LastSync = nil; m.Status.NextSyncAt = &next }, ""},
+		{"unknown current phase excludes stale schedule", func(m *mirrorv1alpha1.Mirror) {
+			m.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{}
+			m.Status.NextSyncAt = &next
+		}, ""},
+		{"unknown result", func(m *mirrorv1alpha1.Mirror) { m.Status.LastSync = nil }, ""},
 	}
 	for _, tc := range cases {
-		if got := mirrorzStatusForMirror(&tc.mirror); got != tc.want {
-			t.Errorf("%s: mirrorzStatusForMirror() = %q, want %q", tc.name, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mirrorv1alpha1.Mirror{}
+			catalogMirrorTimes(m)
+			tc.mutate(m)
+			got, err := mirrorzStatusForMirror(m)
+			if tc.want == "" {
+				if err == nil || got != "" {
+					t.Fatalf("expected explicit state error, got %q, %v", got, err)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("status=%q, err=%v, want %q", got, err, tc.want)
+			}
+		})
 	}
 }
 
@@ -99,9 +116,9 @@ func TestMirrorzStatusForProxyMirror(t *testing.T) {
 	for _, tc := range cases {
 		proxy := &mirrorv1alpha1.ProxyMirror{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.Unix(1788000000, 0)}}
 		if tc.cache {
-			proxy.Spec.Proxy.Cache.Enabled = func() *bool { value := true; return &value }()
+			proxy.Spec.Cache = &mirrorv1alpha1.ProxyMirrorCacheSpec{}
 		}
-		if got := mirrorzStatusForProxyMirror(proxy); got != tc.want {
+		if got, err := mirrorzStatusForProxyMirror(proxy); err != nil || got != tc.want {
 			t.Errorf("mirrorzStatusForProxyMirror(cache=%t) = %q, want %q", tc.cache, got, tc.want)
 		}
 	}
@@ -150,7 +167,7 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors"},
 		Spec: mirrorv1alpha1.MirrorSpec{
 			Info: mirrorv1alpha1.MirrorInfo{
-				Description: localized("Debian 发行版软件包镜像", "Debian archive mirror"),
+				Description: "Debian 发行版软件包镜像",
 				Upstream:    "rsync://ftp.debian.org/debian/",
 			},
 			Publish: httpService(),
@@ -185,7 +202,7 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 		Spec:       mirrorv1alpha1.MirrorSpec{Publish: httpService()},
 		Status: mirrorv1alpha1.MirrorStatus{
 			ActivePVC:   "arch-sync-2",
-			CurrentSync: &mirrorv1alpha1.MirrorCurrentSyncStatus{},
+			CurrentSync: &mirrorv1alpha1.MirrorCurrentSyncStatus{Phase: mirrorv1alpha1.SyncPhaseRunning},
 			Conditions:  []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)},
 		},
 	}
@@ -193,7 +210,7 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 		ObjectMeta: metav1.ObjectMeta{Name: "pypi-proxy", Namespace: "mirrors"},
 		Spec: mirrorv1alpha1.ProxyMirrorSpec{
 			Info: mirrorv1alpha1.ProxyMirrorInfo{
-				Description: localized("PyPI 缓存代理", "Caching proxy for PyPI"),
+				Description: "PyPI 缓存代理",
 				Upstream:    "https://pypi.org/simple/",
 			},
 			Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: &mirrorv1alpha1.ProxyMirrorServiceSpec{}},
@@ -201,6 +218,9 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 		Status: mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
 	}
 
+	catalogMirrorTimes(published)
+	catalogMirrorTimes(syncing)
+	proxy.CreationTimestamp = metav1.Unix(1788000000, 0)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(published, notReady, syncOnly, syncing, proxy).Build()
 	return &Server{
@@ -227,7 +247,7 @@ func TestBuildMirrorZDocument(t *testing.T) {
 	if doc.Mirrors == nil || len(doc.Mirrors) != 3 {
 		t.Fatalf("got %d mirrors (%v), want 3 (not-ready ubuntu and sync-only alpine omitted)", len(doc.Mirrors), doc.Mirrors)
 	}
-	if doc.Mirrors[0].CName != "arch" || doc.Mirrors[0].Status != "Y" {
+	if doc.Mirrors[0].CName != "arch" || doc.Mirrors[0].Status != "Y1788380000O1788300000N1788000000" {
 		t.Errorf("arch entry wrong: %+v", doc.Mirrors[0])
 	}
 	// Unknown usage (sizeBytes unset) omits the size field.
@@ -238,7 +258,7 @@ func TestBuildMirrorZDocument(t *testing.T) {
 	if doc.Mirrors[0].URL != "https://mirrors.zjusct.io/arch" {
 		t.Errorf("arch url = %q", doc.Mirrors[0].URL)
 	}
-	if doc.Mirrors[1].CName != "debian" || doc.Mirrors[1].Status != "S" {
+	if doc.Mirrors[1].CName != "debian" || doc.Mirrors[1].Status != "S1788300000N1788000000" {
 		t.Errorf("debian entry wrong: %+v", doc.Mirrors[1])
 	}
 	// sizeBytes is rendered as the human-readable string the MirrorZ format
@@ -250,34 +270,18 @@ func TestBuildMirrorZDocument(t *testing.T) {
 		t.Errorf("debian url = %q", doc.Mirrors[1].URL)
 	}
 	if doc.Mirrors[1].Desc != "Debian 发行版软件包镜像" {
-		t.Errorf("debian desc = %q, want zh description", doc.Mirrors[1].Desc)
+		t.Errorf("debian desc = %q, want configured description", doc.Mirrors[1].Desc)
 	}
 	if doc.Mirrors[1].Upstream != "rsync://ftp.debian.org/debian/" {
 		t.Errorf("debian upstream = %q", doc.Mirrors[1].Upstream)
 	}
-	if doc.Mirrors[2].CName != "pypi-proxy" || doc.Mirrors[2].Status != "R" {
+	if doc.Mirrors[2].CName != "pypi-proxy" || doc.Mirrors[2].Status != "RN1788000000" {
 		t.Errorf("pypi-proxy entry wrong: %+v", doc.Mirrors[2])
 	}
 	if doc.Mirrors[2].URL != "https://mirrors.zjusct.io/pypi-proxy" {
 		t.Errorf("pypi-proxy url = %q", doc.Mirrors[2].URL)
 	}
 
-	// Helper-level edge cases, pinned next to the document they feed:
-	// pickDescription prefers zh and tolerates missing languages.
-	for _, tc := range []struct {
-		desc map[string]string
-		want string
-	}{
-		{desc: map[string]string{"zh": "中文", "en": "english"}, want: "中文"},
-		{desc: map[string]string{"en": "english"}, want: "english"},
-		{desc: map[string]string{"zh": "中文"}, want: "中文"},
-		{desc: map[string]string{}, want: ""},
-		{desc: nil, want: ""},
-	} {
-		if got := pickDescription(tc.desc); got != tc.want {
-			t.Errorf("pickDescription(%v) = %q, want %q", tc.desc, got, tc.want)
-		}
-	}
 	// mirrorzSize renders sizeBytes as the string the MirrorZ format expects
 	// (binary 1024-based units, two decimals, "" for unknown sizes).
 	for _, tc := range []struct {
@@ -352,6 +356,7 @@ func singleMirrorServer(t *testing.T, hostnames []string) *Server {
 			Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)},
 		},
 	}
+	catalogMirrorTimes(m)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()
 	return &Server{
 		Client:           c,
@@ -399,7 +404,7 @@ func TestHandleMirrorZ(t *testing.T) {
 		t.Fatalf("mirrors wrong: %v", doc["mirrors"])
 	}
 	entry := mirrors[0].(map[string]any)
-	if entry["cname"] != "debian" || entry["status"] != "S" || entry["url"] != "https://mirrors.zjusct.io/debian" {
+	if entry["cname"] != "debian" || entry["status"] != "S1788300000N1788000000" || entry["url"] != "https://mirrors.zjusct.io/debian" {
 		t.Errorf("mirror entry wrong: %v", entry)
 	}
 	// sizeBytes is unknown (zero): the size field is omitted.
@@ -453,5 +458,148 @@ func TestHandleMirrorZCatalogDisabled(t *testing.T) {
 	resp, _ := get(t, srv.URL+"/mirrorz.json")
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 when catalog is disabled", resp.StatusCode)
+	}
+}
+
+func TestMirrorZCanonicalNamesKeepCRPaths(t *testing.T) {
+	mirror := &mirrorv1alpha1.Mirror{
+		ObjectMeta: metav1.ObjectMeta{Name: "aosp", Namespace: "mirrors"},
+		Spec:       mirrorv1alpha1.MirrorSpec{Info: mirrorv1alpha1.MirrorInfo{CName: "AOSP"}, Publish: httpService()},
+		Status:     mirrorv1alpha1.MirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
+	}
+	proxy := &mirrorv1alpha1.ProxyMirror{
+		ObjectMeta: metav1.ObjectMeta{Name: "aur", Namespace: "mirrors"},
+		Spec: mirrorv1alpha1.ProxyMirrorSpec{
+			Info:    mirrorv1alpha1.ProxyMirrorInfo{CName: "AUR"},
+			Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: &mirrorv1alpha1.ProxyMirrorServiceSpec{}},
+		},
+		Status: mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
+	}
+	catalogMirrorTimes(mirror)
+	proxy.CreationTimestamp = metav1.Unix(1788000000, 0)
+	s := &Server{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(mirror, proxy).Build(), Site: SiteConfig{URL: "https://example.org"}}
+	doc, err := s.buildMirrorZ(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Mirrors) != 2 || doc.Mirrors[0].CName != "AOSP" || doc.Mirrors[0].URL != "https://example.org/aosp" || doc.Mirrors[1].CName != "AUR" || doc.Mirrors[1].URL != "https://example.org/aur" {
+		t.Fatalf("canonical names must not change paths: %+v", doc.Mirrors)
+	}
+}
+
+func TestHandleMirrorZTimestampInvariants(t *testing.T) {
+	cases := []struct {
+		name       string
+		mutate     func(*mirrorv1alpha1.Mirror)
+		errorField string
+	}{
+		{"complete Y O N", func(m *mirrorv1alpha1.Mirror) {}, ""},
+		{"missing success", func(m *mirrorv1alpha1.Mirror) { m.Status.LastSuccessfulSyncAt = nil }, "status.lastSuccessfulSyncAt"},
+		{"zero success", func(m *mirrorv1alpha1.Mirror) { m.Status.LastSuccessfulSyncAt = &metav1.Time{} }, "status.lastSuccessfulSyncAt"},
+		{"missing creation", func(m *mirrorv1alpha1.Mirror) { m.CreationTimestamp = metav1.Time{} }, "metadata.creationTimestamp"},
+		{"missing start", func(m *mirrorv1alpha1.Mirror) { m.Status.CurrentSync.StartedAt = nil }, "status.currentSync.startedAt"},
+		{"missing queue time", func(m *mirrorv1alpha1.Mirror) { m.Status.CurrentSync.Phase = mirrorv1alpha1.SyncPhasePending }, "status.currentSync.queuedAt"},
+		{"missing pause time", func(m *mirrorv1alpha1.Mirror) { m.Status.CurrentSync = nil; m.Spec.Sync.Paused = true }, "status.pausedAt"},
+		{"missing successful finish", func(m *mirrorv1alpha1.Mirror) {
+			m.Status.CurrentSync = nil
+			m.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded}
+		}, "status.lastSync.finishedAt"},
+		{"missing failed start", func(m *mirrorv1alpha1.Mirror) {
+			m.Status.CurrentSync = nil
+			m.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseFailed}
+		}, "status.lastSync.startedAt"},
+		{"invalid schedule", func(m *mirrorv1alpha1.Mirror) {
+			m.Status.CurrentSync = nil
+			t := metav1.Unix(0, 0)
+			m.Status.NextSyncAt = &t
+		}, "status.nextSyncAt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mirrorv1alpha1.Mirror{
+				ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors", Generation: 1},
+				Spec:       mirrorv1alpha1.MirrorSpec{Publish: httpService()},
+				Status: mirrorv1alpha1.MirrorStatus{
+					CurrentSync: &mirrorv1alpha1.MirrorCurrentSyncStatus{Phase: mirrorv1alpha1.SyncPhaseRunning},
+					Conditions:  []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: 1}},
+				},
+			}
+			catalogMirrorTimes(m)
+			tc.mutate(m)
+			s := &Server{CatalogEnabled: true, Site: SiteConfig{URL: "https://example.org"}, Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()}
+			recorder := httptest.NewRecorder()
+			s.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/mirrorz.json", nil))
+			if tc.errorField != "" {
+				if recorder.Code != http.StatusInternalServerError || !strings.Contains(recorder.Body.String(), tc.errorField) || !strings.Contains(recorder.Body.String(), "Mirror mirrors/debian") || strings.Contains(recorder.Body.String(), `"mirrors":`) {
+					t.Fatalf("expected explicit invariant error for %s, got %d %s", tc.errorField, recorder.Code, recorder.Body.String())
+				}
+				return
+			}
+			var doc mirrorzDocument
+			if err := json.Unmarshal(recorder.Body.Bytes(), &doc); err != nil {
+				t.Fatal(err)
+			}
+			if recorder.Code != http.StatusOK || len(doc.Mirrors) != 1 || doc.Mirrors[0].Status != "Y1788380000O1788300000N1788000000" {
+				t.Fatalf("expected full timestamps: code=%d, body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestMirrorZRejectsProxyWithoutCreationTime(t *testing.T) {
+	p := &mirrorv1alpha1.ProxyMirror{
+		ObjectMeta: metav1.ObjectMeta{Name: "pypi", Namespace: "mirrors"},
+		Spec:       mirrorv1alpha1.ProxyMirrorSpec{Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: &mirrorv1alpha1.ProxyMirrorServiceSpec{}}},
+		Status:     mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
+	}
+	s := &Server{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(p).Build(), CatalogEnabled: true}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/mirrorz.json", nil))
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "ProxyMirror mirrors/pypi") || !strings.Contains(w.Body.String(), "metadata.creationTimestamp") {
+		t.Fatalf("expected explicit proxy timestamp error: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestMirrorZManualModeAndCancellation(t *testing.T) {
+	queued, started, stopped := metav1.Unix(1788380000, 0), metav1.Unix(1788380100, 0), metav1.Unix(1788380200, 0)
+	cases := []struct {
+		name, phase           string
+		paused, held, started bool
+		want                  string
+	}{
+		{"held automatic queue", mirrorv1alpha1.SyncPhasePending, true, true, false, "P1788380200N1788000000"},
+		{"manual queue", mirrorv1alpha1.SyncPhasePending, true, false, false, "D1788380000N1788000000"},
+		{"manual running", mirrorv1alpha1.SyncPhaseRunning, true, false, true, "Y1788380100O1788300000N1788000000"},
+		{"cancelling held queue", mirrorv1alpha1.SyncPhaseCancelling, true, true, false, "D1788380000N1788000000"},
+		{"cancelling running job", mirrorv1alpha1.SyncPhaseCancelling, true, false, true, "Y1788380100O1788300000N1788000000"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mirrorv1alpha1.Mirror{}
+			catalogMirrorTimes(m)
+			m.Spec.Sync.Paused = tc.paused
+			m.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{Phase: tc.phase, QueuedAt: &queued}
+			if tc.held {
+				m.Status.PausedAt = &stopped
+			}
+			if tc.started {
+				m.Status.CurrentSync.StartedAt = &started
+			}
+			got, err := mirrorzStatusForMirror(m)
+			if err != nil || got != tc.want {
+				t.Fatalf("%q, %v, want %q", got, err, tc.want)
+			}
+		})
+	}
+	m := &mirrorv1alpha1.Mirror{}
+	catalogMirrorTimes(m)
+	m.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseCancelled, StartedAt: &started, FinishedAt: &stopped}
+	if got, err := mirrorzStatusForMirror(m); err != nil || got != "F1788380100O1788300000N1788000000" {
+		t.Fatalf("cancelled sync: %q, %v", got, err)
+	}
+	m.Spec.Sync.Paused = true
+	m.Status.PausedAt = &stopped
+	if got, err := mirrorzStatusForMirror(m); err != nil || got != "P1788380200N1788000000" {
+		t.Fatalf("paused after cancellation: %q, %v", got, err)
 	}
 }

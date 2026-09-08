@@ -177,14 +177,17 @@ export function getStatusColor(status: string): string {
     case 'Ready':
       return 'bg-green-600 border-green-200 hover:bg-green-700';
     case 'Syncing':
+    case 'Snapshotting':
+    case 'Progressing':
+    case 'Cancelling':
     case 'Publishing':
       return 'bg-blue-600 border-blue-200 hover:bg-blue-700';
+    case 'Retrying':
+    case 'Pending':
     case 'Initializing':
       return 'bg-yellow-600 border-yellow-200 hover:bg-yellow-700';
     case 'Degraded':
       return 'text-red-600 bg-red-50 border-red-200 hover:bg-red-100';
-    case 'Pending':
-      return 'text-gray-600 bg-gray-100 border-gray-200 hover:bg-gray-200';
     case 'U':
       return 'bg-green-600 border-green-200 hover:bg-green-700';
     case 'S':

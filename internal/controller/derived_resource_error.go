@@ -46,7 +46,7 @@ func (r *MirrorReconciler) handleDerivedResourceInvalid(ctx context.Context, mir
 	return r.patchStatus(ctx, mirror, func() {
 		mirror.Status.ObservedGeneration = mirror.Generation
 		setCondition(mirror, conditionReady, conditionStatus(mirrorWasReady(mirror)), derivedResourceInvalid, message)
-		setCondition(mirror, conditionProgressing, metav1.ConditionFalse, derivedResourceInvalid, message)
+		setCondition(mirror, conditionProgressing, conditionStatus(mirror.Status.Publication != nil), derivedResourceInvalid, message)
 		setCondition(mirror, conditionDegraded, metav1.ConditionTrue, derivedResourceInvalid, message)
 	})
 }

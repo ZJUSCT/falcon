@@ -48,254 +48,233 @@ spec:
               paused concept; removing publish.http takes its endpoint
               offline while preserving the CR.
             properties:
-              info:
-                description: |-
-                  ProxyMirrorInfo carries the catalog metadata of a publish-only mirror.
-                  Unlike MirrorInfo, it has no `type` field: the CRD kind itself is the type
-                  ("proxy"). `upstream` deliberately lives here instead of under spec.proxy,
-                  mirroring Mirror.info where the upstream origin already resides; spec.proxy
-                  then only holds the proxy-specific knobs (caching).
+              cache:
+                description: Cache provisions storage only; proxy behavior belongs
+                  to the workload configuration.
                 properties:
-                  description:
-                    additionalProperties:
-                      type: string
-                    minProperties: 1
-                    type: object
-                  name:
-                    additionalProperties:
-                      type: string
-                    minProperties: 1
-                    type: object
-                  upstream:
+                  pvcTemplate:
                     description: |-
-                      Upstream is the backend origin the proxy forwards cache misses to,
-                      e.g. https://pypi.org/simple/. The public path is the CR name
-                      (publish route PathPrefix /<name>), so there is no URL field.
-                    type: string
-                required:
-                - description
-                - name
-                - upstream
-                type: object
-              proxy:
-                description: |-
-                  ProxyMirrorProxySpec groups proxy-specific behaviour. Cache bypass lists and
-                  other fine-tuning are intentionally not modelled yet: the controller does
-                  not generate nginx configuration, so a bypass field would be dead schema.
-                properties:
-                  cache:
-                    description: |-
-                      ProxyMirrorCacheSpec configures the nginx proxy_cache-shaped disk cache in
-                      front of the upstream. The controller provisions the cache PVC and injects
-                      it as the reserved `proxy-cache` volume (a WRITABLE volume source); the
-                      user mounts it in the pod template — the nginx proxy_cache conventional
-                      directory /var/cache/nginx/proxy is applied by the image/user, the
-                      controller generates no nginx configuration and no mounts.
+                      PVCSpec is the canonical Kubernetes PVC specification for the cache.
+                      Falcon manages the claim name and rejects binding/source fields that do
+                      not apply to this generated cache PVC.
                     properties:
-                      enabled:
-                        default: false
-                        type: boolean
-                      pvcTemplate:
+                      accessModes:
                         description: |-
-                          PVCSpec is the canonical Kubernetes PVC specification for the cache.
-                          Falcon manages the claim name and rejects binding/source fields that do
-                          not apply to this generated cache PVC.
+                          accessModes contains the desired access modes the volume should have.
+                          More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#access-modes-1
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      dataSource:
+                        description: |-
+                          dataSource field can be used to specify either:
+                          * An existing VolumeSnapshot object (snapshot.storage.k8s.io/VolumeSnapshot)
+                          * An existing PVC (PersistentVolumeClaim)
+                          If the provisioner or an external controller can support the specified data source,
+                          it will create a new volume based on the contents of the specified data source.
+                          When the AnyVolumeDataSource feature gate is enabled, dataSource contents will be copied to dataSourceRef,
+                          and dataSourceRef contents will be copied to dataSource when dataSourceRef.namespace is not specified.
+                          If the namespace is specified, then dataSourceRef will not be copied to dataSource.
                         properties:
-                          accessModes:
+                          apiGroup:
                             description: |-
-                              accessModes contains the desired access modes the volume should have.
-                              More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#access-modes-1
+                              APIGroup is the group for the resource being referenced.
+                              If APIGroup is not specified, the specified Kind must be in the core API group.
+                              For any other third-party types, APIGroup is required.
+                            type: string
+                          kind:
+                            description: Kind is the type of resource being referenced
+                            type: string
+                          name:
+                            description: Name is the name of resource being referenced
+                            type: string
+                        required:
+                        - kind
+                        - name
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      dataSourceRef:
+                        description: |-
+                          dataSourceRef specifies the object from which to populate the volume with data, if a non-empty
+                          volume is desired. This may be any object from a non-empty API group (non
+                          core object) or a PersistentVolumeClaim object.
+                          When this field is specified, volume binding will only succeed if the type of
+                          the specified object matches some installed volume populator or dynamic
+                          provisioner.
+                          This field will replace the functionality of the dataSource field and as such
+                          if both fields are non-empty, they must have the same value. For backwards
+                          compatibility, when namespace isn't specified in dataSourceRef,
+                          both fields (dataSource and dataSourceRef) will be set to the same
+                          value automatically if one of them is empty and the other is non-empty.
+                          When namespace is specified in dataSourceRef,
+                          dataSource isn't set to the same value and must be empty.
+                          There are three important differences between dataSource and dataSourceRef:
+                          * While dataSource only allows two specific types of objects, dataSourceRef
+                            allows any non-core object, as well as PersistentVolumeClaim objects.
+                          * While dataSource ignores disallowed values (dropping them), dataSourceRef
+                            preserves all values, and generates an error if a disallowed value is
+                            specified.
+                          * While dataSource only allows local objects, dataSourceRef allows objects
+                            in any namespaces.
+                          (Beta) Using this field requires the AnyVolumeDataSource feature gate to be enabled.
+                          (Alpha) Using the namespace field of dataSourceRef requires the CrossNamespaceVolumeDataSource feature gate to be enabled.
+                        properties:
+                          apiGroup:
+                            description: |-
+                              APIGroup is the group for the resource being referenced.
+                              If APIGroup is not specified, the specified Kind must be in the core API group.
+                              For any other third-party types, APIGroup is required.
+                            type: string
+                          kind:
+                            description: Kind is the type of resource being referenced
+                            type: string
+                          name:
+                            description: Name is the name of resource being referenced
+                            type: string
+                          namespace:
+                            description: |-
+                              Namespace is the namespace of resource being referenced
+                              Note that when a namespace is specified, a gateway.networking.k8s.io/ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.
+                              (Alpha) This field requires the CrossNamespaceVolumeDataSource feature gate to be enabled.
+                            type: string
+                        required:
+                        - kind
+                        - name
+                        type: object
+                      resources:
+                        description: |-
+                          resources represents the minimum resources the volume should have.
+                          Users are allowed to specify resource requirements
+                          that are lower than previous value but must still be higher than capacity recorded in the
+                          status field of the claim.
+                          More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#resources
+                        properties:
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Limits describes the maximum amount of compute resources allowed.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Requests describes the minimum amount of compute resources required.
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                        type: object
+                      selector:
+                        description: selector is a label query over volumes to consider
+                          for binding.
+                        properties:
+                          matchExpressions:
+                            description: matchExpressions is a list of label selector
+                              requirements. The requirements are ANDed.
                             items:
-                              type: string
+                              description: |-
+                                A label selector requirement is a selector that contains values, a key, and an operator that
+                                relates the key and values.
+                              properties:
+                                key:
+                                  description: key is the label key that the selector
+                                    applies to.
+                                  type: string
+                                operator:
+                                  description: |-
+                                    operator represents a key's relationship to a set of values.
+                                    Valid operators are In, NotIn, Exists and DoesNotExist.
+                                  type: string
+                                values:
+                                  description: |-
+                                    values is an array of string values. If the operator is In or NotIn,
+                                    the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                    the values array must be empty. This array is replaced during a strategic
+                                    merge patch.
+                                  items:
+                                    type: string
+                                  type: array
+                                  x-kubernetes-list-type: atomic
+                              required:
+                              - key
+                              - operator
+                              type: object
                             type: array
                             x-kubernetes-list-type: atomic
-                          dataSource:
+                          matchLabels:
+                            additionalProperties:
+                              type: string
                             description: |-
-                              dataSource field can be used to specify either:
-                              * An existing VolumeSnapshot object (snapshot.storage.k8s.io/VolumeSnapshot)
-                              * An existing PVC (PersistentVolumeClaim)
-                              If the provisioner or an external controller can support the specified data source,
-                              it will create a new volume based on the contents of the specified data source.
-                              When the AnyVolumeDataSource feature gate is enabled, dataSource contents will be copied to dataSourceRef,
-                              and dataSourceRef contents will be copied to dataSource when dataSourceRef.namespace is not specified.
-                              If the namespace is specified, then dataSourceRef will not be copied to dataSource.
-                            properties:
-                              apiGroup:
-                                description: |-
-                                  APIGroup is the group for the resource being referenced.
-                                  If APIGroup is not specified, the specified Kind must be in the core API group.
-                                  For any other third-party types, APIGroup is required.
-                                type: string
-                              kind:
-                                description: Kind is the type of resource being referenced
-                                type: string
-                              name:
-                                description: Name is the name of resource being referenced
-                                type: string
-                            required:
-                            - kind
-                            - name
+                              matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                              map is equivalent to an element of matchExpressions, whose key field is "key", the
+                              operator is "In", and the values array contains only "value". The requirements are ANDed.
                             type: object
-                            x-kubernetes-map-type: atomic
-                          dataSourceRef:
-                            description: |-
-                              dataSourceRef specifies the object from which to populate the volume with data, if a non-empty
-                              volume is desired. This may be any object from a non-empty API group (non
-                              core object) or a PersistentVolumeClaim object.
-                              When this field is specified, volume binding will only succeed if the type of
-                              the specified object matches some installed volume populator or dynamic
-                              provisioner.
-                              This field will replace the functionality of the dataSource field and as such
-                              if both fields are non-empty, they must have the same value. For backwards
-                              compatibility, when namespace isn't specified in dataSourceRef,
-                              both fields (dataSource and dataSourceRef) will be set to the same
-                              value automatically if one of them is empty and the other is non-empty.
-                              When namespace is specified in dataSourceRef,
-                              dataSource isn't set to the same value and must be empty.
-                              There are three important differences between dataSource and dataSourceRef:
-                              * While dataSource only allows two specific types of objects, dataSourceRef
-                                allows any non-core object, as well as PersistentVolumeClaim objects.
-                              * While dataSource ignores disallowed values (dropping them), dataSourceRef
-                                preserves all values, and generates an error if a disallowed value is
-                                specified.
-                              * While dataSource only allows local objects, dataSourceRef allows objects
-                                in any namespaces.
-                              (Beta) Using this field requires the AnyVolumeDataSource feature gate to be enabled.
-                              (Alpha) Using the namespace field of dataSourceRef requires the CrossNamespaceVolumeDataSource feature gate to be enabled.
-                            properties:
-                              apiGroup:
-                                description: |-
-                                  APIGroup is the group for the resource being referenced.
-                                  If APIGroup is not specified, the specified Kind must be in the core API group.
-                                  For any other third-party types, APIGroup is required.
-                                type: string
-                              kind:
-                                description: Kind is the type of resource being referenced
-                                type: string
-                              name:
-                                description: Name is the name of resource being referenced
-                                type: string
-                              namespace:
-                                description: |-
-                                  Namespace is the namespace of resource being referenced
-                                  Note that when a namespace is specified, a gateway.networking.k8s.io/ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.
-                                  (Alpha) This field requires the CrossNamespaceVolumeDataSource feature gate to be enabled.
-                                type: string
-                            required:
-                            - kind
-                            - name
-                            type: object
-                          resources:
-                            description: |-
-                              resources represents the minimum resources the volume should have.
-                              Users are allowed to specify resource requirements
-                              that are lower than previous value but must still be higher than capacity recorded in the
-                              status field of the claim.
-                              More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#resources
-                            properties:
-                              limits:
-                                additionalProperties:
-                                  anyOf:
-                                  - type: integer
-                                  - type: string
-                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                                  x-kubernetes-int-or-string: true
-                                description: |-
-                                  Limits describes the maximum amount of compute resources allowed.
-                                  More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
-                                type: object
-                              requests:
-                                additionalProperties:
-                                  anyOf:
-                                  - type: integer
-                                  - type: string
-                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                                  x-kubernetes-int-or-string: true
-                                description: |-
-                                  Requests describes the minimum amount of compute resources required.
-                                  If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
-                                  otherwise to an implementation-defined value. Requests cannot exceed Limits.
-                                  More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
-                                type: object
-                            type: object
-                          selector:
-                            description: selector is a label query over volumes to
-                              consider for binding.
-                            properties:
-                              matchExpressions:
-                                description: matchExpressions is a list of label selector
-                                  requirements. The requirements are ANDed.
-                                items:
-                                  description: |-
-                                    A label selector requirement is a selector that contains values, a key, and an operator that
-                                    relates the key and values.
-                                  properties:
-                                    key:
-                                      description: key is the label key that the selector
-                                        applies to.
-                                      type: string
-                                    operator:
-                                      description: |-
-                                        operator represents a key's relationship to a set of values.
-                                        Valid operators are In, NotIn, Exists and DoesNotExist.
-                                      type: string
-                                    values:
-                                      description: |-
-                                        values is an array of string values. If the operator is In or NotIn,
-                                        the values array must be non-empty. If the operator is Exists or DoesNotExist,
-                                        the values array must be empty. This array is replaced during a strategic
-                                        merge patch.
-                                      items:
-                                        type: string
-                                      type: array
-                                      x-kubernetes-list-type: atomic
-                                  required:
-                                  - key
-                                  - operator
-                                  type: object
-                                type: array
-                                x-kubernetes-list-type: atomic
-                              matchLabels:
-                                additionalProperties:
-                                  type: string
-                                description: |-
-                                  matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
-                                  map is equivalent to an element of matchExpressions, whose key field is "key", the
-                                  operator is "In", and the values array contains only "value". The requirements are ANDed.
-                                type: object
-                            type: object
-                            x-kubernetes-map-type: atomic
-                          storageClassName:
-                            description: |-
-                              storageClassName is the name of the StorageClass required by the claim.
-                              More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1
-                            type: string
-                          volumeAttributesClassName:
-                            description: |-
-                              volumeAttributesClassName may be used to set the VolumeAttributesClass used by this claim.
-                              If specified, the CSI driver will create or update the volume with the attributes defined
-                              in the corresponding VolumeAttributesClass. This has a different purpose than storageClassName,
-                              it can be changed after the claim is created. An empty string or nil value indicates that no
-                              VolumeAttributesClass will be applied to the claim. If the claim enters an Infeasible error state,
-                              this field can be reset to its previous value (including nil) to cancel the modification.
-                              If the resource referred to by volumeAttributesClass does not exist, this PersistentVolumeClaim will be
-                              set to a Pending state, as reflected by the modifyVolumeStatus field, until such as a resource
-                              exists.
-                              More info: https://kubernetes.io/docs/concepts/storage/volume-attributes-classes/
-                            type: string
-                          volumeMode:
-                            description: |-
-                              volumeMode defines what type of volume is required by the claim.
-                              Value of Filesystem is implied when not included in claim spec.
-                            type: string
-                          volumeName:
-                            description: volumeName is the binding reference to the
-                              PersistentVolume backing this claim.
-                            type: string
                         type: object
-                    required:
-                    - pvcTemplate
+                        x-kubernetes-map-type: atomic
+                      storageClassName:
+                        description: |-
+                          storageClassName is the name of the StorageClass required by the claim.
+                          More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1
+                        type: string
+                      volumeAttributesClassName:
+                        description: |-
+                          volumeAttributesClassName may be used to set the VolumeAttributesClass used by this claim.
+                          If specified, the CSI driver will create or update the volume with the attributes defined
+                          in the corresponding VolumeAttributesClass. This has a different purpose than storageClassName,
+                          it can be changed after the claim is created. An empty string or nil value indicates that no
+                          VolumeAttributesClass will be applied to the claim. If the claim enters an Infeasible error state,
+                          this field can be reset to its previous value (including nil) to cancel the modification.
+                          If the resource referred to by volumeAttributesClass does not exist, this PersistentVolumeClaim will be
+                          set to a Pending state, as reflected by the modifyVolumeStatus field, until such as a resource
+                          exists.
+                          More info: https://kubernetes.io/docs/concepts/storage/volume-attributes-classes/
+                        type: string
+                      volumeMode:
+                        description: |-
+                          volumeMode defines what type of volume is required by the claim.
+                          Value of Filesystem is implied when not included in claim spec.
+                        type: string
+                      volumeName:
+                        description: volumeName is the binding reference to the PersistentVolume
+                          backing this claim.
+                        type: string
                     type: object
+                required:
+                - pvcTemplate
+                type: object
+              info:
+                description: |-
+                  MirrorInfo carries the public catalog metadata of a mirror. There is no URL
+                  field on purpose: the public path is always the CR name (publish route
+                  PathPrefix /<name>, mirrorz entry url <host>/<name>), so same-name CRs can
+                  never collide and no per-CR URL bookkeeping is needed.
+                properties:
+                  cname:
+                    description: |-
+                      CName is the MirrorZ catalog grouping name, e.g. AOSP. It is not
+                      constrained to DNS names; upstream cname.json normalizes known aliases.
+                      It defaults to the CR name and does not change the HTTP path.
+                    minLength: 1
+                    type: string
+                  description:
+                    description: Description is plain text for MirrorZ desc; no localization
+                      is performed.
+                    type: string
+                  upstream:
+                    type: string
+                required:
+                - upstream
                 type: object
               publish:
                 description: |-
@@ -307,21 +286,45 @@ spec:
                 properties:
                   http:
                     description: |-
-                      ProxyMirrorServiceSpec is the HTTP publish service of a ProxyMirror,
-                      addressed by the fixed "http" key under spec.publish. The key is enabled
-                      when it appears (a valid enable requires podTemplate.spec, CEL-enforced) and disabled when absent. A proxy
-                      has no data volume to mount; when the cache is enabled the WRITABLE
-                      `proxy-cache` PVC volume is injected into spec.volumes only — mounting it,
-                      and where, is the user's own declaration.
+                      MirrorHTTPServiceSpec is the http publish service of a Mirror: the base
+                      MirrorServiceSpec plus additional public path prefixes (Aliases).
                     properties:
+                      aliases:
+                        description: |-
+                          Aliases are ADDITIONAL public path prefixes served by the http service
+                          next to the canonical /<mirror name> (e.g. /linux.git and /git/linux.git
+                          for the same content — Git smart HTTP is prefix-opaque, so every path
+                          serves identical content and negotiation). Aliases are routing-only:
+                          the canonical path stays the one true public path (mirrorz output,
+                          portal links, documentation). Each alias gets a PathPrefix match on the
+                          publish HTTPRoute, appended after the canonical path in declaration
+                          order (matches within a rule are OR). Case-sensitive, uppercase
+                          allowed; the syntax rules and the canonical-path/duplicate rules are
+                          enforced by the controller (validateHTTPAliases). Whether the gateway
+                          accepts the resulting routes (including precedence against other
+                          Mirrors' routes) is the Gateway API's own precedence and acceptance
+                          machinery; the controller surfaces an Accepted=False condition as
+                          Degraded instead of pre-filtering.
+                        items:
+                          description: |-
+                            MirrorHTTPAlias is one additional public path prefix of an http service.
+                            Paths are case-sensitive and uppercase is allowed ON PURPOSE: the CR name is
+                            bound by DNS rules while alias paths are not.
+                          maxLength: 200
+                          type: string
+                        maxItems: 8
+                        type: array
                       podTemplate:
                         description: |-
                           PodTemplate is the FULL pod template of the publish Deployment
-                          (Deployment .spec.template). The controller forces the naming/label/
-                          selector identity; no workload fields are defaulted or rewritten. The
-                          optional cache PVC is still provisioned and injected as
-                          the reserved `proxy-cache` volume (volumes only — no mount) when
-                          spec.proxy.cache.enabled is true.
+                          (Deployment .spec.template): the user declares every container, port,
+                          probe, volume, affinity and so on. Falcon manages the
+                          data-integrity constraints (the read-only `mirror-data` publish PVC
+                          volume in spec.volumes — mounting it, and where, is the user's own
+                          declaration —, pod labels/annotations, naming/selector identity). No
+                          workload fields are defaulted or rewritten; the operator owns security
+                          context, probes, ports, filesystem, sidecars, and placement (volume
+                          locality is the scheduler's job — the bound PV's nodeAffinity).
                         properties:
                           metadata:
                             description: |-

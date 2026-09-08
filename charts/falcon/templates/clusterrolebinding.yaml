@@ -1,6 +1,6 @@
-{{- /* Bindings of the cluster-scoped ClusterRoles (see clusterrole.yaml),
-each to the controller ServiceAccount, each rendered under the same
-conditions as its ClusterRole. */ -}}
+{{- /* The binding of the cluster-scoped node-stats ClusterRole (see
+clusterrole.yaml) to the controller ServiceAccount, rendered under the same
+conditions as the ClusterRole. */ -}}
 {{- if and .Values.controller.enabled .Values.controller.rbac.create .Values.controller.rbac.nodeStats }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -13,24 +13,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: {{ include "falcon.fullname" . }}-node-stats
-subjects:
-  - kind: ServiceAccount
-    name: {{ include "falcon.serviceAccountName" . }}
-    namespace: {{ .Release.Namespace }}
-{{- end }}
----
-{{- if and .Values.controller.enabled .Values.controller.rbac.create }}
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: {{ include "falcon.fullname" . }}-pv-reader
-  labels:
-    {{- include "falcon.labels" . | nindent 4 }}
-    app.kubernetes.io/component: controller
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ include "falcon.fullname" . }}-pv-reader
 subjects:
   - kind: ServiceAccount
     name: {{ include "falcon.serviceAccountName" . }}

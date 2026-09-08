@@ -76,3 +76,24 @@ func TestSyncLimiter(t *testing.T) {
 		t.Fatal("acquire after all releases must succeed")
 	}
 }
+
+func TestObservedRefreshPreservesConcurrentReservations(t *testing.T) {
+	l := NewSyncLimiter(3)
+	l.Acquire("gone", true)
+	l.Acquire("refreshed", true)
+	l.Acquire("creating", false)
+	snapshot := l.observedSnapshot()
+	// These are concurrent with the live API listing represented by snapshot.
+	l.Acquire("refreshed", true)
+	l.Acquire("creating", true)
+	l.reconcileObserved(snapshot, map[string]struct{}{})
+	if l.Held() != 2 {
+		t.Fatal("refresh must remove old occupancy but retain refreshed and newly-created Jobs")
+	}
+	l.Release("creating")
+	l.Acquire("reserved", false)
+	l.reconcileObserved(l.observedSnapshot(), map[string]struct{}{})
+	if l.Held() != 1 {
+		t.Fatal("an in-flight creation reservation must survive a live-list miss")
+	}
+}

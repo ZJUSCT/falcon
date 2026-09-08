@@ -103,7 +103,7 @@ def main() -> None:
     }
     failures += [
         f"expected resource absent: {r}"
-        for r in [("ClusterRole", "falcon-pv-reader"), ("Deployment", "falcon")]
+        for r in [("ClusterRole", "falcon-node-stats"), ("Deployment", "falcon")]
         if r not in identities
     ]
 

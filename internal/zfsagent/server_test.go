@@ -7,19 +7,25 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
-func testCollector(t *testing.T) *Collector {
+// testRefresher returns a Refresher over the canned tank report with one
+// refresh already performed (the state the DaemonSet reaches moments after
+// startup).
+func testRefresher(t *testing.T) *Refresher {
 	t.Helper()
-	return NewCollector("storage-1", []string{"tank"}, &fakeRunner{respond: func(string) ([]byte, error) {
+	r := NewRefresher(NewCollector("storage-1", []string{"tank"}, &fakeRunner{respond: func(string) ([]byte, error) {
 		return []byte(cannedZfsGet), nil
-	}})
+	}}))
+	r.refresh(context.Background())
+	return r
 }
 
 // TestServeReport pins the frozen wire shape of GET /v1/zfs.
 func TestServeReport(t *testing.T) {
-	srv := httptest.NewServer((&Server{Collector: testCollector(t)}).Handler())
+	srv := httptest.NewServer((&Server{Refresher: testRefresher(t)}).Handler())
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/v1/zfs")
@@ -50,7 +56,7 @@ func TestServeReport(t *testing.T) {
 	if !ok {
 		t.Fatalf("pools[0] is not an object: %s", body)
 	}
-	for _, key := range []string{"name", "datasets"} {
+	for _, key := range []string{"name", "sizeBytes", "allocatedBytes", "freeBytes", "capacityPercent", "fragmentationPercent", "health", "datasets"} {
 		if _, ok := pool[key]; !ok {
 			t.Errorf("pools[0] key %q missing", key)
 		}
@@ -59,13 +65,16 @@ func TestServeReport(t *testing.T) {
 	if !ok {
 		t.Fatalf("datasets[1] is not an object: %s", body)
 	}
-	for _, key := range []string{"name", "pvc", "usedBytes", "referencedBytes", "writtenBytes", "snapshots"} {
+	for _, key := range []string{"name", "pvc", "usedBytes", "logicalUsedBytes", "referencedBytes", "writtenBytes", "snapshots"} {
 		if _, ok := ds[key]; !ok {
 			t.Errorf("dataset key %q missing", key)
 		}
 	}
 	if ds["name"] != "tank/pvc-0a1b" || ds["usedBytes"] != float64(137438953472) {
 		t.Errorf("dataset mismatch: %v", ds)
+	}
+	if ds["logicalUsedBytes"] != float64(214748364800) {
+		t.Errorf("dataset logicalUsedBytes = %v, want 214748364800", ds["logicalUsedBytes"])
 	}
 	snap, ok := ds["snapshots"].([]any)[0].(map[string]any)
 	if !ok {
@@ -83,8 +92,35 @@ func TestServeReport(t *testing.T) {
 	}
 }
 
+// TestServeReportCached: requests are served from the refresher's cache — no
+// per-request collection sweep (that is the whole point of the refresher).
+func TestServeReportCached(t *testing.T) {
+	var commands atomic.Int64
+	runner := &fakeRunner{respond: func(string) ([]byte, error) {
+		commands.Add(1)
+		return []byte(cannedZfsGet), nil
+	}}
+	r := NewRefresher(NewCollector("storage-1", []string{"tank"}, runner))
+	r.refresh(context.Background())
+	before := commands.Load()
+
+	srv := httptest.NewServer((&Server{Refresher: r}).Handler())
+	defer srv.Close()
+	for i := 0; i < 3; i++ {
+		resp, err := http.Get(srv.URL + "/v1/zfs")
+		if err != nil {
+			t.Fatalf("GET /v1/zfs: %v", err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	if got := commands.Load(); got != before {
+		t.Errorf("collector ran %d times for 3 requests, want %d (cached serving)", got, before)
+	}
+}
+
 func TestServeHealthz(t *testing.T) {
-	srv := httptest.NewServer((&Server{Collector: testCollector(t)}).Handler())
+	srv := httptest.NewServer((&Server{Refresher: testRefresher(t)}).Handler())
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/healthz")
@@ -101,7 +137,7 @@ func TestServeHealthz(t *testing.T) {
 // TestServeMethodNotAllowed: the listener is strictly read-only, checked
 // before routing — same contract as the webapi server.
 func TestServeMethodNotAllowed(t *testing.T) {
-	srv := httptest.NewServer((&Server{Collector: testCollector(t)}).Handler())
+	srv := httptest.NewServer((&Server{Refresher: testRefresher(t)}).Handler())
 	defer srv.Close()
 
 	for _, path := range []string{"/v1/zfs", "/healthz", "/anything"} {
@@ -127,7 +163,7 @@ func TestServeMethodNotAllowed(t *testing.T) {
 }
 
 func TestServeUnknownPath(t *testing.T) {
-	srv := httptest.NewServer((&Server{Collector: testCollector(t)}).Handler())
+	srv := httptest.NewServer((&Server{Refresher: testRefresher(t)}).Handler())
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/definitely-not-a-route")
@@ -140,13 +176,15 @@ func TestServeUnknownPath(t *testing.T) {
 	}
 }
 
-// TestServeCollectError: a collector that cannot run at all (pool enumeration
-// fails) surfaces as a 500 JSON error.
-func TestServeCollectError(t *testing.T) {
-	collector := NewCollector("storage-1", nil, &fakeRunner{respond: func(string) ([]byte, error) {
+// TestServeNoReportYet: before the first successful collection there is
+// nothing to serve — a 500 JSON error, not a panic and not a blocking
+// collection attempt inside the request.
+func TestServeNoReportYet(t *testing.T) {
+	r := NewRefresher(NewCollector("storage-1", nil, &fakeRunner{respond: func(string) ([]byte, error) {
 		return nil, context.DeadlineExceeded
-	}})
-	srv := httptest.NewServer((&Server{Collector: collector}).Handler())
+	}}))
+	r.refresh(context.Background()) // fails: never succeeded
+	srv := httptest.NewServer((&Server{Refresher: r}).Handler())
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/v1/zfs")

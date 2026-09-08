@@ -55,6 +55,10 @@ type Dataset struct {
 	// UsedBytes is the zfs used property (space held by the dataset
 	// including its snapshots' shared accounting).
 	UsedBytes int64 `json:"usedBytes"`
+	// LogicalUsedBytes is the zfs logicalused property: the amount of data
+	// referenced before compression, for exact compression-ratio math
+	// against UsedBytes. 0 means unknown.
+	LogicalUsedBytes int64 `json:"logicalUsedBytes"`
 	// ReferencedBytes is the zfs referenced property (the data the dataset
 	// itself refers to).
 	ReferencedBytes int64      `json:"referencedBytes"`
@@ -62,9 +66,26 @@ type Dataset struct {
 	Snapshots       []Snapshot `json:"snapshots"`
 }
 
-// Pool is one ZFS pool with the datasets collected from it.
+// Pool is one ZFS pool with the datasets collected from it. The capacity and
+// health fields come from `zpool get` and follow the report-wide convention:
+// numeric fields are 0 and Health is "" when the value is unknown (zpool get
+// failed, the property was "-", or the value did not parse).
 type Pool struct {
-	Name     string    `json:"name"`
+	Name string `json:"name"`
+	// SizeBytes is the zpool size property (the pool's total capacity).
+	SizeBytes int64 `json:"sizeBytes"`
+	// AllocatedBytes is the zpool allocated property (space in use).
+	AllocatedBytes int64 `json:"allocatedBytes"`
+	// FreeBytes is the zpool free property.
+	FreeBytes int64 `json:"freeBytes"`
+	// CapacityPercent is the zpool capacity property (0-100).
+	CapacityPercent int64 `json:"capacityPercent"`
+	// FragmentationPercent is the zpool fragmentation property; ZFS reports
+	// "-" until fragmentation has been computed, which maps to 0 = unknown.
+	FragmentationPercent int64 `json:"fragmentationPercent"`
+	// Health is the pool state (ONLINE, DEGRADED, ...). "" means unknown.
+	Health string `json:"health"`
+	// Datasets are the pool's datasets, sorted by name.
 	Datasets []Dataset `json:"datasets"`
 }
 
@@ -79,9 +100,13 @@ type Report struct {
 // zfsGetProps are the properties fetched for every dataset and snapshot. The
 // openebs.io:* user properties are written by zfs-localpv; pools from other
 // backends simply report "-" for them.
-const zfsGetProps = "used,referenced,written,creation," +
+const zfsGetProps = "used,referenced,written,creation,logicalused," +
 	"openebs.io:pvc-name,openebs.io:pvc-namespace," +
 	"openebs.io:vs-name,openebs.io:vs-namespace"
+
+// zpoolGetProps are the pool-level properties fetched right after each pool's
+// zfs get: capacity accounting, fragmentation and health.
+const zpoolGetProps = "size,allocated,free,capacity,fragmentation,health"
 
 // Collector builds Reports by executing the host's zfs/zpool binaries.
 type Collector struct {
@@ -96,7 +121,8 @@ type Collector struct {
 	// discarding logger.
 	Log *slog.Logger
 
-	now func() time.Time // injectable for tests
+	now      func() time.Time // injectable for tests
+	kstatDir string           // overrides kstatRoot for tests; "" = kstatRoot
 }
 
 // NewCollector returns a collector reporting for node.
@@ -118,6 +144,7 @@ func (c *Collector) Report(ctx context.Context) (*Report, error) {
 	}
 
 	all := map[string]*datasetProps{}
+	caps := map[string]poolCapacity{}
 	for _, pool := range pools {
 		out, err := c.Runner.Run(ctx, "zfs",
 			"get", "-r", "-Hp", "-t", "filesystem,volume,snapshot",
@@ -128,8 +155,20 @@ func (c *Collector) Report(ctx context.Context) (*Report, error) {
 			continue
 		}
 		mergeProps(all, parseZfsGet(out))
+
+		// Pool-level capacity/health. A failure only blanks those fields —
+		// the dataset data collected above is still valid, so the pool stays
+		// in the report.
+		poolOut, err := c.Runner.Run(ctx, "zpool",
+			"get", "-Hp", "-o", "name,property,value", zpoolGetProps, pool,
+		)
+		if err != nil {
+			c.log().WarnContext(ctx, "skipping pool capacity collection", "pool", pool, "error", err.Error())
+		} else {
+			caps[pool] = parsePoolCapacity(parseZpoolGet(poolOut))
+		}
 	}
-	return buildReport(c.Node, c.now(), pools, all), nil
+	return buildReport(c.Node, c.now(), pools, caps, all), nil
 }
 
 // listPools enumerates all pools with zpool list.
@@ -163,9 +202,10 @@ func mergeProps(all, pool map[string]*datasetProps) {
 }
 
 // buildReport converts the flat property map into the wire report: datasets
-// grouped per pool (in enumeration order), dataset names sorted, snapshots
-// sorted by creation time.
-func buildReport(node string, generatedAt time.Time, pools []string, all map[string]*datasetProps) *Report {
+// grouped per pool (in enumeration order), pool capacity fields from caps (a
+// pool missing from the map keeps the zero "unknown" fields), dataset names
+// sorted, snapshots sorted by creation time.
+func buildReport(node string, generatedAt time.Time, pools []string, caps map[string]poolCapacity, all map[string]*datasetProps) *Report {
 	names := make([]string, 0, len(all))
 	for name := range all {
 		names = append(names, name)
@@ -175,6 +215,10 @@ func buildReport(node string, generatedAt time.Time, pools []string, all map[str
 	report := &Report{Node: node, GeneratedAt: generatedAt, Pools: make([]Pool, 0, len(pools))}
 	for _, pool := range pools {
 		p := Pool{Name: pool, Datasets: []Dataset{}}
+		if pc, ok := caps[pool]; ok {
+			p.SizeBytes, p.AllocatedBytes, p.FreeBytes = pc.size, pc.allocated, pc.free
+			p.CapacityPercent, p.FragmentationPercent, p.Health = pc.capacity, pc.fragmentation, pc.health
+		}
 		for _, name := range names {
 			// With -r <pool> zfs only reports the pool's own tree; the
 			// prefix check keeps the grouping correct even if a stray line
@@ -193,11 +237,12 @@ func buildReport(node string, generatedAt time.Time, pools []string, all map[str
 // the wire shape.
 func newDataset(name string, p *datasetProps) Dataset {
 	ds := Dataset{
-		Name:            name,
-		UsedBytes:       p.used,
-		ReferencedBytes: p.referenced,
-		WrittenBytes:    p.written,
-		Snapshots:       make([]Snapshot, 0, len(p.snapshots)),
+		Name:             name,
+		UsedBytes:        p.used,
+		LogicalUsedBytes: p.logicalused,
+		ReferencedBytes:  p.referenced,
+		WrittenBytes:     p.written,
+		Snapshots:        make([]Snapshot, 0, len(p.snapshots)),
 	}
 	ds.PVC = openebsRef(p.pvcNamespace, p.pvcName)
 

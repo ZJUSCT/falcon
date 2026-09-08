@@ -2,6 +2,7 @@ package webapi
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"sort"
@@ -68,76 +69,110 @@ type mirrorzDocument struct {
 // MirrorZ status letters (main status; see the spec notes above).
 const (
 	mirrorzSuccess      = "S"
+	mirrorzPending      = "D"
 	mirrorzSyncing      = "Y"
 	mirrorzFailed       = "F"
 	mirrorzPaused       = "P"
 	mirrorzProxyCache   = "C"
 	mirrorzProxyNoCache = "R"
-	mirrorzUnknown      = "U"
 )
 
-// tsSuffix renders a unix-seconds suffix for a status token ("" when the
-// timestamp is unset — the spec makes the number optional).
-func tsSuffix(t *metav1.Time) string {
-	if t == nil || t.Unix() <= 0 {
-		return ""
-	}
-	return strconv.FormatInt(t.Unix(), 10)
+// mirrorzStatusBuilder rejects inconsistent persisted state instead of
+// publishing bare timestamp-bearing tokens. X alone is optional: no next
+// schedule exists while a transaction is in progress or syncing is paused.
+type mirrorzStatusBuilder struct {
+	value string
+	err   error
 }
 
-func appendToken(status, token string, timestamp *metav1.Time) string {
-	if suffix := tsSuffix(timestamp); suffix != "" {
-		return status + token + suffix
+func (b *mirrorzStatusBuilder) require(field string, t *metav1.Time) {
+	if b.err == nil && (t == nil || t.Unix() <= 0) {
+		b.err = fmt.Errorf("mirrorz timestamp invariant: %s must contain a positive Unix timestamp", field)
 	}
-	return status
 }
 
-func appendCreationToken(status string, created metav1.Time) string {
-	if created.IsZero() || created.Unix() <= 0 {
-		return status
+func (b *mirrorzStatusBuilder) timestamp(token, field string, t *metav1.Time) {
+	b.require(field, t)
+	if b.err == nil {
+		b.value += token + strconv.FormatInt(t.Unix(), 10)
 	}
-	return status + "N" + strconv.FormatInt(created.Unix(), 10)
 }
 
-// mirrorzStatusForMirror projects synchronization freshness independently of
-// endpoint health. buildMirrorZ has already established Ready=True before it
-// calls this function. Token order is main, O, X, N.
-func mirrorzStatusForMirror(m *mirrorv1alpha1.Mirror) string {
+func (b *mirrorzStatusBuilder) next(t *metav1.Time) {
+	if t != nil {
+		b.timestamp("X", "status.nextSyncAt", t)
+	}
+}
+
+func (b *mirrorzStatusBuilder) result(created metav1.Time) (string, error) {
+	b.timestamp("N", "metadata.creationTimestamp", &created)
+	if b.err != nil {
+		return "", b.err
+	}
+	return b.value, nil
+}
+
+// mirrorzStatusForMirror is only called for eligible HTTP publications. Every
+// such Mirror must retain a successful sync completion, including when a later
+// sync is queued, running or failed. O and N always carry the recorded times.
+func mirrorzStatusForMirror(m *mirrorv1alpha1.Mirror) (string, error) {
 	st := &m.Status
-	if st.CurrentSync != nil {
-		status := mirrorzSyncing + tsSuffix(st.CurrentSync.StartedAt)
-		status = appendToken(status, "O", st.LastPublishedAt)
-		return appendCreationToken(status, m.CreationTimestamp)
+	b := mirrorzStatusBuilder{}
+	// Validate the publication invariant even in states where O is forbidden.
+	b.require("status.lastSuccessfulSyncAt", st.LastSuccessfulSyncAt)
+	if st.LastSync == nil || (st.LastSync.Phase != mirrorv1alpha1.SyncPhaseSucceeded && st.LastSync.Phase != mirrorv1alpha1.SyncPhaseFailed && st.LastSync.Phase != mirrorv1alpha1.SyncPhaseCancelled) {
+		return "", fmt.Errorf("mirrorz state invariant: eligible publication requires a valid lastSync")
 	}
-	if m.Spec.Sync.Paused {
-		// mirrorz-monitor uses the P timestamp as a freshness fallback. Report
-		// the immutable publication's activation time so a paused but still
-		// usable endpoint is judged by the content it actually serves.
-		status := mirrorzPaused + tsSuffix(st.LastPublishedAt)
-		return appendCreationToken(status, m.CreationTimestamp)
+	if m.Spec.Sync.Paused && st.PausedAt != nil && (st.CurrentSync == nil || st.CurrentSync.Phase == mirrorv1alpha1.SyncPhasePending) {
+		b.timestamp(mirrorzPaused, "status.pausedAt", st.PausedAt)
+		return b.result(m.CreationTimestamp)
 	}
-	if st.LastSync != nil && st.LastSync.Phase == mirrorv1alpha1.SyncPhaseSucceeded {
-		status := mirrorzSuccess + tsSuffix(st.LastPublishedAt)
-		status = appendToken(status, "X", st.NextSyncAt)
-		return appendCreationToken(status, m.CreationTimestamp)
+	if current := st.CurrentSync; current != nil {
+		switch current.Phase {
+		case mirrorv1alpha1.SyncPhasePending:
+			b.timestamp(mirrorzPending, "status.currentSync.queuedAt", current.QueuedAt)
+			return b.result(m.CreationTimestamp)
+		case mirrorv1alpha1.SyncPhaseCancelling:
+			if current.StartedAt == nil {
+				b.timestamp(mirrorzPending, "status.currentSync.queuedAt", current.QueuedAt)
+				return b.result(m.CreationTimestamp)
+			}
+			fallthrough
+		case mirrorv1alpha1.SyncPhaseRunning:
+			b.timestamp(mirrorzSyncing, "status.currentSync.startedAt", current.StartedAt)
+			b.timestamp("O", "status.lastSuccessfulSyncAt", st.LastSuccessfulSyncAt)
+			return b.result(m.CreationTimestamp)
+		case mirrorv1alpha1.SyncPhaseSnapshotting:
+			// Snapshotting does not mean the completed Job is still running.
+		default:
+			return "", fmt.Errorf("mirrorz state invariant: invalid currentSync.phase %q", current.Phase)
+		}
 	}
-	if st.LastSync != nil && st.LastSync.Phase == mirrorv1alpha1.SyncPhaseFailed {
-		status := mirrorzFailed + tsSuffix(st.LastSync.FinishedAt)
-		status = appendToken(status, "O", st.LastPublishedAt)
-		status = appendToken(status, "X", st.NextSyncAt)
-		return appendCreationToken(status, m.CreationTimestamp)
+	if m.Spec.Sync.Paused && st.CurrentSync == nil {
+		b.timestamp(mirrorzPaused, "status.pausedAt", st.PausedAt)
+		return b.result(m.CreationTimestamp)
 	}
-	return appendCreationToken(mirrorzUnknown, m.CreationTimestamp)
+	switch {
+	case st.LastSync != nil && st.LastSync.Phase == mirrorv1alpha1.SyncPhaseSucceeded:
+		b.timestamp(mirrorzSuccess, "status.lastSync.finishedAt", st.LastSync.FinishedAt)
+	case st.LastSync != nil && (st.LastSync.Phase == mirrorv1alpha1.SyncPhaseFailed || st.LastSync.Phase == mirrorv1alpha1.SyncPhaseCancelled):
+		b.timestamp(mirrorzFailed, "status.lastSync.startedAt", st.LastSync.StartedAt)
+		b.timestamp("O", "status.lastSuccessfulSyncAt", st.LastSuccessfulSyncAt)
+	default:
+		return "", fmt.Errorf("mirrorz state invariant: eligible publication requires a valid lastSync")
+	}
+	if !m.Spec.Sync.Paused {
+		b.next(st.NextSyncAt)
+	}
+	return b.result(m.CreationTimestamp)
 }
 
-// mirrorzStatusForProxyMirror builds the status field of an included proxy.
-// Non-ready proxies are filtered out before this projection.
-func mirrorzStatusForProxyMirror(p *mirrorv1alpha1.ProxyMirror) string {
-	status := mirrorzProxyNoCache
-	if p.Spec.Proxy.Cache.Enabled != nil && *p.Spec.Proxy.Cache.Enabled {
-		status = mirrorzProxyCache
+func mirrorzStatusForProxyMirror(p *mirrorv1alpha1.ProxyMirror) (string, error) {
+	b := mirrorzStatusBuilder{value: mirrorzProxyNoCache}
+	if p.Spec.Cache != nil {
+		b.value = mirrorzProxyCache
 	}
-	return appendCreationToken(status, p.CreationTimestamp)
+	return b.result(p.CreationTimestamp)
 }
 
 func readyForCurrentGeneration(conditions []metav1.Condition, generation int64) bool {
@@ -145,13 +180,11 @@ func readyForCurrentGeneration(conditions []metav1.Condition, generation int64) 
 	return condition != nil && condition.Status == metav1.ConditionTrue && condition.ObservedGeneration == generation
 }
 
-// pickDescription picks the display description from a LocalizedString:
-// zh first, en as fallback, everything else ignored.
-func pickDescription(desc map[string]string) string {
-	if v, ok := desc["zh"]; ok && v != "" {
-		return v
+func mirrorzCName(configured, name string) string {
+	if configured != "" {
+		return configured
 	}
-	return desc["en"]
+	return name
 }
 
 // hostOnly strips the port from a Host header value ("mirrors.zjusct.io:8443"
@@ -267,11 +300,15 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 		if m.Spec.Publish.HTTP == nil || !readyForCurrentGeneration(m.Status.Conditions, m.Generation) {
 			continue
 		}
+		status, err := mirrorzStatusForMirror(m)
+		if err != nil {
+			return nil, fmt.Errorf("mirrorz catalog: Mirror %s/%s: %w", m.Namespace, m.Name, err)
+		}
 		entries = append(entries, mirrorzMirror{
-			CName:    m.Name,
+			CName:    mirrorzCName(m.Spec.Info.CName, m.Name),
 			URL:      entryURL(baseURL, m.Name),
-			Status:   mirrorzStatusForMirror(m),
-			Desc:     pickDescription(m.Spec.Info.Description),
+			Status:   status,
+			Desc:     m.Spec.Info.Description,
 			Upstream: m.Spec.Info.Upstream,
 			Size:     mirrorzSize(m.Status.SizeBytes),
 		})
@@ -281,11 +318,15 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 		if p.Spec.Publish.HTTP == nil || !readyForCurrentGeneration(p.Status.Conditions, p.Generation) {
 			continue
 		}
+		status, err := mirrorzStatusForProxyMirror(p)
+		if err != nil {
+			return nil, fmt.Errorf("mirrorz catalog: ProxyMirror %s/%s: %w", p.Namespace, p.Name, err)
+		}
 		entries = append(entries, mirrorzMirror{
-			CName:    p.Name,
+			CName:    mirrorzCName(p.Spec.Info.CName, p.Name),
 			URL:      entryURL(baseURL, p.Name),
-			Status:   mirrorzStatusForProxyMirror(p),
-			Desc:     pickDescription(p.Spec.Info.Description),
+			Status:   status,
+			Desc:     p.Spec.Info.Description,
 			Upstream: p.Spec.Info.Upstream,
 		})
 	}

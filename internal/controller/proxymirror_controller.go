@@ -78,22 +78,30 @@ func (r *ProxyMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			setProxyCondition(proxy, conditionDegraded, metav1.ConditionTrue, "InvalidSpec", message)
 		})
 	}
-	if proxy.Spec.Publish.HTTP == nil {
-		return r.patchStatus(ctx, proxy, func() {
-			proxy.Status.ObservedGeneration = proxy.Generation
-			setProxyCondition(proxy, conditionReady, metav1.ConditionFalse, "HTTPDisabled", "spec.publish.http is not configured")
-			setProxyCondition(proxy, conditionProgressing, metav1.ConditionFalse, "HTTPDisabled", "no publish service is requested")
-			setProxyCondition(proxy, conditionDegraded, metav1.ConditionFalse, "HTTPDisabled", "")
-		})
-	}
 	if err := r.ensureCachePVC(ctx, proxy); err != nil {
 		return ctrl.Result{}, err
+	}
+	if proxy.Spec.Publish.HTTP == nil {
+		drained, err := publishPodsDrained(ctx, r.Client, proxy)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		result := ctrl.Result{}
+		if !drained {
+			result.RequeueAfter = 5 * time.Second
+		}
+		return r.patchStatusWithResult(ctx, proxy, result, func() {
+			proxy.Status.ObservedGeneration = proxy.Generation
+			setProxyCondition(proxy, conditionReady, metav1.ConditionFalse, "HTTPDisabled", "spec.publish.http is not configured")
+			setProxyCondition(proxy, conditionProgressing, conditionStatus(!drained), "HTTPDisabled", "no publish service is requested; waiting for any removed workloads to drain")
+			setProxyCondition(proxy, conditionDegraded, metav1.ConditionFalse, "HTTPDisabled", "")
+		})
 	}
 	if !r.Config.PublishEnabled() {
 		return r.patchStatus(ctx, proxy, func() {
 			proxy.Status.ObservedGeneration = proxy.Generation
 			setProxyCondition(proxy, conditionReady, metav1.ConditionFalse, "HTTPRouteDisabled", "HTTP publishing is disabled by controller configuration")
-			setProxyCondition(proxy, conditionProgressing, metav1.ConditionFalse, "HTTPRouteDisabled", "")
+			setProxyCondition(proxy, conditionProgressing, metav1.ConditionTrue, "HTTPRouteDisabled", "")
 			setProxyCondition(proxy, conditionDegraded, metav1.ConditionTrue, "HTTPRouteDisabled", "HTTP publishing is requested but route generation is disabled")
 		})
 	}
@@ -118,27 +126,48 @@ func (r *ProxyMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return r.patchStatusWithResult(ctx, proxy, ctrl.Result{RequeueAfter: time.Minute}, func() {
 			proxy.Status.ObservedGeneration = proxy.Generation
 			setProxyCondition(proxy, conditionReady, metav1.ConditionFalse, "HTTPRouteRejected", routeMessage)
-			setProxyCondition(proxy, conditionProgressing, metav1.ConditionFalse, "HTTPRouteRejected", routeMessage)
+			setProxyCondition(proxy, conditionProgressing, metav1.ConditionTrue, "HTTPRouteRejected", routeMessage)
 			setProxyCondition(proxy, conditionDegraded, metav1.ConditionTrue, "HTTPRouteRejected", routeMessage)
 		})
 	}
-	if !deploymentReady || routeState == publishRoutePending {
+	failure, err := publishDeploymentFailure(ctx, r.Client, proxy, PublishProtocolHTTP)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	deployment := &appsv1.Deployment{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: proxy.Namespace, Name: publishChildName(proxy.Name, PublishProtocolHTTP)}, deployment); err != nil {
+		return ctrl.Result{}, err
+	}
+	available := deployment.Status.AvailableReplicas > 0
+	drained, err := publishPodsDrained(ctx, r.Client, proxy)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !deploymentReady || !drained || routeState == publishRoutePending {
 		message := routeMessage
 		if !deploymentReady {
 			message = "waiting for the proxy Deployment to become available"
 		}
 		return r.patchStatusWithResult(ctx, proxy, ctrl.Result{RequeueAfter: 5 * time.Second}, func() {
 			proxy.Status.ObservedGeneration = proxy.Generation
-			setProxyCondition(proxy, conditionReady, metav1.ConditionFalse, "PublishProgressing", message)
+			setProxyCondition(proxy, conditionReady, conditionStatus(available && routeState == publishRouteReady), "PublishProgressing", message)
 			setProxyCondition(proxy, conditionProgressing, metav1.ConditionTrue, "PublishProgressing", message)
-			setProxyCondition(proxy, conditionDegraded, metav1.ConditionFalse, "PublishRollout", "")
+			if failure != nil {
+				setProxyCondition(proxy, conditionDegraded, metav1.ConditionTrue, failure.reason, failure.message)
+			} else {
+				setProxyCondition(proxy, conditionDegraded, metav1.ConditionFalse, "PublishRollout", "")
+			}
 		})
 	}
 	return r.patchStatus(ctx, proxy, func() {
 		proxy.Status.ObservedGeneration = proxy.Generation
 		setProxyCondition(proxy, conditionReady, metav1.ConditionTrue, "Published", "the proxy Deployment and HTTPRoute are available")
 		setProxyCondition(proxy, conditionProgressing, metav1.ConditionFalse, "Published", "the proxy Deployment and HTTPRoute are available")
-		setProxyCondition(proxy, conditionDegraded, metav1.ConditionFalse, "Publish", "")
+		if failure != nil {
+			setProxyCondition(proxy, conditionDegraded, metav1.ConditionTrue, failure.reason, failure.message)
+		} else {
+			setProxyCondition(proxy, conditionDegraded, metav1.ConditionFalse, "Publish", "")
+		}
 	})
 }
 
@@ -172,11 +201,12 @@ func validateProxyMirror(proxy *mirrorv1alpha1.ProxyMirror) field.ErrorList {
 	// nothing — absent = disabled).
 	if http := proxy.Spec.Publish.HTTP; http != nil {
 		errs = append(errs, validatePublishPodTemplate(&http.PodTemplate,
-			path.Child("services", "http", "podTemplate"), ProxyCacheVolumeName)...)
+			path.Child("publish", "http", "podTemplate"), ProxyCacheVolumeName)...)
+		errs = append(errs, validateHTTPAliases(http, proxy.Name, path.Child("publish", "http", "aliases"))...)
 	}
 	if proxyCacheEnabled(proxy) {
-		cachePath := path.Child("proxy", "cache", "pvcTemplate")
-		spec := proxy.Spec.Proxy.Cache.PVCSpec
+		cachePath := path.Child("cache", "pvcTemplate")
+		spec := proxy.Spec.Cache.PVCSpec
 		if len(spec.AccessModes) == 0 {
 			errs = append(errs, field.Required(cachePath.Child("accessModes"), "must declare at least one access mode when cache is enabled"))
 		}
@@ -192,5 +222,5 @@ func validateProxyMirror(proxy *mirrorv1alpha1.ProxyMirror) field.ErrorList {
 }
 
 func proxyCacheEnabled(proxy *mirrorv1alpha1.ProxyMirror) bool {
-	return proxy.Spec.Proxy.Cache.Enabled != nil && *proxy.Spec.Proxy.Cache.Enabled
+	return proxy.Spec.Cache != nil
 }

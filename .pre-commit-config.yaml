@@ -1,49 +1,9 @@
 repos:
-  - repo: https://github.com/adrienverge/yamllint
-    rev: v1.38.0
-    hooks:
-      - id: yamllint
-        args: [--format, colored, -d, relaxed]
-        exclude: ^(ui/node_modules/|charts/falcon/crds/|charts/falcon/templates/)
-  - repo: https://github.com/shellcheck-py/shellcheck-py
-    rev: v0.11.0.1
-    hooks:
-      - id: shellcheck
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v6.0.0
-    hooks:
-      - id: trailing-whitespace
-        args: [--markdown-linebreak-ext=md]
-        exclude: ^(ui/node_modules/|charts/falcon/crds/|charts/falcon/templates/)
-      - id: end-of-file-fixer
-        exclude: ^(ui/node_modules/|charts/falcon/crds/|charts/falcon/templates/)
-      - id: check-yaml
-        args: [--allow-multiple-documents]
-        # Helm templates are only valid YAML after rendering; the rendered
-        # manifest is validated by scripts/validate-chart.py below.
-        exclude: ^(ui/node_modules/|charts/falcon/crds/|charts/falcon/templates/)
-      - id: check-added-large-files
-        args: [--maxkb=1024]
-      - id: check-merge-conflict
-      - id: mixed-line-ending
   - repo: local
     hooks:
-      - id: go-test
-        name: Go test suite
+      - id: falcon-checks
+        name: Falcon containerized checks
         language: system
-        entry: scripts/pre-commit-go-test.sh
+        entry: make check
         pass_filenames: false
         always_run: true
-      - id: golangci-lint
-        name: golangci-lint
-        language: system
-        entry: golangci-lint run
-        pass_filenames: false
-        always_run: true
-      - id: falcon-chart
-        name: falcon chart render validation
-        files: ^charts/
-        language: python
-        additional_dependencies: [pyyaml]
-        entry: scripts/validate-chart.py
-        pass_filenames: false

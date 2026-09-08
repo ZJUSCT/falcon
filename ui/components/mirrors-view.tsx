@@ -1,40 +1,37 @@
 'use client';
 
-// Mirror list — read-only port of the legacy Mirrors view.
-//
-// Dropped relative to the legacy component: TriggerButton (manual sync),
-// orphan-job deletion, worker matching. None of these have a backend
-// anymore — the controller serves a strictly read-only API. The legacy ZFS
-// size column returns as "Size", backed by the usage aggregation.
-// Data sources: GET /api/jobs (5s poll) and GET /api/usage (30s poll;
-// silently absent — the Size column shows `—` — when the usage feature is
-// not deployed on the backend).
+// Mirror list and administrator controls.
 
 import { useState, useEffect, useMemo } from 'react';
 import type { KeyboardEvent } from 'react';
+import { ConditionBadges } from '@/components/condition-badges';
 import { StatusBadge } from '@/components/status-badge';
 import { RelativeTime } from '@/components/relative-time';
 import { apiClient } from '@/lib/api';
 import { useUsage } from '@/lib/hooks';
 import { formatBytes } from '@/lib/utils';
 import { Job } from '@/types';
-import { Search } from 'lucide-react';
+import { Pause, Play, RefreshCw, Search, Square } from 'lucide-react';
+
+const actionButtonClass = "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded border border-border transition-colors enabled:hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-40";
 
 interface MirrorsViewProps {
   onMirrorClick: (id: string) => void;
 }
 
-// Sort order mirrors the legacy view: active work first, then by next
-// scheduled attempt (jobs with no schedule last).
+// Active sync work first, then by next scheduled attempt (no schedule last).
 const statusPriority: Record<string, number> = {
-  Running: 0,
-  Waiting: 2,
-  Paused: 3,
+  Syncing: 0,
+  Snapshotting: 0,
+  Cancelling: 0,
+  Pending: 1,
+  Retrying: 2,
+  Waiting: 3,
 };
 
 function compareJobs(a: Job, b: Job): number {
-  const pA = statusPriority[a.status] ?? 4;
-  const pB = statusPriority[b.status] ?? 4;
+  const pA = statusPriority[a.sync_phase ?? ''] ?? 4;
+  const pB = statusPriority[b.sync_phase ?? ''] ?? 4;
   if (pA !== pB) return pA - pB;
 
   const zeroDate = '0001-01-01T00:00:00Z';
@@ -49,8 +46,27 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [canAdminister, setCanAdminister] = useState(false);
+  const [busyActions, setBusyActions] = useState<Set<string>>(new Set());
+  const [actionError, setActionError] = useState<string | null>(null);
+  useEffect(() => { apiClient.canAdminister().then(setCanAdminister).catch(() => setCanAdminister(false)); }, []);
+
+  async function runAction(job: Job, action: 'pause' | 'resume' | 'sync' | 'abort') {
+    const key = `${job.namespace}/${job.id}`;
+    setBusyActions(previous => new Set(previous).add(key));
+    setActionError(null);
+    try {
+      const updated = await apiClient.mirrorAction(job.id, action);
+      setJobs(previous => previous.map(item => item.kind === 'Mirror' && item.id === updated.id && item.namespace === updated.namespace ? updated : item));
+    } catch (error) {
+      setActionError(`${job.id}: ${error instanceof Error ? error.message : 'Action failed'}`);
+    } finally {
+      setBusyActions(previous => { const next = new Set(previous); next.delete(key); return next; });
+    }
+  }
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<string>('All');
+  const [conditionFilter, setConditionFilter] = useState('All');
+  const [phaseFilter, setPhaseFilter] = useState('All');
   const usage = useUsage();
 
   // Join usage rows onto jobs by id (usage `name` === job `id`).
@@ -102,12 +118,8 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
 
   const filtered = sorted.filter(job => {
     if (search && !job.id.toLowerCase().includes(search.toLowerCase())) return false;
-    if (statusFilter !== 'All') {
-      if (statusFilter === 'Failed') {
-        return job.last_action_status === 'Failed';
-      }
-      return job.status === statusFilter;
-    }
+    if (conditionFilter !== 'All' && !(job.conditions ?? []).some(condition => condition.type === conditionFilter && condition.status === 'True')) return false;
+    if (phaseFilter !== 'All' && job.sync_phase !== phaseFilter) return false;
     return true;
   });
 
@@ -118,11 +130,9 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
     }
   };
 
-  const jobsByStatus = jobs.reduce((acc, j) => {
-    const s = j.status || 'Unknown';
-    acc[s] = (acc[s] || 0) + 1;
-    return acc;
-  }, {} as Record<string, number>);
+  const syncingCount = jobs.filter(job => job.sync_phase === 'Syncing' || job.sync_phase === 'Cancelling').length;
+  const pendingCount = jobs.filter(job => job.sync_phase === 'Pending').length;
+  const conditionCount = (type: string) => jobs.filter(job => job.conditions?.some(condition => condition.type === type && condition.status === 'True')).length;
 
   return (
     <div className="p-6 space-y-4">
@@ -133,21 +143,21 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
 
       <div className="grid gap-3 grid-cols-2 md:grid-cols-4">
         <div className="rounded-lg border bg-card p-3">
-          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Running</div>
-          <div className="text-xl font-bold tabular-nums text-blue-500 mt-1">{jobsByStatus.Running || 0}</div>
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Active syncs</div>
+          <div className="text-xl font-bold tabular-nums text-blue-500 mt-1">{syncingCount}</div>
         </div>
         <div className="rounded-lg border bg-card p-3">
-          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Waiting</div>
-          <div className="text-xl font-bold tabular-nums text-yellow-500 mt-1">{jobsByStatus.Waiting || 0}</div>
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Pending syncs</div>
+          <div className="text-xl font-bold tabular-nums text-yellow-500 mt-1">{pendingCount}</div>
         </div>
         <div className="rounded-lg border bg-card p-3">
-          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Paused</div>
-          <div className="text-xl font-bold tabular-nums text-orange-500 mt-1">{jobsByStatus.Paused || 0}</div>
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Progressing</div>
+          <div className="text-xl font-bold tabular-nums text-orange-500 mt-1">{conditionCount('Progressing')}</div>
         </div>
         <div className="rounded-lg border bg-card p-3">
-          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Last Sync Failed</div>
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Degraded</div>
           <div className="text-xl font-bold tabular-nums text-red-500 mt-1">
-            {jobs.filter(j => j.last_action_status === 'Failed').length}
+            {conditionCount('Degraded')}
           </div>
         </div>
       </div>
@@ -163,18 +173,17 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
             className="w-full pl-9 pr-3 py-1.5 text-xs rounded-md border border-border bg-card text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/60"
           />
         </div>
-        <select
-          value={statusFilter}
-          onChange={e => setStatusFilter(e.target.value)}
-          className="px-3 py-1.5 text-xs rounded-md border border-border bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary/60"
-        >
-          <option value="All">All Statuses</option>
-          <option value="Running">Running</option>
-          <option value="Waiting">Waiting</option>
-          <option value="Paused">Paused</option>
-          <option value="Failed">Failed</option>
+        <select aria-label="Filter conditions" value={conditionFilter} onChange={e => setConditionFilter(e.target.value)} className="rounded-lg border border-input bg-background px-3 py-2 text-sm">
+          <option value="All">All conditions</option>
+          {['Ready', 'Progressing', 'Degraded'].map(value => <option key={value}>{value}</option>)}
+        </select>
+        <select aria-label="Filter sync phase" value={phaseFilter} onChange={e => setPhaseFilter(e.target.value)} className="rounded-lg border border-input bg-background px-3 py-2 text-sm">
+          <option value="All">All sync phases</option>
+          {['Waiting', 'Pending', 'Syncing', 'Snapshotting', 'Retrying', 'Cancelling'].map(value => <option key={value}>{value}</option>)}
         </select>
       </div>
+
+      {actionError && <p role="alert" className="text-sm text-red-500">{actionError}</p>}
 
       {filtered.length === 0 ? (
         <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">
@@ -188,7 +197,9 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                 <tr>
                   <th className="px-3 py-2 text-center">Job</th>
                   <th className="px-3 py-2 text-center">Kind</th>
-                  <th className="px-3 py-2 text-center">Status</th>
+                  <th className="px-3 py-2 text-center">Conditions</th>
+                  <th className="px-3 py-2 text-center">Sync phase</th>
+                  {canAdminister && <th className="w-px px-3 py-2 text-center">Actions</th>}
                   <th className="hidden md:table-cell px-3 py-2 text-center">Size</th>
                   <th className="hidden md:table-cell px-3 py-2 text-center">Last Action</th>
                   <th className="hidden md:table-cell px-3 py-2 text-left">Next Attempt</th>
@@ -237,11 +248,25 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                         </span>
                       </td>
                       <td className="px-3 py-2 text-center align-top">
-                        <StatusBadge status={job.status} />
-                        {job.phase && job.phase !== job.status && (
-                          <div className="mt-1 text-[10px] font-mono text-muted-foreground">{job.phase}</div>
-                        )}
+                        <ConditionBadges conditions={job.conditions} />
                       </td>
+                      <td className="px-3 py-2 text-center align-top">
+                        {job.sync_phase ? <StatusBadge status={job.sync_phase} /> : <span className="text-muted-foreground">—</span>}
+                        {job.kind === 'Mirror' && job.paused && <div className="mt-1 text-[10px] text-muted-foreground">Manual mode</div>}
+                      </td>
+                      {canAdminister && (
+                        <td className="w-px px-3 py-2 align-top" onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
+                          {job.kind === 'Mirror' && (
+                            <div className="flex items-center justify-center gap-1">
+                              <button type="button" className={actionButtonClass} disabled={busyActions.has(`${job.namespace}/${job.id}`)} aria-label={job.paused ? 'Resume schedule' : 'Pause schedule'} title={job.paused ? 'Resume automatic synchronization' : 'Pause automatic synchronization; manual sync remains available'} onClick={() => runAction(job, job.paused ? 'resume' : 'pause')}>
+                                {job.paused ? <Play className="h-4 w-4" aria-hidden="true" /> : <Pause className="h-4 w-4" aria-hidden="true" />}
+                              </button>
+                              <button type="button" className={actionButtonClass} disabled={busyActions.has(`${job.namespace}/${job.id}`) || job.sync_busy} aria-label="Sync now" title={job.sync_busy ? 'A synchronization is already queued or active' : 'Request one synchronization'} onClick={() => runAction(job, 'sync')}><RefreshCw className="h-4 w-4" aria-hidden="true" /></button>
+                              <button type="button" className={`${actionButtonClass} text-red-500`} aria-label="Abort sync" title="Abort the current synchronization" disabled={busyActions.has(`${job.namespace}/${job.id}`) || !job.can_abort} onClick={() => runAction(job, 'abort')}><Square className="h-4 w-4" aria-hidden="true" /></button>
+                            </div>
+                          )}
+                        </td>
+                      )}
                       <td className="hidden md:table-cell px-3 py-2 text-center align-top whitespace-nowrap">
                         {sizeText ? (
                           <span className="font-mono tabular-nums">

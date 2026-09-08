@@ -1,21 +1,16 @@
-// Package webapi serves the read-only HTTP endpoints of the controller:
-//
-//   - GET /mirrorz.json      MirrorZ 1.7 catalog (Mirror + ProxyMirror)
-//   - GET /api/jobs          legacy-compatible job list (legacy Docker-era UI)
-//   - GET /api/repos/<name>  spec-only view of a single Mirror/ProxyMirror
-//   - GET /api/usage         ZFS usage aggregation over the zfs-agents
-//
-// Everything is served from one listener (default :8082) and is strictly
-// read-only: only GET is allowed, anything else gets 405.
+// Package webapi serves public catalog reads and authenticated mirror administration.
 package webapi
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -33,14 +28,19 @@ type SiteConfig struct {
 	Disable                                                                     bool
 }
 
-// Server serves the read-only HTTP API on top of a controller-runtime client.
+// Server serves the HTTP API on top of controller-runtime clients.
 type Server struct {
 	// Client reads Mirror and ProxyMirror objects. It is expected to be the
 	// manager's cached client so the handlers never hit the API server
 	// directly (and, with the namespace-scoped cache, only see objects from
 	// the controller's own namespace).
 	Client client.Reader
-	Site   SiteConfig
+	// Writes use live reads and a fixed namespace, independent of the read cache.
+	Writer    client.Client
+	APIReader client.Reader
+	Namespace string
+	LogStream func(context.Context, string, string, *corev1.PodLogOptions) (io.ReadCloser, error)
+	Site      SiteConfig
 	// PublishHostnames is the whitelist of publish hostnames (config
 	// publish.hostnames). A request whose Host (port stripped, matched
 	// case-insensitively) is on the list gets its mirrorz document reflected
@@ -56,8 +56,7 @@ type Server struct {
 	UIUpstream string
 }
 
-// Handler builds the http.Handler for the read-only API. All routes are
-// GET-only; the guard returns 405 with an Allow: GET header otherwise.
+// Handler keeps public routes read-only and gates mutations on administrator auth.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mirrorz.json", s.handleMirrorZ)
@@ -65,6 +64,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/repos", s.handleRepoRoot)
 	mux.HandleFunc("/api/repos/", s.handleRepo)
 	mux.HandleFunc("/api/usage", s.handleUsage)
+	mux.HandleFunc("/api/storage", s.handleStorage)
 	if s.Auth != nil {
 		mux.HandleFunc("/oauth/login", s.Auth.login)
 		mux.HandleFunc("/oauth/callback", s.Auth.callback)
@@ -76,7 +76,33 @@ func (s *Server) Handler() http.Handler {
 		writeJSONError(w, http.StatusNotFound, "not found")
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.Auth != nil && strings.EqualFold(strings.Split(r.Host, ":")[0], s.Auth.AdminHost) {
+		admin := s.Auth != nil && strings.EqualFold(hostOnly(r.Host), s.Auth.AdminHost)
+		if strings.HasPrefix(r.URL.Path, "/api/mirrors/") {
+			if !admin {
+				writeJSONError(w, 403, "administrator host required")
+				return
+			}
+			if !s.Auth.require(w, r) {
+				return
+			}
+			if strings.HasSuffix(r.URL.Path, "/logs") || strings.HasSuffix(r.URL.Path, "/logs/stream") {
+				if r.Method != http.MethodGet {
+					w.Header().Set("Allow", http.MethodGet)
+					writeJSONError(w, 405, "method not allowed")
+					return
+				}
+				s.handleMirrorLogs(w, r)
+				return
+			}
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", http.MethodPost)
+				writeJSONError(w, 405, "method not allowed")
+				return
+			}
+			s.handleMirrorAction(w, r)
+			return
+		}
+		if admin {
 			if strings.HasPrefix(r.URL.Path, "/oauth/") {
 				if r.Method != http.MethodGet {
 					w.Header().Set("Allow", http.MethodGet)
@@ -86,7 +112,7 @@ func (s *Server) Handler() http.Handler {
 				mux.ServeHTTP(w, r)
 				return
 			}
-			if r.URL.Path == "/mirrorz.json" {
+			if r.URL.Path == "/mirrorz.json" && r.Method == http.MethodGet {
 				mux.ServeHTTP(w, r)
 				return
 			}

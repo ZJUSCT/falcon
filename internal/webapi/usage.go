@@ -167,6 +167,8 @@ type usageAggregate struct {
 	// which is also PVC.spec.volumeName. This fallback needs no cluster-scoped
 	// PV or VolumeSnapshotContent permissions.
 	byVolumeName map[string]*zfsagent.Dataset
+	// nodes carries each reporting node's full report for GET /api/storage.
+	nodes []StorageNode
 }
 
 // UsageAggregator merges the per-node ZFS reports of all zfs-agents and joins
@@ -309,6 +311,7 @@ func (a *UsageAggregator) collect(ctx context.Context) (*usageAggregate, error) 
 	// but the addresser is pluggable): one fetch per unique address, in the
 	// deterministic (address-sorted) order.
 	seen := map[string]bool{}
+	seenNodes := map[string]bool{}
 	unique := make([]AgentEndpoint, 0, len(endpoints))
 	for _, ep := range endpoints {
 		if seen[ep.Addr] {
@@ -342,6 +345,13 @@ func (a *UsageAggregator) collect(ctx context.Context) (*usageAggregate, error) 
 			agg.complete = false
 			agg.errors = append(agg.errors, fmt.Sprintf("%s: %v", agentLabel(result.ep), result.err))
 			continue
+		}
+		// One report per node for /api/storage: like byPVC below, the first
+		// report wins deterministically (endpoints are sorted) should a node
+		// ever report twice.
+		if !seenNodes[result.report.Node] {
+			seenNodes[result.report.Node] = true
+			agg.nodes = append(agg.nodes, StorageNode{Node: result.report.Node, Pools: result.report.Pools})
 		}
 		for _, pool := range result.report.Pools {
 			for i := range pool.Datasets {

@@ -227,13 +227,12 @@ func ensurePublishedMirrorRoute(ctx context.Context, r *MirrorReconciler, mirror
 
 // ensureReadyProxyRoute is the ProxyMirror-specific invocation. The route is
 // created while the Deployment converges so both resources can become ready
-// in parallel. A proxy has no aliases: its single public path is the canonical
-// /<name>.
+// in parallel. The canonical path and aliases have the same semantics as Mirror.
 func ensureReadyProxyRoute(ctx context.Context, r *ProxyMirrorReconciler, proxy *mirrorv1alpha1.ProxyMirror) error {
 	if !r.Config.PublishEnabled() {
 		return nil
 	}
-	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, proxy, []string{"/" + proxy.GetName()})
+	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, proxy, append([]string{"/" + proxy.GetName()}, proxyHTTPAliases(proxy)...))
 }
 
 // deletePublishRouteFor removes the deterministic route when HTTP publishing
@@ -353,4 +352,14 @@ func sameRouteParent(desired, observed gatewayv1.ParentReference, routeNamespace
 		desired.Name == observed.Name &&
 		ptr.Deref(desired.SectionName, "") == ptr.Deref(observed.SectionName, "") &&
 		ptr.Deref(desired.Port, 0) == ptr.Deref(observed.Port, 0)
+}
+
+func proxyHTTPAliases(proxy *mirrorv1alpha1.ProxyMirror) []string {
+	var paths []string
+	if proxy.Spec.Publish.HTTP != nil {
+		for _, alias := range proxy.Spec.Publish.HTTP.Aliases {
+			paths = append(paths, string(alias))
+		}
+	}
+	return paths
 }

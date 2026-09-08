@@ -68,28 +68,19 @@ func TestLegacyStatusForMirrorPhase(t *testing.T) {
 }
 
 func TestMirrorPresentationPhaseDerivesCurrentSyncStage(t *testing.T) {
-	cases := []struct {
-		reason      string
-		progressing metav1.ConditionStatus
-		degraded    metav1.ConditionStatus
-		want        string
-	}{
-		{"SynchronizationStarted", metav1.ConditionTrue, metav1.ConditionFalse, mirrorv1alpha1.PhaseInitializing},
-		{"SyncJobRunning", metav1.ConditionTrue, metav1.ConditionFalse, mirrorv1alpha1.PhaseSyncing},
-		{"Snapshotting", metav1.ConditionTrue, metav1.ConditionFalse, mirrorv1alpha1.PhasePublishing},
-		{"SnapshotTimestampConflict", metav1.ConditionFalse, metav1.ConditionTrue, mirrorv1alpha1.PhaseDegraded},
-	}
-	for _, tc := range cases {
-		mirror := &mirrorv1alpha1.Mirror{Status: mirrorv1alpha1.MirrorStatus{
-			CurrentSync: &mirrorv1alpha1.MirrorCurrentSyncStatus{},
-			Conditions: []metav1.Condition{
-				{Type: "Progressing", Status: tc.progressing, Reason: tc.reason},
-				{Type: "Degraded", Status: tc.degraded, Reason: tc.reason},
-			},
-		}}
-		if got := mirrorPresentationPhase(mirror); got != tc.want {
-			t.Errorf("reason %s: phase = %q, want %q", tc.reason, got, tc.want)
+	for _, tc := range []struct{ phase, want string }{
+		{mirrorv1alpha1.SyncPhasePending, mirrorv1alpha1.PhaseInitializing},
+		{mirrorv1alpha1.SyncPhaseRunning, mirrorv1alpha1.PhaseSyncing},
+		{mirrorv1alpha1.SyncPhaseCancelling, mirrorv1alpha1.SyncPhaseCancelling},
+	} {
+		m := &mirrorv1alpha1.Mirror{Status: mirrorv1alpha1.MirrorStatus{CurrentSync: &mirrorv1alpha1.MirrorCurrentSyncStatus{Phase: tc.phase}}}
+		if got := mirrorPresentationPhase(m); got != tc.want {
+			t.Errorf("phase=%s, want %s", got, tc.want)
 		}
+	}
+	m := &mirrorv1alpha1.Mirror{Status: mirrorv1alpha1.MirrorStatus{Publication: &mirrorv1alpha1.MirrorPublicationStatus{Phase: "Snapshotting"}}}
+	if got := mirrorPresentationPhase(m); got != mirrorv1alpha1.PhasePublishing {
+		t.Errorf("publication=%s", got)
 	}
 }
 
@@ -118,6 +109,7 @@ func TestListJobsMirrorEntry(t *testing.T) {
 	}
 	got := entries[0]
 	want := JobEntry{
+		Conditions:       m.Status.Conditions,
 		ID:               "debian",
 		Status:           "Waiting", // Ready = idle until next interval
 		Kind:             "Mirror",

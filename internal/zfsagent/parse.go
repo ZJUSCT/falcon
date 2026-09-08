@@ -9,10 +9,11 @@ import (
 // dataset's snapshots are nested under snapshots, keyed by their full ZFS
 // name (<dataset>@<snapshot>).
 type datasetProps struct {
-	used       int64
-	referenced int64
-	written    int64
-	creation   int64
+	used        int64
+	referenced  int64
+	written     int64
+	creation    int64
+	logicalused int64
 
 	pvcName      string
 	pvcNamespace string
@@ -100,6 +101,10 @@ func setProp(p *datasetProps, property, value string) {
 		if v, ok := parseZfsInt(value); ok {
 			p.creation = v
 		}
+	case "logicalused":
+		if v, ok := parseZfsInt(value); ok {
+			p.logicalused = v
+		}
 	case "openebs.io:pvc-name":
 		p.pvcName = unsetDash(value)
 	case "openebs.io:pvc-namespace":
@@ -130,4 +135,60 @@ func parseZfsInt(value string) (int64, bool) {
 		return 0, false
 	}
 	return v, true
+}
+
+// parseZpoolGet parses the output of
+//
+//	zpool get -Hp -o name,property,value <props> <pool>
+//
+// -Hp emits tab-separated name/property/value triples (all rows belong to the
+// one pool asked for, so only the property/value pair matters) with numeric
+// properties as exact bare integers. The same robustness rules as parseZfsGet
+// apply: malformed lines are skipped, everything else is returned as strings —
+// interpreting the values is the caller's job (see parsePoolCapacity).
+func parseZpoolGet(out []byte) map[string]string {
+	props := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		fields := strings.SplitN(line, "\t", 3)
+		if len(fields) != 3 {
+			continue
+		}
+		props[fields[1]] = fields[2]
+	}
+	return props
+}
+
+// poolCapacity carries one pool's zpool get properties (see zpoolGetProps).
+// Zero numeric fields and an empty health mean "unknown".
+type poolCapacity struct {
+	size, allocated, free   int64
+	capacity, fragmentation int64
+	health                  string
+}
+
+// parsePoolCapacity interprets the property/value pairs of one zpool get run.
+// A trailing "%" is tolerated (printed by some zfs versions even with -p);
+// "-" (fragmentation before ZFS has computed it, unset properties) and
+// unparsable values leave the field at its zero "unknown" value.
+func parsePoolCapacity(props map[string]string) poolCapacity {
+	return poolCapacity{
+		size:          poolInt(props, "size"),
+		allocated:     poolInt(props, "allocated"),
+		free:          poolInt(props, "free"),
+		capacity:      poolInt(props, "capacity"),
+		fragmentation: poolInt(props, "fragmentation"),
+		health:        unsetDash(props["health"]),
+	}
+}
+
+// poolInt reads one zpool get numeric property, tolerating a trailing "%".
+func poolInt(props map[string]string, key string) int64 {
+	if v, ok := parseZfsInt(strings.TrimSuffix(props[key], "%")); ok {
+		return v
+	}
+	return 0
 }

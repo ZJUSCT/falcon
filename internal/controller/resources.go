@@ -86,7 +86,7 @@ func (r *MirrorReconciler) ensureSnapshot(ctx context.Context, mirror *mirrorv1a
 		}
 		return false, message, nil
 	}
-	return snapshot.Status != nil && snapshot.Status.ReadyToUse != nil && *snapshot.Status.ReadyToUse, "", nil
+	return snapshot.DeletionTimestamp.IsZero() && snapshot.Status != nil && snapshot.Status.ReadyToUse != nil && *snapshot.Status.ReadyToUse, "", nil
 }
 
 func (r *MirrorReconciler) ensureSyncPVC(ctx context.Context, mirror *mirrorv1alpha1.Mirror) error {
@@ -119,8 +119,8 @@ func (r *MirrorReconciler) ensureSyncPVC(ctx context.Context, mirror *mirrorv1al
 }
 
 func (r *MirrorReconciler) ensurePublishPVC(ctx context.Context, mirror *mirrorv1alpha1.Mirror) error {
-	snapshotName := currentSyncSnapshotName(mirror)
-	timestamp := currentSyncTimestamp(mirror)
+	snapshotName := publicationSnapshotName(mirror)
+	timestamp := mirror.Status.Publication.QueuedAt.Unix()
 	key := types.NamespacedName{Namespace: mirror.Namespace, Name: snapshotName}
 	claim := &corev1.PersistentVolumeClaim{}
 	if err := r.Get(ctx, key, claim); err == nil {
@@ -135,7 +135,7 @@ func (r *MirrorReconciler) ensurePublishPVC(ctx context.Context, mirror *mirrorv
 	claim = newDataClaim(mirror, snapshotName, timestamp, "publish-data")
 	claim.Spec.DataSource = &corev1.TypedLocalObjectReference{
 		APIGroup: stringPtr(snapshotv1.GroupName),
-		Kind:     "VolumeSnapshot",
+		Kind:     volumeSnapshotKind,
 		Name:     snapshotName,
 	}
 	if err := controllerutil.SetControllerReference(mirror, claim, r.Scheme); err != nil {
@@ -149,13 +149,25 @@ func (r *MirrorReconciler) ensurePublishPVC(ctx context.Context, mirror *mirrorv
 
 // newDataClaim builds a PVC. syncTimestamp is the Unix seconds timestamp
 // embedded in snapshot-derived PVC names; 0 means the claim is not
-// snapshot-scoped (the stable sync PVC).
+// snapshot-scoped (the stable sync PVC). The StorageClass is always explicit:
+// the sync claim uses SyncStorageClassName, the publish claims (snapshot
+// clones) use PublishStorageClassName.
 func newDataClaim(mirror *mirrorv1alpha1.Mirror, name string, syncTimestamp int64, role string) *corev1.PersistentVolumeClaim {
 	labels := childLabels(mirror, syncTimestamp, role)
 	spec := mirror.Spec.Storage.PVCSpec.DeepCopy()
-	spec.StorageClassName = stringPtr(mirror.Spec.Storage.SyncStorageClassName)
-	if role == "publish-data" && mirror.Spec.Storage.PublishStorageClassName != "" {
+	if role == "publish-data" {
 		spec.StorageClassName = stringPtr(mirror.Spec.Storage.PublishStorageClassName)
+		// The publish claim is cloned from a VolumeSnapshot through its
+		// dataSource, so dynamic provisioning must run — and the PV
+		// controller only takes that path while spec.volumeName is empty.
+		// A volumeName inherited from pvcTemplate would pre-bind the clone
+		// to a nonexistent PV and leave it Pending forever. volumeName in
+		// pvcTemplate exists solely for the sync claim to pre-bind an
+		// existing PV (e.g. cross-instance migration); the publish clone
+		// never carries it.
+		spec.VolumeName = ""
+	} else {
+		spec.StorageClassName = stringPtr(mirror.Spec.Storage.SyncStorageClassName)
 	}
 	return &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -184,9 +196,15 @@ func (r *MirrorReconciler) lookupOrCreateSyncJob(ctx context.Context, mirror *mi
 	jobName := currentSyncJobName(mirror)
 	key := types.NamespacedName{Namespace: mirror.Namespace, Name: jobName}
 	job := &batchv1.Job{}
-	err := r.Get(ctx, key, job)
+	err := r.liveReader().Get(ctx, key, job)
 	switch {
 	case apierrors.IsNotFound(err):
+		if err := r.checkSyncAdmission(ctx, mirror); err != nil {
+			return nil, err
+		}
+		if err := r.restoreSyncSlots(ctx, mirror.Namespace); err != nil {
+			return nil, err
+		}
 		if !r.SyncLimiter.Acquire(jobName, false) {
 			return nil, errSyncQueued
 		}
@@ -194,11 +212,15 @@ func (r *MirrorReconciler) lookupOrCreateSyncJob(ctx context.Context, mirror *mi
 			r.SyncLimiter.Release(jobName)
 			return nil, err
 		}
+		if err := r.checkSyncAdmission(ctx, mirror); err != nil {
+			r.SyncLimiter.Release(jobName)
+			return nil, err
+		}
 		if err := r.createSyncJob(ctx, mirror); err != nil {
 			r.SyncLimiter.Release(jobName)
 			return nil, err
 		}
-		if err := r.Get(ctx, key, job); err != nil {
+		if err := r.liveReader().Get(ctx, key, job); err != nil {
 			return nil, err
 		}
 		return job, nil
@@ -336,23 +358,13 @@ func (r *MirrorReconciler) createSyncJob(ctx context.Context, mirror *mirrorv1al
 // spec.publish key (a present key) for the given claim. It reports readiness
 // across all enabled services.
 //
-// Node placement is DERIVED, not configured: before touching any Deployment
-// the source PV of the sync PVC is read and its nodeAffinity turned into a
-// pod constraint (see publishPlacement). While that derivation cannot be made
-// (PVC/PV not bound yet — abnormal timing) no Deployment is created at all:
-// publish pods must never run without their volume locality constraint.
+// No placement is derived or injected: the bound PV's nodeAffinity is
+// enforced by the scheduler natively. Workload creation is gated on that
+// binding — until the publish PVC is bound to its PV no Deployment is
+// created, because a pod must not exist before the PV whose nodeAffinity it
+// relies on does (cloning the snapshot takes seconds to minutes; the caller
+// retries until then).
 func (r *MirrorReconciler) ensurePublish(ctx context.Context, mirror *mirrorv1alpha1.Mirror, claimName string) (bool, error) {
-	nodeSelector, affinity, determined, err := r.publishPlacement(ctx, mirror)
-	if err != nil {
-		return false, err
-	}
-	if !determined {
-		if r.Recorder != nil {
-			r.Recorder.Eventf(mirror, corev1.EventTypeWarning, "PublishPlacementPending",
-				"Publish workload deferred: node constraint cannot be derived yet (sync PVC/PV not bound); retrying")
-		}
-		return false, nil
-	}
 	ready := true
 	services := mirror.Spec.Publish
 	for _, entry := range []struct {
@@ -365,7 +377,7 @@ func (r *MirrorReconciler) ensurePublish(ctx context.Context, mirror *mirrorv1al
 		if entry.spec == nil {
 			continue
 		}
-		ok, err := r.ensurePublishEntry(ctx, mirror, entry.key, entry.spec, claimName, nodeSelector, affinity)
+		ok, err := r.ensurePublishEntry(ctx, mirror, entry.key, entry.spec, claimName)
 		if err != nil {
 			return false, err
 		}
@@ -427,7 +439,7 @@ func observePublishChildren(ctx context.Context, c client.Client, mirror *mirror
 		if !metav1.IsControlledBy(deployment, mirror) || deployment.Status.AvailableReplicas == 0 {
 			available = false
 		}
-		if deployment.Status.ObservedGeneration != deployment.Generation || deployment.Status.UpdatedReplicas < entry.replicas || deployment.Status.AvailableReplicas < entry.replicas {
+		if deployment.Status.ObservedGeneration != deployment.Generation || deployment.Status.UpdatedReplicas != entry.replicas || deployment.Status.Replicas != entry.replicas || deployment.Status.AvailableReplicas < entry.replicas {
 			converged = false
 		}
 	}
@@ -449,7 +461,7 @@ func deletePublishEntry(ctx context.Context, c client.Client, owner client.Objec
 			return err
 		}
 		if metav1.IsControlledBy(object, owner) {
-			if err := c.Delete(ctx, object); err != nil && !apierrors.IsNotFound(err) {
+			if err := c.Delete(ctx, object, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !apierrors.IsNotFound(err) {
 				return err
 			}
 		}
@@ -474,76 +486,6 @@ func (r *MirrorReconciler) cleanupDisabledPublishChildren(ctx context.Context, m
 	return nil
 }
 
-// publishPlacement derives the node constraint for publish pods from the
-// source PV of the sync PVC (status.workPVC) — the scheduler does not follow
-// the PVC→dataSource→VolumeSnapshot chain, so the snapshot clone's locality
-// is falcon's job. At publish time the sync PVC is necessarily bound (the sync
-// Job already ran on it), and the clone inherits the backend's topology, so
-// the source PV describes where every publish pod must (or need not) run:
-//
-//   - determined=false: the PVC/PV chain is not resolvable (PVC missing or
-//     not bound, PV object missing) — an abnormal timing window; the caller
-//     must not create publish Deployments this reconcile.
-//   - determined=true with nodeSelector: local PV with hostname topology
-//     (nodeAffinity required term `kubernetes.io/hostname In [...]` — the
-//     OpenEBS zfs local PV shape); the hostname becomes a forced pod
-//     nodeSelector entry.
-//   - determined=true with affinity: nodeAffinity in another topology shape;
-//     the required selector terms are copied verbatim into the pod affinity.
-//   - determined=true with neither: the PV carries no nodeAffinity (shared
-//     storage) — free scheduling is CORRECT here, multi-replica publishing on
-//     RWX is a legal extension.
-func (r *MirrorReconciler) publishPlacement(ctx context.Context, mirror *mirrorv1alpha1.Mirror) (nodeSelector map[string]string, affinity *corev1.NodeSelector, determined bool, err error) {
-	if mirror.Status.WorkPVC == "" {
-		return nil, nil, false, nil
-	}
-	claim := &corev1.PersistentVolumeClaim{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Status.WorkPVC}, claim); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil, false, nil
-		}
-		return nil, nil, false, err
-	}
-	if claim.Spec.VolumeName == "" {
-		return nil, nil, false, nil
-	}
-	pv := &corev1.PersistentVolume{}
-	// Cached read: PVs go through the manager informer — the chart's
-	// pv-reader ClusterRole grants cluster-wide get/list/watch.
-	if err := r.Get(ctx, types.NamespacedName{Name: claim.Spec.VolumeName}, pv); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil, false, nil
-		}
-		return nil, nil, false, err
-	}
-	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
-		// Shared storage: no locality constraint to inherit.
-		return nil, nil, true, nil
-	}
-	required := pv.Spec.NodeAffinity.Required
-	if hostname, ok := hostnameFromNodeSelectorTerms(required); ok {
-		return map[string]string{corev1.LabelHostname: hostname}, nil, true, nil
-	}
-	return nil, required.DeepCopy(), true, nil
-}
-
-// hostnameFromNodeSelectorTerms extracts the single `kubernetes.io/hostname`
-// In value from the first term that carries one (the shape local PV
-// provisioners emit). ok=false for any other topology shape.
-func hostnameFromNodeSelectorTerms(required *corev1.NodeSelector) (string, bool) {
-	if required == nil {
-		return "", false
-	}
-	for _, term := range required.NodeSelectorTerms {
-		for _, expr := range term.MatchExpressions {
-			if expr.Key == corev1.LabelHostname && expr.Operator == corev1.NodeSelectorOpIn && len(expr.Values) > 0 {
-				return expr.Values[0], true
-			}
-		}
-	}
-	return "", false
-}
-
 // ensurePublishEntry maintains one enabled publish service of a Mirror: a
 // Deployment and a Service, both named <base>-publish-<key>, with per-service
 // pod labels so each Service selects only its own pods.
@@ -552,10 +494,12 @@ func hostnameFromNodeSelectorTerms(required *corev1.NodeSelector) (string, bool)
 //
 //   - Falcon-managed data-integrity constraints layered on top: the read-only
 //     `mirror-data` publish PVC volume injected into spec.volumes (mounting
-//     it, and where, is the user's own declaration), the PV-derived node
-//     constraint and the pod identity labels;
+//     it, and where, is the user's own declaration) and the pod identity
+//     labels;
 //   - no workload defaults are injected: the PodTemplate is operator-owned.
-func (r *MirrorReconciler) ensurePublishEntry(ctx context.Context, mirror *mirrorv1alpha1.Mirror, serviceKey string, service *mirrorv1alpha1.MirrorServiceSpec, claimName string, nodeSelector map[string]string, affinity *corev1.NodeSelector) (bool, error) {
+//     Placement is not touched either — volume locality is the scheduler's
+//     job (the bound clone PV's nodeAffinity), never Falcon's.
+func (r *MirrorReconciler) ensurePublishEntry(ctx context.Context, mirror *mirrorv1alpha1.Mirror, serviceKey string, service *mirrorv1alpha1.MirrorServiceSpec, claimName string) (bool, error) {
 	base := childBase(mirror.Name)
 	role := publishRole(serviceKey)
 
@@ -567,36 +511,6 @@ func (r *MirrorReconciler) ensurePublishEntry(ctx context.Context, mirror *mirro
 		template.Labels[label] = value
 	}
 	spec := &template.Spec
-
-	// Node constraint derived from the source PV, Falcon-managed (not a default): the
-	// snapshot clone's locality is invisible to the scheduler, falcon must
-	// supply it. The hostname key always wins over the user template; other
-	// user nodeSelector keys merge.
-	if len(nodeSelector) > 0 {
-		if spec.NodeSelector == nil {
-			spec.NodeSelector = map[string]string{}
-		}
-		for key, value := range nodeSelector {
-			if existing, ok := spec.NodeSelector[key]; ok && existing != value && r.Recorder != nil {
-				r.Recorder.Eventf(mirror, corev1.EventTypeWarning, "PublishNodeSelectorOverridden",
-					"podTemplate nodeSelector %s=%q overridden by the PV-derived %q", key, existing, value)
-			}
-			spec.NodeSelector[key] = value
-		}
-	}
-	if affinity != nil {
-		if spec.Affinity == nil {
-			spec.Affinity = &corev1.Affinity{}
-		}
-		if spec.Affinity.NodeAffinity != nil && spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution != nil && r.Recorder != nil {
-			// Known edge: the user's own required node affinity cannot be
-			// merged with falcon's (two Required term sets are ANDed and would
-			// likely never both match) — the PV-derived terms win.
-			r.Recorder.Eventf(mirror, corev1.EventTypeWarning, "PublishNodeAffinityOverridden",
-				"podTemplate nodeAffinity.required overridden by the PV-derived nodeAffinity (volume locality is authoritative)")
-		}
-		spec.Affinity.NodeAffinity = &corev1.NodeAffinity{RequiredDuringSchedulingIgnoredDuringExecution: affinity.DeepCopy()}
-	}
 
 	// The publish data volume is Falcon-managed and always present — as a VOLUME only,
 	// with a read-only volume source: mounting it, and where, is the user's
@@ -664,7 +578,7 @@ func ensurePublishServiceAndDeployment(ctx context.Context, c client.Client, sch
 	if deployment.Generation != deployment.Status.ObservedGeneration {
 		return false, nil
 	}
-	return deployment.Status.AvailableReplicas >= replicas && deployment.Status.UpdatedReplicas >= replicas, nil
+	return deployment.Status.AvailableReplicas >= replicas && deployment.Status.UpdatedReplicas == replicas && deployment.Status.Replicas == replicas, nil
 }
 
 // pruneFailedJobs deletes failed sync Jobs of this Mirror beyond
@@ -695,98 +609,6 @@ func (r *MirrorReconciler) pruneFailedJobs(ctx context.Context, mirror *mirrorv1
 		return failed[i].CreationTimestamp.After(failed[j].CreationTimestamp.Time)
 	})
 	for _, job := range failed[min(keep, len(failed)):] {
-		propagation := metav1.DeletePropagationBackground
-		if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-	return nil
-}
-
-// pruneOldSnapshots retains the newest previousSnapshots+1 publish PVCs
-// (the active one plus the configured number of previous ones) and deletes the
-// rest. Snapshots are identified by the Unix seconds sync-start
-// timestamp in their sync-timestamp label (mirrored in their names), so they
-// are ordered by label, not by numeric snapshot floor.
-//
-// Deletion ordering is preserved: a VolumeSnapshot is only deleted once no
-// publish PVC carrying the same timestamp exists any more, i.e. its clone PVC
-// has fully disappeared.
-func (r *MirrorReconciler) pruneOldSnapshots(ctx context.Context, mirror *mirrorv1alpha1.Mirror) error {
-	base := childBase(mirror.Name)
-	keep := int(mirror.Spec.Storage.Retention.PreviousSnapshots) + 1
-	if keep < 1 {
-		keep = 1
-	}
-	labels := client.MatchingLabels{MirrorLabel: base}
-
-	claims := &corev1.PersistentVolumeClaimList{}
-	if err := r.List(ctx, claims, client.InNamespace(mirror.Namespace), labels); err != nil {
-		return err
-	}
-	var snapshotClaims []*corev1.PersistentVolumeClaim
-	for i := range claims.Items {
-		claim := &claims.Items[i]
-		if _, ok := objectTimestamp(claim.Labels); ok && metav1.IsControlledBy(claim, mirror) {
-			snapshotClaims = append(snapshotClaims, claim)
-		}
-	}
-	// Newest first; ties cannot occur because checkSyncTimestampConflict
-	// fails with errSnapshotTimestampConflict when the timestamp is already
-	// taken.
-	sort.Slice(snapshotClaims, func(i, j int) bool {
-		tsi, _ := objectTimestamp(snapshotClaims[i].Labels)
-		tsj, _ := objectTimestamp(snapshotClaims[j].Labels)
-		return tsi > tsj
-	})
-	// floor is the timestamp of the oldest retained snapshot; child objects
-	// (snapshots, jobs) strictly older than it are pruned.
-	var floor int64
-	if len(snapshotClaims) > keep {
-		floor, _ = objectTimestamp(snapshotClaims[keep-1].Labels)
-	}
-	for _, claim := range snapshotClaims[min(keep, len(snapshotClaims)):] {
-		if err := r.Delete(ctx, claim); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-
-	snapshots := &snapshotv1.VolumeSnapshotList{}
-	if err := r.List(ctx, snapshots, client.InNamespace(mirror.Namespace), labels); err != nil {
-		return err
-	}
-	claimTimestampExists := make(map[int64]bool, len(snapshotClaims))
-	for _, claim := range snapshotClaims {
-		if ts, ok := objectTimestamp(claim.Labels); ok {
-			claimTimestampExists[ts] = true
-		}
-	}
-	for i := range snapshots.Items {
-		snapshot := &snapshots.Items[i]
-		ts, ok := objectTimestamp(snapshot.Labels)
-		if !ok || !metav1.IsControlledBy(snapshot, mirror) {
-			continue
-		}
-		// Only prune snapshots below the retained window whose clone PVC has
-		// fully been deleted (no PVC with the same timestamp remains).
-		if ts >= floor || claimTimestampExists[ts] {
-			continue
-		}
-		if err := r.Delete(ctx, snapshot); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-
-	jobs := &batchv1.JobList{}
-	if err := r.List(ctx, jobs, client.InNamespace(mirror.Namespace), labels); err != nil {
-		return err
-	}
-	for i := range jobs.Items {
-		job := &jobs.Items[i]
-		ts, ok := objectTimestamp(job.Labels)
-		if !ok || ts >= floor || !metav1.IsControlledBy(job, mirror) {
-			continue
-		}
 		propagation := metav1.DeletePropagationBackground
 		if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
 			return err

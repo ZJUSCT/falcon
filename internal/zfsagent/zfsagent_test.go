@@ -23,13 +23,20 @@ func (f *fakeRunner) Run(_ context.Context, bin string, args ...string) ([]byte,
 	return f.respond(command)
 }
 
+// zpoolGetCommand is the exact zpool get invocation Report issues per pool
+// (frozen like the zfs get flags below).
+const zpoolGetPrefix = "zpool get -Hp -o name,property,value size,allocated,free,capacity,fragmentation,health "
+
 func TestCollectorExplicitPools(t *testing.T) {
 	runner := &fakeRunner{respond: func(command string) ([]byte, error) {
-		if strings.HasPrefix(command, "zfs get ") {
+		switch {
+		case strings.HasPrefix(command, "zfs get "):
 			if !strings.HasSuffix(command, " tank") {
 				return nil, fmt.Errorf("unexpected pool in %q", command)
 			}
 			return []byte(cannedZfsGet), nil
+		case strings.HasPrefix(command, zpoolGetPrefix):
+			return []byte(cannedZpoolGet), nil
 		}
 		return nil, fmt.Errorf("unexpected command %q", command)
 	}}
@@ -39,9 +46,11 @@ func TestCollectorExplicitPools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Report: %v", err)
 	}
-	// Explicit pool list: no zpool enumeration.
-	if len(runner.commands) != 1 || !strings.HasPrefix(runner.commands[0], "zfs get ") {
-		t.Errorf("commands = %v, want exactly one zfs get", runner.commands)
+	// Explicit pool list: no zpool enumeration, one zfs get + one zpool get.
+	if len(runner.commands) != 2 ||
+		!strings.HasPrefix(runner.commands[0], "zfs get ") ||
+		runner.commands[1] != zpoolGetPrefix+"tank" {
+		t.Errorf("commands = %v, want one zfs get and one zpool get for tank", runner.commands)
 	}
 	if !strings.Contains(runner.commands[0], "-Hp") ||
 		!strings.Contains(runner.commands[0], "-t filesystem,volume,snapshot") ||
@@ -62,6 +71,8 @@ func TestCollectorEnumeratesPools(t *testing.T) {
 			return []byte("tank/a\tused\t1\n"), nil
 		case strings.HasPrefix(command, "zfs get ") && strings.HasSuffix(command, " zpool2"):
 			return []byte("zpool2/b\tused\t2\n"), nil
+		case strings.HasPrefix(command, zpoolGetPrefix):
+			return []byte(cannedZpoolGet), nil
 		default:
 			return nil, fmt.Errorf("unexpected command %q", command)
 		}
@@ -72,11 +83,60 @@ func TestCollectorEnumeratesPools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Report: %v", err)
 	}
-	if len(runner.commands) != 3 || !strings.HasPrefix(runner.commands[0], "zpool list") {
-		t.Errorf("commands = %v, want zpool list then one zfs get per pool", runner.commands)
+	if len(runner.commands) != 5 || !strings.HasPrefix(runner.commands[0], "zpool list") {
+		t.Errorf("commands = %v, want zpool list then zfs get + zpool get per pool", runner.commands)
 	}
 	if len(report.Pools) != 2 {
 		t.Fatalf("got %d pools, want 2", len(report.Pools))
+	}
+}
+
+// TestCollectorPoolCapacity: the zpool get values land on the pool; a pool
+// whose zpool get fails keeps its datasets with unknown (zero) capacity.
+func TestCollectorPoolCapacity(t *testing.T) {
+	runner := &fakeRunner{respond: func(command string) ([]byte, error) {
+		switch {
+		case strings.HasSuffix(command, " tank"):
+			if strings.HasPrefix(command, "zfs get ") {
+				return []byte("tank/pvc-x\tused\t5\n"), nil
+			}
+			return []byte(cannedZpoolGet), nil
+		case strings.HasSuffix(command, " degraded"):
+			if strings.HasPrefix(command, "zfs get ") {
+				return []byte("degraded/pvc-y\tused\t7\n"), nil
+			}
+			return nil, errors.New("zpool get failed")
+		default:
+			return nil, fmt.Errorf("unexpected command %q", command)
+		}
+	}}
+	c := NewCollector("storage-1", []string{"tank", "degraded"}, runner)
+
+	report, err := c.Report(context.Background())
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if len(report.Pools) != 2 {
+		t.Fatalf("got %d pools, want 2", len(report.Pools))
+	}
+	tank := report.Pools[0]
+	if tank.SizeBytes != 1099511627776 || tank.AllocatedBytes != 137438953472 ||
+		tank.FreeBytes != 962072674304 || tank.CapacityPercent != 12 {
+		t.Errorf("tank capacity = %+v", tank)
+	}
+	// fragmentation "-" counts as unknown; health is passed through.
+	if tank.FragmentationPercent != 0 || tank.Health != "ONLINE" {
+		t.Errorf("tank fragmentation/health = %d/%q, want 0/ONLINE", tank.FragmentationPercent, tank.Health)
+	}
+	if len(tank.Datasets) != 1 {
+		t.Errorf("tank datasets = %+v", tank.Datasets)
+	}
+	degraded := report.Pools[1]
+	if degraded.SizeBytes != 0 || degraded.Health != "" {
+		t.Errorf("failed zpool get must leave capacity unknown, got %+v", degraded)
+	}
+	if len(degraded.Datasets) != 1 || degraded.Datasets[0].Name != "degraded/pvc-y" {
+		t.Errorf("datasets must survive the failed zpool get: %+v", degraded.Datasets)
 	}
 }
 
@@ -89,7 +149,10 @@ func TestCollectorSkipsBrokenPool(t *testing.T) {
 		case strings.HasSuffix(command, " broken"):
 			return nil, errors.New("cannot open 'broken': dataset does not exist")
 		case strings.HasSuffix(command, " healthy"):
-			return []byte("healthy/pvc-x\tused\t5\nhealthy/pvc-x\topenebs.io:pvc-name\tm-sync\nhealthy/pvc-x\topenebs.io:pvc-namespace\tmirror\n"), nil
+			if strings.HasPrefix(command, "zfs get ") {
+				return []byte("healthy/pvc-x\tused\t5\nhealthy/pvc-x\topenebs.io:pvc-name\tm-sync\nhealthy/pvc-x\topenebs.io:pvc-namespace\tmirror\n"), nil
+			}
+			return []byte("healthy\tsize\t100\nhealthy\thealth\tONLINE\n"), nil
 		default:
 			return nil, fmt.Errorf("unexpected command %q", command)
 		}
@@ -104,11 +167,11 @@ func TestCollectorSkipsBrokenPool(t *testing.T) {
 		t.Fatalf("got %d pools, want 2 (broken pool present but empty)", len(report.Pools))
 	}
 	for _, pool := range report.Pools {
-		if pool.Name == "broken" && len(pool.Datasets) != 0 {
-			t.Errorf("broken pool must have no datasets, got %+v", pool.Datasets)
+		if pool.Name == "broken" && (len(pool.Datasets) != 0 || pool.SizeBytes != 0) {
+			t.Errorf("broken pool must have no data, got %+v", pool)
 		}
-		if pool.Name == "healthy" && len(pool.Datasets) != 1 {
-			t.Errorf("healthy pool datasets = %+v", pool.Datasets)
+		if pool.Name == "healthy" && (len(pool.Datasets) != 1 || pool.SizeBytes != 100 || pool.Health != "ONLINE") {
+			t.Errorf("healthy pool = %+v", pool)
 		}
 	}
 }

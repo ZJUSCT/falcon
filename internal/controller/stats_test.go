@@ -243,7 +243,6 @@ func TestPublishActivationRecordsSizeBytes(t *testing.T) {
 		UsageReader: usage,
 	}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
-	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
 
 	reconcile(t, ctx, reconciler, request) // finalizer
 	reconcile(t, ctx, reconciler, request) // startSync
@@ -252,24 +251,28 @@ func TestPublishActivationRecordsSizeBytes(t *testing.T) {
 	job := &batchv1.Job{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncJobName(current)}, job)
 	job.Status.Succeeded = 1
+	job.Status.CompletionTime = timePtr(now)
 	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
 	if err := fakeClient.Status().Update(ctx, job); err != nil {
 		t.Fatalf("mark Job complete: %v", err)
 	}
 	reconcile(t, ctx, reconciler, request) // create snapshot
 	snapshot := &snapshotv1.VolumeSnapshot{}
-	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncSnapshotName(current)}, snapshot)
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: testSnapshotName(current)}, snapshot)
 	ready := true
 	snapshot.Status = &snapshotv1.VolumeSnapshotStatus{ReadyToUse: &ready}
 	if err := fakeClient.Status().Update(ctx, snapshot); err != nil {
 		t.Fatalf("mark snapshot ready: %v", err)
 	}
-	reconcile(t, ctx, reconciler, request) // publish PVC + Deployment
+	reconcile(t, ctx, reconciler, request) // publish PVC clone and workload
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, testSnapshotName(current))
+	reconcile(t, ctx, reconciler, request) // Deployment + Service
 	deployment := &appsv1.Deployment{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
 	deployment.Status.ObservedGeneration = deployment.Generation
 	deployment.Status.AvailableReplicas = 1
 	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.Replicas = 1
 	if err := fakeClient.Status().Update(ctx, deployment); err != nil {
 		t.Fatalf("mark Deployment available: %v", err)
 	}
@@ -279,7 +282,8 @@ func TestPublishActivationRecordsSizeBytes(t *testing.T) {
 		t.Fatalf("create publish pod: %v", err)
 	}
 
-	reconcile(t, ctx, reconciler, request) // activation
+	markRouteAccepted(t, ctx, fakeClient, mirror.Namespace, "smoke-publish")
+	reconcile(t, ctx, reconciler, request) // new generation ready
 	current = getMirror(t, ctx, fakeClient, request.NamespacedName)
 	if current.Status.ActivePVC == "" {
 		t.Fatalf("expected an activated publication, got %#v", current.Status)
@@ -315,7 +319,7 @@ func TestIdlePathBackfillsSizeBytes(t *testing.T) {
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
 		ActiveSnapshot:     "smoke-snap-1756147200",
-		LastSync:           &mirrorv1alpha1.MirrorSyncStatus{JobName: "smoke-sync-1756147200", Phase: mirrorv1alpha1.SyncPhaseSucceeded},
+		LastAttempt:        &mirrorv1alpha1.MirrorSyncStatus{JobName: "smoke-sync-1756147200", Phase: mirrorv1alpha1.SyncPhaseSucceeded},
 	}
 	scheme := testScheme(t)
 	fakeClient := fake.NewClientBuilder().
@@ -334,7 +338,7 @@ func TestIdlePathBackfillsSizeBytes(t *testing.T) {
 		UsageReader: usage,
 	}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
-	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
 
 	reconcile(t, ctx, reconciler, request) // ensure publish workload (not ready yet)
 	deployment := &appsv1.Deployment{}
@@ -342,6 +346,7 @@ func TestIdlePathBackfillsSizeBytes(t *testing.T) {
 	deployment.Status.ObservedGeneration = deployment.Generation
 	deployment.Status.AvailableReplicas = 1
 	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.Replicas = 1
 	if err := fakeClient.Status().Update(ctx, deployment); err != nil {
 		t.Fatalf("mark Deployment available: %v", err)
 	}
@@ -365,5 +370,54 @@ func TestIdlePathBackfillsSizeBytes(t *testing.T) {
 	current = getMirror(t, ctx, fakeClient, request.NamespacedName)
 	if current.Status.SizeBytes != 42 {
 		t.Fatalf("sizeBytes changed on the second idle pass: %d", current.Status.SizeBytes)
+	}
+}
+
+// A missing new measurement must not retain the previous generation's size or
+// prevent the idle reconciler from filling in the new generation later.
+func TestPublicationClearsOldUsageAndBackfillsNewPVC(t *testing.T) {
+	ctx := t.Context()
+	now := time.Unix(1789000000, 0)
+	mirror := testMirror()
+	mirror.Finalizers = []string{MirrorFinalizer}
+	mirror.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: mirror.Generation,
+		WorkPVC:            "smoke-sync", ActivePVC: "smoke-snap-old", ActiveSnapshot: "smoke-snap-old", SizeBytes: 999,
+		Publication: &mirrorv1alpha1.MirrorPublicationStatus{QueuedAt: timePtr(now), JobName: "smoke-sync-new", Phase: "Restoring", Snapshot: "smoke-snap-1789000000"},
+	}
+	newPVC := testSnapshotName(mirror)
+	scheme := testScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).WithObjects(mirror).Build()
+	r := &MirrorReconciler{Client: c, Scheme: scheme, Config: testConfig(), Now: func() time.Time { return now }}
+	ready := true
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Namespace: mirror.Namespace, Name: newPVC}, Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: &ready}}
+	if err := c.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	addBoundPublishPVC(t, ctx, c, mirror, newPVC)
+	if _, err := r.ensurePublish(ctx, mirror, newPVC); err != nil {
+		t.Fatal(err)
+	}
+	markPublishDeploymentAvailable(t, ctx, c, mirror.Namespace)
+	if err := ensurePublishedMirrorRoute(ctx, r, mirror); err != nil {
+		t.Fatal(err)
+	}
+	markRouteAccepted(t, ctx, c, mirror.Namespace, "smoke-publish")
+	if _, err := r.reconcilePublication(ctx, mirror, publicationHealth{}); err != nil {
+		t.Fatal(err)
+	}
+	current := getMirror(t, ctx, c, client.ObjectKeyFromObject(mirror))
+	if current.Status.ActivePVC != newPVC || current.Status.SizeBytes != 0 {
+		t.Fatalf("new generation retained stale usage: %#v", current.Status)
+	}
+	if err := c.Create(ctx, runningPublishPod(current, "http", "storage-node")); err != nil {
+		t.Fatal(err)
+	}
+	r.UsageReader = &stubUsageReader{node: "storage-node", namespace: mirror.Namespace, pvc: newPVC, size: 42}
+	reconcile(t, ctx, r, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mirror)})
+	reconcile(t, ctx, r, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mirror)})
+	current = getMirror(t, ctx, c, client.ObjectKeyFromObject(mirror))
+	if current.Status.SizeBytes != 42 {
+		t.Fatalf("new generation usage was not backfilled: %d", current.Status.SizeBytes)
 	}
 }

@@ -1,17 +1,25 @@
-// Read-only API client for the Kubernetes controller backend.
-//
-// Same-origin by construction: the go-staging gateway (HTTPRoute) sends
-// `Exact /api/jobs` and `PathPrefix /api/repos/` to the controller service,
-// and everything else (`PathPrefix /`) to this static UI. The UI container's
-// nginx therefore serves files only — there is no proxying anywhere, and
-// fetch('/api/...') just works. All old mutation endpoints (queue/worker/
-// action/job management) are gone and are not modeled.
+// Same-origin client for public reads and authenticated mirror controls.
 
-import { Job, UsageResponse } from '@/types';
+import { Job, StorageResponse, UsageResponse } from '@/types';
 
 const API_BASE = '/api';
 
 class ApiClient {
+  async canAdminister(): Promise<boolean> {
+    const response = await fetch("/oauth/session");
+    return response.ok;
+  }
+
+  async mirrorAction(name: string, action: "pause" | "resume" | "sync" | "abort"): Promise<Job> {
+    const response = await fetch(`${API_BASE}/mirrors/${encodeURIComponent(name)}/actions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    if (!response.ok) throw new Error(await errorMessage(response));
+    return response.json();
+  }
+
   private async fetchJson<T>(endpoint: string): Promise<T> {
     const response = await fetch(`${API_BASE}${endpoint}`);
     if (!response.ok) {
@@ -30,6 +38,14 @@ class ApiClient {
   // usage data" and degrade silently (column `—` / card hint).
   async getUsage(): Promise<UsageResponse> {
     return this.fetchJson<UsageResponse>('/usage');
+  }
+
+  // GET /api/storage — per-node ZFS inventory (pools/datasets/snapshots).
+  // Available only when the usage aggregation is enabled; replies 404
+  // otherwise, and callers treat any failure as "no storage data" and
+  // degrade silently (hint card on the Storage page).
+  async getStorage(): Promise<StorageResponse> {
+    return this.fetchJson<StorageResponse>('/storage');
   }
 
   // GET /api/repos/<name> — spec-only view of one Mirror/ProxyMirror.

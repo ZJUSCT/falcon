@@ -102,7 +102,7 @@ func TestMirrorPausedKeepsPublishRoute(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(mirror).
 		Build()
-	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
 	reconciler := &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
 		Now:    func() time.Time { return time.Now().UTC() },
@@ -119,6 +119,35 @@ func TestMirrorPausedKeepsPublishRoute(t *testing.T) {
 	assertPublishRouteShape(t, route, mirror, "/smoke", "smoke-publish-http")
 	deployment := &appsv1.Deployment{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
+	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
+	pausedAt := current.Status.PausedAt.DeepCopy()
+	if pausedAt == nil {
+		t.Fatal("pause observation time must be recorded")
+	}
+	reconciler.Now = func() time.Time { return pausedAt.Add(time.Hour) }
+	reconcile(t, ctx, reconciler, request)
+	current = getMirror(t, ctx, fakeClient, request.NamespacedName)
+	if !current.Status.PausedAt.Equal(pausedAt) {
+		t.Fatal("reconciliation must not refresh pause time")
+	}
+	current.Spec.Sync.Paused = false
+	if err := fakeClient.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, ctx, reconciler, request)
+	current = getMirror(t, ctx, fakeClient, request.NamespacedName)
+	if current.Status.PausedAt != nil {
+		t.Fatal("resuming must clear pause time")
+	}
+	current.Spec.Sync.Paused = true
+	if err := fakeClient.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, ctx, reconciler, request)
+	current = getMirror(t, ctx, fakeClient, request.NamespacedName)
+	if !current.Status.PausedAt.Equal(timePtr(pausedAt.Add(time.Hour))) {
+		t.Fatal("a new pause needs its own timestamp")
+	}
 }
 
 // TestPublishDisabledSkipsRouteGeneration: with empty publish.hostnames no
@@ -141,7 +170,7 @@ func TestPublishDisabledSkipsRouteGeneration(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(mirror).
 		Build()
-	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
 	reconciler := &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
 		Now:    func() time.Time { return time.Now().UTC() },
@@ -180,6 +209,7 @@ func markDeploymentAvailable(t *testing.T, ctx context.Context, c client.Client,
 	deployment.Status.ObservedGeneration = deployment.Generation
 	deployment.Status.AvailableReplicas = replicas
 	deployment.Status.UpdatedReplicas = replicas
+	deployment.Status.Replicas = replicas
 	if err := c.Status().Update(ctx, deployment); err != nil {
 		t.Fatalf("mark Deployment available: %v", err)
 	}
@@ -192,15 +222,14 @@ func TestMaxConcurrentQueuesSyncJob(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
 	mirror.Finalizers = []string{MirrorFinalizer}
-	mirror.Annotations = map[string]string{SyncRequestAnnotation: "run-now"}
+	mirror.Annotations = map[string]string{SyncRequestAnnotation: "true"}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-1756147200",
-		LastSync: &mirrorv1alpha1.MirrorSyncStatus{
+		LastAttempt: &mirrorv1alpha1.MirrorSyncStatus{
 			JobName: "smoke-sync-old", Phase: mirrorv1alpha1.SyncPhaseSucceeded,
 		},
-		LastHandledSyncRequest: "previous",
 	}
 	scheme := testScheme(t)
 	fakeClient := fake.NewClientBuilder().
@@ -208,7 +237,7 @@ func TestMaxConcurrentQueuesSyncJob(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &batchv1.Job{}).
 		WithObjects(mirror).
 		Build()
-	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
 	limiter := NewSyncLimiter(1)
 	limiter.Acquire("other-mirror-sync-job", false) // the whole budget is busy
 	reconciler := &MirrorReconciler{
@@ -220,6 +249,7 @@ func TestMaxConcurrentQueuesSyncJob(t *testing.T) {
 
 	reconcile(t, ctx, reconciler, request) // repair publish workload first
 	markPublishDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace)
+	markRouteAccepted(t, ctx, fakeClient, mirror.Namespace, "smoke-publish")
 	reconcile(t, ctx, reconciler, request) // startSync persists the transaction identity
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
 	if currentSyncJobName(current) == "" {
@@ -230,11 +260,14 @@ func TestMaxConcurrentQueuesSyncJob(t *testing.T) {
 	reconcile(t, ctx, reconciler, request) // cap reached: queued, no Job object
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: jobName}, &batchv1.Job{})
 	current = getMirror(t, ctx, fakeClient, request.NamespacedName)
-	cond := findCondition(current.Status.Conditions, conditionProgressing)
-	if cond == nil || cond.Reason != "SyncQueued" {
+	if current.Status.Sync.Phase != "Pending" || current.Status.Sync.Reason != "SyncQueued" {
 		t.Fatalf("expected SyncQueued condition, got %#v", current.Status.Conditions)
 	}
 
+	if current.Status.CurrentSync.Phase != mirrorv1alpha1.SyncPhasePending || current.Status.CurrentSync.StartedAt != nil {
+		t.Fatalf("queued transaction must not have a Job start: %#v", current.Status.CurrentSync)
+	}
+	queuedAt := current.Status.CurrentSync.QueuedAt.DeepCopy()
 	limiter.Release("other-mirror-sync-job") // a slot frees up
 	reconcile(t, ctx, reconciler, request)   // now the Job is created
 	job := &batchv1.Job{}
@@ -243,9 +276,19 @@ func TestMaxConcurrentQueuesSyncJob(t *testing.T) {
 		t.Fatalf("limiter must hold exactly the new Job's slot, held=%d", limiter.Held())
 	}
 
+	job.Status.StartTime = timePtr(queuedAt.Add(time.Minute))
+	if err := fakeClient.Status().Update(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, ctx, reconciler, request)
+	current = getMirror(t, ctx, fakeClient, request.NamespacedName)
+	if current.Status.CurrentSync.Phase != mirrorv1alpha1.SyncPhaseRunning || !current.Status.CurrentSync.StartedAt.Equal(job.Status.StartTime) || !current.Status.CurrentSync.QueuedAt.Equal(queuedAt) || currentSyncJobName(current) != jobName {
+		t.Fatalf("starting a Job must preserve queue identity: %#v", current.Status.CurrentSync)
+	}
 	// Job succeeds: the slot is released even though publication is still
 	// pending (later reconciles must not re-consume it).
 	job.Status.Succeeded = 1
+	job.Status.CompletionTime = timePtr(queuedAt.Add(2 * time.Minute))
 	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
 	if err := fakeClient.Status().Update(ctx, job); err != nil {
 		t.Fatalf("mark Job complete: %v", err)
@@ -283,7 +326,7 @@ func TestMirrorDataVolumeInjectedVolumeOnly(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(mirror).
 		Build()
-	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
 	reconciler := &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme,
 		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
@@ -324,7 +367,7 @@ func TestMirrorDataVolumeInjectedVolumeOnly(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(bare).
 		Build()
-	addBoundSyncPVC(t, ctx, bareClient, bare, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	addBoundPublishPVC(t, ctx, bareClient, bare, bare.Status.ActivePVC)
 	bareReconciler := &MirrorReconciler{
 		Client: bareClient, Scheme: scheme,
 		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
@@ -373,7 +416,7 @@ func TestServicesRenderPerKey(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(mirror).
 		Build()
-	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
 	reconciler := &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
 		Now:    func() time.Time { return time.Now().UTC() },
@@ -468,7 +511,7 @@ func TestRsyncOnlyMirrorGetsNoRoute(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(mirror).
 		Build()
-	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
 	reconciler := &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
 		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
@@ -506,7 +549,6 @@ func TestAbsentOrDisabledServicesCreateNoWorkload(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}).
 		WithObjects(mirror).
 		Build()
-	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
 	reconciler := &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
 		Now:    func() time.Time { return time.Now().UTC() },
@@ -516,8 +558,8 @@ func TestAbsentOrDisabledServicesCreateNoWorkload(t *testing.T) {
 	reconcile(t, ctx, reconciler, request) // idle path: nothing to publish
 
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if ready := findCondition(current.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionTrue {
-		t.Fatalf("expected sync-only Mirror to be Ready, got %#v", current.Status.Conditions)
+	if ready := findCondition(current.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionFalse {
+		t.Fatalf("sync-only Mirror must not advertise HTTP readiness, got %#v", current.Status.Conditions)
 	}
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &corev1.Service{})
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
@@ -550,7 +592,7 @@ func TestAbsentOrDisabledServicesCreateNoWorkload(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(mirror).
 		Build()
-	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
 	reconciler = &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
 		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
@@ -588,7 +630,7 @@ func TestPublishTemplateIsPreserved(t *testing.T) {
 	mirror.Status = mirrorv1alpha1.MirrorStatus{ObservedGeneration: mirror.Generation, WorkPVC: "smoke-sync", ActivePVC: "smoke-snap-1756147200"}
 	scheme := testScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).WithObjects(mirror).Build()
-	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
 	reconciler := &MirrorReconciler{Client: fakeClient, Scheme: scheme, Config: testConfig(), SyncLimiter: NewSyncLimiter(0)}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
 	reconcile(t, ctx, reconciler, request)
@@ -643,7 +685,7 @@ func TestPublishUserSettingsWin(t *testing.T) {
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(mirror).
 		Build()
-	addBoundSyncPVC(t, ctx, fakeClient, mirror, "", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
 	reconciler := &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme,
 		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
@@ -772,7 +814,7 @@ func publishedMirrorFixture(t *testing.T, name string, aliases ...mirrorv1alpha1
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}, &gatewayv1.HTTPRoute{}).
 		WithObjects(mirror).
 		Build()
-	addBoundSyncPVC(t, ctx, fakeClient, mirror, base+"-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
 	reconciler := &MirrorReconciler{
 		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
 		Now:    func() time.Time { return time.Now().UTC() },
@@ -898,13 +940,13 @@ func TestCurrentSyncObservesActivePublicationWithoutRevertingRollout(t *testing.
 		ObservedGeneration: mirror.Generation,
 		WorkPVC:            "smoke-sync",
 		ActivePVC:          "smoke-snap-old",
-		CurrentSync:        &mirrorv1alpha1.MirrorCurrentSyncStatus{StartedAt: timePtr(time.Unix(1788393600, 0))},
+		CurrentSync:        &mirrorv1alpha1.MirrorCurrentSyncStatus{QueuedAt: timePtr(time.Unix(1788393600, 0))},
 	}
 	scheme := testScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(mirror).Build()
-	addBoundSyncPVC(t, ctx, fakeClient, mirror, "smoke-sync", "s3.mirrors.zjusct.io", hostnameAffinity("s3.mirrors.zjusct.io"))
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
 	reconciler := &MirrorReconciler{Client: fakeClient, Scheme: scheme, Config: testConfig(), SyncLimiter: NewSyncLimiter(0)}
 	if _, err := reconciler.ensurePublish(ctx, mirror, mirror.Status.ActivePVC); err != nil {
 		t.Fatalf("create active publication: %v", err)
@@ -945,6 +987,7 @@ func TestDisabledChildCleanupPrecedesValidationAndPreservesForeignObjects(t *tes
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Spec.Sync.Interval.Duration = 0 // unrelated invalid field
 	mirror.Spec.Publish = mirrorv1alpha1.MirrorServicesSpec{}
+	setCondition(mirror, conditionReady, metav1.ConditionTrue, "Published", "previously serving")
 	owner := *metav1.NewControllerRef(mirror, mirrorv1alpha1.GroupVersion.WithKind("Mirror"))
 	controlled := []client.Object{
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: mirror.Namespace, Name: "smoke-publish-http", OwnerReferences: []metav1.OwnerReference{owner}}},
@@ -964,6 +1007,13 @@ func TestDisabledChildCleanupPrecedesValidationAndPreservesForeignObjects(t *tes
 		assertNotFound(t, ctx, fakeClient, client.ObjectKeyFromObject(object), object.DeepCopyObject().(client.Object))
 	}
 	get(t, ctx, fakeClient, client.ObjectKeyFromObject(foreign), &appsv1.Deployment{})
+	current := getMirror(t, ctx, fakeClient, client.ObjectKeyFromObject(mirror))
+	if ready := findCondition(current.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionFalse || ready.ObservedGeneration != current.Generation {
+		t.Fatal("disabled HTTP retained Ready=True after an unrelated validation error")
+	}
+	if degraded := findCondition(current.Status.Conditions, conditionDegraded); degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason != "InvalidSpec" {
+		t.Fatal("shutdown hid the invalid configuration")
+	}
 }
 
 // TestGatewayRejectionDegradesMirrorWithPassthrough: an Accepted=False
@@ -1027,8 +1077,9 @@ func TestGatewayRejectionDegradesMirrorWithPassthrough(t *testing.T) {
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, &gatewayv1.HTTPRoute{})
 	deployment := &appsv1.Deployment{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
-	if got := deployment.Spec.Template.Spec.NodeSelector[corev1.LabelHostname]; got != "s3.mirrors.zjusct.io" {
-		t.Fatalf("publish workload must be unaffected by the route verdict, got %#v", deployment.Spec.Template.Spec)
+	volume := findVolume(deployment.Spec.Template.Spec.Volumes, PublishDataVolumeName)
+	if volume == nil || volume.PersistentVolumeClaim == nil || volume.PersistentVolumeClaim.ClaimName != mirror.Status.ActivePVC {
+		t.Fatalf("publish workload must be unaffected by the route verdict, got %#v", volume)
 	}
 	waitForEvent(t, recorder, "Warning HTTPRouteRejected "+wantMessage)
 }

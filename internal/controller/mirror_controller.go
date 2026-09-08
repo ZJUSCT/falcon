@@ -30,7 +30,7 @@ import (
 
 const (
 	MirrorFinalizer       = "mirrors.zjusct.io/storage-cleanup"
-	SyncRequestAnnotation = "mirrors.zjusct.io/sync-request"
+	SyncRequestAnnotation = mirrorv1alpha1.SyncRequestAnnotation
 	MirrorLabel           = "mirrors.zjusct.io/mirror"
 	// SyncTimestampLabel carries the Unix seconds timestamp of a sync task
 	// (allocated once when the controller creates the task) on every
@@ -51,9 +51,10 @@ const (
 
 type MirrorReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
-	Now      func() time.Time
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Recorder  record.EventRecorder
+	Now       func() time.Time
 	// Config is the loaded controller configuration (required). The publish
 	// section (config publish.*) gates publish HTTPRoute generation, the sync
 	// section the global concurrency cap.
@@ -84,6 +85,7 @@ type MirrorReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch;update
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;patch;update;delete
+// +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;patch;update;delete
 // +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots,verbs=get;list;watch;create;patch;update;delete
 // +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots/status,verbs=get;update;patch
@@ -97,6 +99,7 @@ type MirrorReconciler struct {
 // +kubebuilder:rbac:groups="",resources=nodes/proxy,verbs=get
 
 func (r *MirrorReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&mirrorv1alpha1.Mirror{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
@@ -132,10 +135,23 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	}()
 
 	// Removing a service is an operational request, not merely a validation
-	// concern. Honour it even when another part of the new spec is invalid so
-	// a broken sync template cannot accidentally keep an endpoint online.
+	// concern. Honour it even when another part of the new spec is invalid or cancellation is
+	// blocked, so neither can accidentally keep an endpoint online.
 	if err := r.cleanupDisabledPublishChildren(ctx, mirror); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	if mirror.Status.RequestCleanup != nil {
+		return r.reconcileRequestCleanup(ctx, mirror)
+	}
+	if handled, err := r.reconcileAbortRequest(ctx, mirror); err != nil || handled {
+		return ctrl.Result{RequeueAfter: time.Second}, err
+	}
+	if changed, err := r.discardSyncRequest(ctx, mirror); err != nil || changed {
+		return ctrl.Result{RequeueAfter: time.Second}, err
+	}
+	if mirror.Status.CurrentSync != nil && mirror.Status.CurrentSync.Phase == mirrorv1alpha1.SyncPhaseCancelling {
+		return r.reconcileCancellation(ctx, mirror, publicationHealth{ready: publishHTTPEnabled(mirror) && r.Config.PublishEnabled() && mirrorWasReady(mirror), reason: "Cancellation", message: "preserving existing publication"})
 	}
 
 	if errs := validateMirror(mirror); len(errs) > 0 {
@@ -143,8 +159,8 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 		logger.Info("Mirror specification is invalid", "errors", message)
 		return r.patchStatus(ctx, mirror, func() {
 			mirror.Status.ObservedGeneration = mirror.Generation
-			setCondition(mirror, conditionReady, conditionStatus(mirrorWasReady(mirror)), "InvalidSpec", message)
-			setCondition(mirror, conditionProgressing, metav1.ConditionFalse, "InvalidSpec", message)
+			setCondition(mirror, conditionReady, conditionStatus(publishHTTPEnabled(mirror) && r.Config.PublishEnabled() && mirrorWasReady(mirror)), "InvalidSpec", message)
+			setCondition(mirror, conditionProgressing, conditionStatus(mirror.Status.Publication != nil), "InvalidSpec", message)
 			setCondition(mirror, conditionDegraded, metav1.ConditionTrue, "InvalidSpec", message)
 		})
 	}
@@ -153,32 +169,77 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	acceptedSpecHash, err := syncSpecHash(mirror)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	// Existing objects can establish their baseline only when the controller
+	// already observed this exact generation. Never acknowledge an unseen spec.
+	if mirror.Status.LastAcceptedSpecHash == "" && mirror.Status.ObservedGeneration == mirror.Generation {
+		if _, err := r.patchStatus(ctx, mirror, func() { mirror.Status.LastAcceptedSpecHash = acceptedSpecHash }); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	if !mirror.Spec.Sync.Paused && mirror.Status.PausedAt != nil {
+		if _, err := r.patchStatus(ctx, mirror, func() { mirror.Status.PausedAt = nil }); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	if mirror.Spec.Sync.Paused && mirror.Status.CurrentSync == nil && mirror.Status.PausedAt == nil {
+		if _, err := r.patchStatus(ctx, mirror, func() { mirror.Status.PausedAt = timePtr(r.now()) }); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	if mirror.Status.Publication != nil {
+		return r.reconcilePublication(ctx, mirror, publication)
+	}
+	// Enabling publication consumes the retained snapshot before admitting any
+	// new synchronization, including while the schedule is paused.
+	if mirror.Status.CurrentSync == nil && publishEnabled(mirror) && mirror.Status.LastSnapshot != nil && mirror.Status.LastSnapshot.Name != mirror.Status.ActiveSnapshot {
+		return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: time.Second}, func() {
+			mirror.Status.Publication = publicationFromSnapshot(mirror.Status.LastSnapshot)
+			publication.progressing = true
+			publication.reason, publication.message = publicationRestoring, "publishing the latest ready snapshot"
+			applyMirrorConditions(mirror, publication, "", "", nil)
+		})
+	}
+	if (publication.progressing || publication.failure != nil) && (mirror.Status.CurrentSync == nil || mirror.Status.CurrentSync.StartedAt == nil) {
+		usage, ok := int64(0), false
+		if mirror.Status.ActivePVC != "" && mirror.Status.SizeBytes == 0 {
+			usage, ok = r.publishPVCUsage(ctx, mirror, mirror.Status.ActivePVC)
+		}
+		return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: 5 * time.Second}, func() {
+			if ok {
+				mirror.Status.SizeBytes = usage
+			}
+			applyMirrorConditions(mirror, publication, "PublicationPending", "waiting for publication and old Pods to finish", nil)
+		})
+	}
 	if mirror.Status.CurrentSync != nil {
-		return r.reconcilePendingSnapshot(ctx, mirror, publication)
+		return r.reconcileSync(ctx, mirror, publication)
 	}
 
-	if mirror.Spec.Sync.Paused {
+	if err := r.pruneOldSnapshots(ctx, mirror); err != nil {
+		return ctrl.Result{}, err
+	}
+	manualDue := mirror.SyncRequested()
+	if mirror.Spec.Sync.Paused && !manualDue {
 		return r.patchStatus(ctx, mirror, func() {
 			mirror.Status.ObservedGeneration = mirror.Generation
-			applyMirrorConditions(mirror, publication, false, "Paused", "new synchronization runs are paused", nil)
+			if mirror.Status.PausedAt == nil {
+				mirror.Status.PausedAt = timePtr(r.now())
+			}
+			applyMirrorConditions(mirror, publication, "Paused", "automatic synchronization is paused", nil)
 		})
 	}
 
 	now := r.now()
-	request := mirror.Annotations[SyncRequestAnnotation]
-	manualDue := request != "" && request != mirror.Status.LastHandledSyncRequest
-	specDue := mirror.Status.ActivePVC != "" && mirror.Status.ObservedGeneration != mirror.Generation
-	bootstrapDue := mirror.Status.ActivePVC == "" && mirror.Status.LastSync == nil
+	specDue := mirror.Status.LastAcceptedSpecHash != "" && mirror.Status.LastAcceptedSpecHash != acceptedSpecHash
+	bootstrapDue := mirror.Status.ActivePVC == "" && mirror.Status.LastAttempt == nil
 	scheduleDue := mirror.Status.NextSyncAt != nil && !mirror.Status.NextSyncAt.After(now)
 
 	if manualDue || specDue || bootstrapDue || scheduleDue {
-		return r.startSync(ctx, mirror, request, publication)
-	}
-
-	if mirror.Status.ActivePVC != "" {
-		if err := r.pruneOldSnapshots(ctx, mirror); err != nil {
-			return ctrl.Result{}, err
-		}
+		return r.startSync(ctx, mirror, manualDue, publication)
 	}
 
 	// Publish PVC content is immutable, so the kubelet-reported usage recorded
@@ -202,20 +263,35 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 		if pvcUsageOK {
 			mirror.Status.SizeBytes = pvcUsage
 		}
-		applyMirrorConditions(mirror, publication, false, "Idle", "no synchronization is running", nil)
+		applyMirrorConditions(mirror, publication, "Idle", "no synchronization is running", nil)
 	})
 }
 
 // startSync begins a new synchronization run. The Unix seconds timestamp is
 // allocated ONCE here, when the controller creates the sync task, and
-// propagates from status.currentSync.startedAt into every derived name: the
+// propagates from status.currentSync.queuedAt into every derived name: the
 // sync Job `<base>-sync-<ts>`, the VolumeSnapshot and the publish PVC (which
 // share the name `<base>-snap-<ts>`). The sync PVC has the fixed name
 // `<base>-sync` (no timestamp) and is reused across runs. Whether the
 // timestamp is free (no existing Job/PVC/VolumeSnapshot carrying it) is
 // checked when the sync Job is created — see lookupOrCreateSyncJob.
-func (r *MirrorReconciler) startSync(ctx context.Context, mirror *mirrorv1alpha1.Mirror, request string, publication publicationHealth) (ctrl.Result, error) {
+func (r *MirrorReconciler) startSync(ctx context.Context, mirror *mirrorv1alpha1.Mirror, manual bool, publication publicationHealth) (ctrl.Result, error) {
+	acceptedSpecHash, err := syncSpecHash(mirror)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	now := r.now()
+	// One accepted generation per Mirror per second. A follow-up after a
+	// completed/cancelled generation waits for the next actual second; never
+	// allocate a future timestamp or reuse the completed generation's objects.
+	if mirror.Status.CurrentSync != nil || mirror.Status.Publication != nil {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	if previous := mirror.Status.LastAcceptedSyncAt; previous != nil && now.Unix() <= previous.Unix() {
+		return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: time.Unix(previous.Unix()+1, 0).Sub(now)}, func() {
+			applyMirrorConditions(mirror, publication, "SyncSecondPending", "waiting for the next generation second", nil)
+		})
+	}
 	timestamp := now.Unix()
 	base := childBase(mirror.Name)
 	syncPVCName := mirror.Status.WorkPVC
@@ -229,21 +305,25 @@ func (r *MirrorReconciler) startSync(ctx context.Context, mirror *mirrorv1alpha1
 	}
 	return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: time.Second}, func() {
 		mirror.Status.ObservedGeneration = mirror.Generation
+		mirror.Status.LastAcceptedSpecHash = acceptedSpecHash
+		mirror.Status.LastAcceptedSyncAt = timePtr(now.Truncate(time.Second))
 		mirror.Status.WorkPVC = syncPVCName
 		mirror.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{
-			StartedAt:   timePtr(now),
-			SyncRequest: request,
+			QueuedAt: timePtr(now.Truncate(time.Second)),
+			Phase:    mirrorv1alpha1.SyncPhasePending,
+			Manual:   manual,
 		}
+		mirror.Status.PausedAt = nil
 		mirror.Status.NextSyncAt = nil
-		applyMirrorConditions(mirror, publication, true, "SynchronizationStarted", "preparing synchronization run", nil)
+		applyMirrorConditions(mirror, publication, "SynchronizationStarted", "preparing synchronization run", nil)
 	})
 }
 
 func currentSyncTimestamp(mirror *mirrorv1alpha1.Mirror) int64 {
-	if mirror.Status.CurrentSync == nil || mirror.Status.CurrentSync.StartedAt == nil {
+	if mirror.Status.CurrentSync == nil || mirror.Status.CurrentSync.QueuedAt == nil {
 		return 0
 	}
-	return mirror.Status.CurrentSync.StartedAt.Unix()
+	return mirror.Status.CurrentSync.QueuedAt.Unix()
 }
 
 func currentSyncJobName(mirror *mirrorv1alpha1.Mirror) string {
@@ -254,17 +334,31 @@ func currentSyncSnapshotName(mirror *mirrorv1alpha1.Mirror) string {
 	return resourceName(childBase(mirror.Name), fmt.Sprintf("snap-%d", currentSyncTimestamp(mirror)))
 }
 
-func (r *MirrorReconciler) reconcilePendingSnapshot(ctx context.Context, mirror *mirrorv1alpha1.Mirror, publication publicationHealth) (ctrl.Result, error) {
+func (r *MirrorReconciler) reconcileSync(ctx context.Context, mirror *mirrorv1alpha1.Mirror, publication publicationHealth) (ctrl.Result, error) {
+	if mirror.Status.CurrentSync.Phase == mirrorv1alpha1.SyncPhaseSnapshotting {
+		return r.reconcileSyncSnapshot(ctx, mirror, publication)
+	}
+	if mirror.Status.CurrentSync.Phase == mirrorv1alpha1.SyncPhaseCancelling {
+		return r.reconcileCancellation(ctx, mirror, publication)
+	}
 	if err := r.ensureSyncPVC(ctx, mirror); err != nil {
 		return ctrl.Result{}, err
 	}
 	job, err := r.lookupOrCreateSyncJob(ctx, mirror)
+	if errors.Is(err, errSyncPaused) {
+		return r.patchStatus(ctx, mirror, func() {
+			if mirror.Status.PausedAt == nil {
+				mirror.Status.PausedAt = timePtr(r.now())
+			}
+			applyMirrorConditions(mirror, publication, "SchedulePaused", "queued automatic synchronization is paused", nil)
+		})
+	}
 	if errors.Is(err, errSyncQueued) {
 		// The global sync concurrency cap (sync.maxConcurrent) is reached:
 		// leave the Job uncreated and retry shortly. The queued sync may
 		// start later than status.nextSyncAt.
 		return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: 5 * time.Second}, func() {
-			applyMirrorConditions(mirror, publication, true, "SyncQueued",
+			applyMirrorConditions(mirror, publication, "SyncQueued",
 				fmt.Sprintf("sync Job %s is queued: global sync concurrency limit (%d) reached", currentSyncJobName(mirror), r.Config.Sync.MaxConcurrent), nil)
 		})
 	}
@@ -280,7 +374,7 @@ func (r *MirrorReconciler) reconcilePendingSnapshot(ctx context.Context, mirror 
 		}
 		return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: time.Minute}, func() {
 			message := err.Error()
-			applyMirrorConditions(mirror, publication, false, "SnapshotTimestampConflict", message,
+			applyMirrorConditions(mirror, publication, "SnapshotTimestampConflict", message,
 				&conditionFailure{reason: "SnapshotTimestampConflict", message: message})
 		})
 	}
@@ -300,207 +394,205 @@ func (r *MirrorReconciler) reconcilePendingSnapshot(ctx context.Context, mirror 
 		r.SyncLimiter.Acquire(job.Name, true)
 	}
 
-	if jobFailed(job) {
-		message := jobFailureMessage(job)
-		return r.failPendingSnapshot(ctx, mirror, publication, "SyncJobFailed", message)
+	if err := r.observeSyncJob(ctx, mirror, job); err != nil {
+		return ctrl.Result{}, err
+	}
+	if terminal {
+		if err := r.pruneFailedJobs(ctx, mirror); err != nil {
+			return ctrl.Result{}, err
+		}
+		if mirror.Status.CurrentSync != nil && mirror.Status.CurrentSync.Phase == mirrorv1alpha1.SyncPhaseSnapshotting {
+			return r.reconcileSyncSnapshot(ctx, mirror, publication)
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	if !jobSucceeded(job) {
 		return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: 5 * time.Second}, func() {
-			applyMirrorConditions(mirror, publication, true, "SyncJobRunning", fmt.Sprintf("Job %s is running", job.Name), nil)
+			reason, message := "SyncJobRunning", fmt.Sprintf("Job %s is running", job.Name)
+			if mirror.Status.CurrentSync.StartedAt == nil {
+				reason, message = "SyncJobPending", fmt.Sprintf("waiting for Job %s to start", job.Name)
+			}
+			applyMirrorConditions(mirror, publication, reason, message, nil)
 		})
 	}
 
-	// The Job succeeded: the timestamp allocated at task creation is simply
-	// reused — the snapshot and publish PVC names are already persisted in
-	// status (they share `<base>-snap-<ts>`), so publication proceeds directly.
-	ready, message, err := r.ensureSnapshot(ctx, mirror)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if message != "" {
-		return r.failPendingSnapshot(ctx, mirror, publication, "SnapshotFailed", message)
-	}
-	if !ready {
-		return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: 5 * time.Second}, func() {
-			applyMirrorConditions(mirror, publication, true, "Snapshotting", fmt.Sprintf("snapshotting completed sync PVC %s", mirror.Status.WorkPVC), nil)
-		})
-	}
-
-	if err := r.ensurePublishPVC(ctx, mirror); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	if publishEnabled(mirror) {
-		ready, err := r.ensurePublish(ctx, mirror, currentSyncSnapshotName(mirror))
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if !ready {
-			return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: 5 * time.Second}, func() {
-				applyMirrorConditions(mirror, publication, true, "PublishRollout", fmt.Sprintf("publishing PVC %s", currentSyncSnapshotName(mirror)), nil)
-			})
-		}
-	}
-
-	return r.publishPendingSnapshot(ctx, mirror, publication)
+	return ctrl.Result{}, nil
 }
 
-func (r *MirrorReconciler) publishPendingSnapshot(ctx context.Context, mirror *mirrorv1alpha1.Mirror, publication publicationHealth) (ctrl.Result, error) {
-	now := r.now()
-	interval := mirror.Spec.Sync.Interval.Duration
-	hadActivePublication := mirror.Status.ActivePVC != ""
-	result := ctrl.Result{RequeueAfter: interval}
-	if publishHTTPEnabled(mirror) && !publication.ready {
-		result.RequeueAfter = 5 * time.Second
+// observeSyncJob persists a successful Job's completion before any snapshot or
+// publication work. A terminal success without completionTime is inconsistent;
+// it must never erase history or progress to publication.
+func (r *MirrorReconciler) observeSyncJob(ctx context.Context, mirror *mirrorv1alpha1.Mirror, job *batchv1.Job) error {
+	phase := mirrorv1alpha1.SyncPhasePending
+	if job.Status.StartTime != nil {
+		phase = mirrorv1alpha1.SyncPhaseRunning
 	}
-	// A successful publication ends the failure streak: fast retries (if any
-	// were queued) restart from zero. Failed Jobs are also pruned down to
-	// spec.sync.keepFailedJobs — every terminal state is a pruning point.
-	if err := r.pruneFailedJobs(ctx, mirror); err != nil {
-		return ctrl.Result{}, err
-	}
-	if r.Recorder != nil {
-		r.Recorder.Eventf(mirror, corev1.EventTypeNormal, "SnapshotPublished", "Published PVC %s", currentSyncSnapshotName(mirror))
-	}
-	// Best-effort usage accounting of the freshly published PVC, folded into
-	// the activation patch. It must never disturb publication: a miss (the
-	// rollout not having mounted the new PVC yet) just leaves sizeBytes empty
-	// for the idle path to backfill.
-	pvc := currentSyncSnapshotName(mirror)
-	jobName := currentSyncJobName(mirror)
-	startedAt := mirror.Status.CurrentSync.StartedAt.DeepCopy()
-	syncRequest := mirror.Status.CurrentSync.SyncRequest
-	pvcUsage, pvcUsageOK := r.publishPVCUsage(ctx, mirror, pvc)
-	return r.patchStatusWithResult(ctx, mirror, result, func() {
-		mirror.Status.ActivePVC = pvc
-		mirror.Status.ActiveSnapshot = pvc
-		mirror.Status.CurrentSync = nil
-		mirror.Status.LastHandledSyncRequest = syncRequest
-		mirror.Status.LastPublishedAt = timePtr(now)
-		mirror.Status.NextSyncAt = timePtr(now.Add(interval))
-		mirror.Status.ConsecutiveFailures = 0
-		if pvcUsageOK {
-			mirror.Status.SizeBytes = pvcUsage
-		}
-		mirror.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{
-			JobName:    jobName,
-			Phase:      mirrorv1alpha1.SyncPhaseSucceeded,
-			StartedAt:  startedAt,
-			FinishedAt: timePtr(now),
-			Message:    fmt.Sprintf("published PVC %s", pvc),
-		}
-		if publishHTTPEnabled(mirror) && !publication.ready {
-			reason := publication.reason
-			message := publication.message
-			if !hadActivePublication || reason == "Pending" {
-				reason = "HTTPRoutePending"
-				message = "waiting for HTTPRoute Accepted=True and ResolvedRefs=True"
+	var finished *metav1.Time
+	message := ""
+	switch {
+	case jobFailed(job):
+		phase = mirrorv1alpha1.SyncPhaseFailed
+		message = jobFailureMessage(job)
+		for _, condition := range job.Status.Conditions {
+			if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue && !condition.LastTransitionTime.IsZero() {
+				finished = condition.LastTransitionTime.DeepCopy()
+				break
 			}
-			setCondition(mirror, conditionReady, metav1.ConditionFalse, reason, message)
-			setCondition(mirror, conditionProgressing, conditionStatus(publication.progressing || publication.failure == nil), reason, message)
-			if publication.failure != nil {
-				setCondition(mirror, conditionDegraded, metav1.ConditionTrue, publication.failure.reason, publication.failure.message)
-			} else {
-				setCondition(mirror, conditionDegraded, metav1.ConditionFalse, "AsExpected", "")
+		}
+	case jobSucceeded(job):
+		phase = mirrorv1alpha1.SyncPhaseSucceeded
+		finished = job.Status.CompletionTime.DeepCopy()
+		if finished == nil || finished.Unix() <= 0 {
+			err := fmt.Errorf("sync Job %s/%s is successful but status.completionTime is missing or invalid", job.Namespace, job.Name)
+			if r.Recorder != nil {
+				r.Recorder.Event(mirror, corev1.EventTypeWarning, "SyncJobStatusInvalid", err.Error())
 			}
-		} else {
-			setCondition(mirror, conditionReady, metav1.ConditionTrue, "Published", fmt.Sprintf("PVC %s is published", pvc))
-			setCondition(mirror, conditionProgressing, metav1.ConditionFalse, "Published", "synchronization and publication completed")
-			setCondition(mirror, conditionDegraded, metav1.ConditionFalse, "AsExpected", "")
+			if _, patchErr := r.patchStatus(ctx, mirror, func() {
+				setCondition(mirror, conditionDegraded, metav1.ConditionTrue, "SyncJobStatusInvalid", err.Error())
+			}); patchErr != nil {
+				return patchErr
+			}
+			return err
 		}
-	})
-}
-
-// failPendingSnapshot records a failed synchronization run and queues the
-// next attempt: while status.consecutiveFailures is below
-// spec.sync.failureRetryLimit the retry is queued after spec.sync.retryInterval
-// (fast retries); afterwards the next attempt waits for the regular
-// spec.sync.interval and the counter stops incrementing.
-func (r *MirrorReconciler) failPendingSnapshot(ctx context.Context, mirror *mirrorv1alpha1.Mirror, publication publicationHealth, reason, message string) (ctrl.Result, error) {
-	now := r.now()
-	interval := mirror.Spec.Sync.Interval.Duration
-	retryInterval := mirror.Spec.Sync.RetryInterval.Duration
-	if retryInterval <= 0 {
-		// Defensive default mirroring the CRD default (15m): a zero or
-		// negative retryInterval must not collapse the schedule onto "now".
-		retryInterval = interval
 	}
-	limit := mirror.Spec.Sync.FailureRetryLimit
-	failures := mirror.Status.ConsecutiveFailures
-	var nextAttempt time.Time
-	if failures < limit {
-		failures++
-		nextAttempt = now.Add(retryInterval)
-	} else {
-		nextAttempt = now.Add(interval)
-	}
-	// Every terminal state is a failed-Job pruning point.
-	if err := r.pruneFailedJobs(ctx, mirror); err != nil {
-		return ctrl.Result{}, err
-	}
-	if r.Recorder != nil {
-		r.Recorder.Eventf(mirror, corev1.EventTypeWarning, reason, "Synchronization run failed: %s", message)
-	}
-	jobName := currentSyncJobName(mirror)
-	startedAt := mirror.Status.CurrentSync.StartedAt.DeepCopy()
-	syncRequest := mirror.Status.CurrentSync.SyncRequest
-	progressingMessage := fmt.Sprintf("%s; %d consecutive failure(s); retry queued for %s", message, failures, nextAttempt.Format(time.RFC3339))
-	if failures >= limit {
-		progressingMessage = fmt.Sprintf("%s; retry limit %d reached after %d consecutive failure(s); next attempt scheduled for %s", message, limit, failures, nextAttempt.Format(time.RFC3339))
-	}
-	return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: nextAttempt.Sub(now)}, func() {
-		mirror.Status.CurrentSync = nil
-		mirror.Status.LastHandledSyncRequest = syncRequest
-		mirror.Status.ConsecutiveFailures = failures
-		mirror.Status.NextSyncAt = timePtr(nextAttempt)
+	_, err := r.patchStatus(ctx, mirror, func() {
+		current := mirror.Status.CurrentSync
+		current.StartedAt = job.Status.StartTime.DeepCopy()
+		current.Phase = phase
+		if phase != mirrorv1alpha1.SyncPhaseSucceeded && phase != mirrorv1alpha1.SyncPhaseFailed {
+			return
+		}
+		now := r.now()
 		mirror.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{
-			JobName:    jobName,
-			Phase:      mirrorv1alpha1.SyncPhaseFailed,
-			StartedAt:  startedAt,
-			FinishedAt: timePtr(now),
-			Message:    message,
+			JobName: job.Name, Phase: phase, StartedAt: current.StartedAt.DeepCopy(), FinishedAt: finished.DeepCopy(), Message: message,
 		}
-		applyMirrorConditions(mirror, publication, false, reason, progressingMessage,
-			&conditionFailure{reason: reason, message: message})
+		if phase == mirrorv1alpha1.SyncPhaseFailed {
+			mirror.Status.LastAttempt = mirror.Status.LastSync.DeepCopy()
+			mirror.Status.LastAttempt.StartedAt = current.QueuedAt.DeepCopy()
+		}
+		mirror.Status.NextSyncAt = timePtr(now.Add(mirror.Spec.Sync.Interval.Duration))
+		mirror.Status.Sync.Phase = mirrorv1alpha1.SyncStateWaiting
+		if phase == mirrorv1alpha1.SyncPhaseSucceeded {
+			mirror.Status.LastSuccessfulSyncAt = finished.DeepCopy()
+			mirror.Status.ConsecutiveFailures = 0
+			current.Phase = mirrorv1alpha1.SyncPhaseSnapshotting
+		} else if mirror.Status.ConsecutiveFailures < mirror.Spec.Sync.FailureRetryLimit {
+			mirror.Status.ConsecutiveFailures++
+			mirror.Status.NextSyncAt = timePtr(now.Add(mirror.Spec.Sync.RetryInterval.Duration))
+			mirror.Status.Sync.Phase = mirrorv1alpha1.SyncStateRetrying
+		}
+		if phase == mirrorv1alpha1.SyncPhaseFailed {
+			queueRequestCleanup(mirror, current.Manual, false)
+			mirror.Status.CurrentSync = nil
+		}
+		if mirror.Spec.Sync.Paused {
+			mirror.Status.PausedAt = timePtr(now)
+		}
+		applyMirrorConditions(mirror, publicationHealth{ready: mirrorWasReady(mirror), reason: "SynchronizationCompleted", message: "synchronization Job completed"}, "SynchronizationCompleted", message, nil)
 	})
+	if err == nil && mirror.Status.RequestCleanup != nil {
+		_, err = r.reconcileRequestCleanup(ctx, mirror)
+	}
+	return err
 }
 
+// reconcileDelete drains a deleting Mirror in three strictly ordered phases
+// before the finalizer is removed:
+//
+//  1. Workloads: the sync Jobs (mounting the sync PVC) and the publish
+//     Deployments (mounting the snapshot-clone PVCs). Owner-reference GC
+//     would remove them anyway, but only after the CR itself is gone — and
+//     the CR cannot go while this finalizer blocks it. Deleting them here
+//     first breaks the cycle that otherwise deadlocks deletion: the PVCs
+//     cannot disappear while pvc-protection holds them for mounted pods, and
+//     the pods live as long as their Job/Deployment does.
+//  2. PVCs: the sync claim and the publish clones.
+//  3. VolumeSnapshots — last, so every publish clone (a ZFS clone depends on
+//     its origin snapshot) is gone before the snapshot it was cloned from.
+//
+// Each phase deletes its objects and requeues until a pass finds the list
+// empty; only then does the next phase start. Workload deletion explicitly
+// uses foreground propagation so Kubernetes drains dependent Pods instead of
+// orphaning them and leaving PVC protection blocked indefinitely.
 func (r *MirrorReconciler) reconcileDelete(ctx context.Context, mirror *mirrorv1alpha1.Mirror) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(mirror, MirrorFinalizer) {
 		return ctrl.Result{}, nil
 	}
 
-	base := childBase(mirror.Name)
-
-	claims := &corev1.PersistentVolumeClaimList{}
-	if err := r.List(ctx, claims, client.InNamespace(mirror.Namespace), client.MatchingLabels{MirrorLabel: base}); err != nil {
+	// Phase 1: workloads. Both kinds go in the same pass, and the phase
+	// requeues while either list still returns objects.
+	remaining, err := r.deleteOwnedChildren(ctx, mirror,
+		&batchv1.JobList{}, &appsv1.DeploymentList{})
+	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if len(claims.Items) > 0 {
-		for i := range claims.Items {
-			if err := r.Delete(ctx, &claims.Items[i]); err != nil && !apierrors.IsNotFound(err) {
-				return ctrl.Result{}, err
-			}
-		}
+	if remaining {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	snapshots := &snapshotv1.VolumeSnapshotList{}
-	if err := r.List(ctx, snapshots, client.InNamespace(mirror.Namespace), client.MatchingLabels{MirrorLabel: base}); err != nil {
+	// Phase 2: PVCs — the sync claim and the publish clones, the latter
+	// before the snapshots they were cloned from.
+	remaining, err = r.deleteOwnedChildren(ctx, mirror, &corev1.PersistentVolumeClaimList{})
+	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if len(snapshots.Items) > 0 {
-		for i := range snapshots.Items {
-			if err := r.Delete(ctx, &snapshots.Items[i]); err != nil && !apierrors.IsNotFound(err) {
-				return ctrl.Result{}, err
-			}
-		}
+	if remaining {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
+	// Phase 3: VolumeSnapshots.
+	remaining, err = r.deleteOwnedChildren(ctx, mirror, &snapshotv1.VolumeSnapshotList{})
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if remaining {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
 	before := mirror.DeepCopy()
 	controllerutil.RemoveFinalizer(mirror, MirrorFinalizer)
 	return ctrl.Result{}, r.Patch(ctx, mirror, client.MergeFrom(before))
+}
+
+// deleteOwnedChildren uses labels to locate candidates, then verifies ownership.
+// Only this Mirror's children keep a deletion phase pending. UID preconditions
+// prevent deletion of a replacement object created after the list was observed.
+func (r *MirrorReconciler) deleteOwnedChildren(ctx context.Context, mirror *mirrorv1alpha1.Mirror, lists ...client.ObjectList) (bool, error) {
+	remaining := false
+	for _, list := range lists {
+		if err := r.List(ctx, list, client.InNamespace(mirror.Namespace), client.MatchingLabels{MirrorLabel: childBase(mirror.Name)}); err != nil {
+			return remaining, err
+		}
+		items, err := meta.ExtractList(list)
+		if err != nil {
+			return remaining, err
+		}
+		for _, item := range items {
+			object, ok := item.(client.Object)
+			if !ok {
+				return remaining, fmt.Errorf("list item of %T is not a client.Object", item)
+			}
+			if !metav1.IsControlledBy(object, mirror) {
+				continue
+			}
+			remaining = true
+			if !object.GetDeletionTimestamp().IsZero() {
+				continue
+			}
+			uid := object.GetUID()
+			deleteOptions := []client.DeleteOption{&client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}}
+			switch object.(type) {
+			case *batchv1.Job, *appsv1.Deployment:
+				// Never rely on API defaults: Job deletion may default to
+				// orphan propagation, leaving mounted Pods behind permanently.
+				deleteOptions = append(deleteOptions, client.PropagationPolicy(metav1.DeletePropagationForeground))
+			}
+			if err := r.Delete(ctx, object, deleteOptions...); err != nil && !apierrors.IsNotFound(err) {
+				return remaining, err
+			}
+		}
+	}
+	return remaining, nil
 }
 
 func (r *MirrorReconciler) patchStatus(ctx context.Context, mirror *mirrorv1alpha1.Mirror, mutate func()) (ctrl.Result, error) {
@@ -510,7 +602,8 @@ func (r *MirrorReconciler) patchStatus(ctx context.Context, mirror *mirrorv1alph
 func (r *MirrorReconciler) patchStatusWithResult(ctx context.Context, mirror *mirrorv1alpha1.Mirror, result ctrl.Result, mutate func()) (ctrl.Result, error) {
 	before := mirror.DeepCopy()
 	mutate()
-	if err := r.Status().Patch(ctx, mirror, client.MergeFrom(before)); err != nil {
+	r.updateSyncPhase(mirror)
+	if err := r.Status().Patch(ctx, mirror, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, err
 	}
 	return result, nil
@@ -572,20 +665,24 @@ type publicationHealth struct {
 }
 
 // reconcileActivePublication reconciles an idle active generation, but only
-// observes it while CurrentSync is non-nil. Re-applying ActivePVC during a
+// observes it while synchronization or a pending publication owns the next generation. Re-applying ActivePVC during a
 // pending publication would otherwise revert the Deployment away from the new
 // PVC on every reconcile. Availability is intentionally weaker than rollout
 // convergence: maxUnavailable=0 keeps an old pod serving while the new pod is
 // coming up.
 func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirror *mirrorv1alpha1.Mirror) (publicationHealth, error) {
-	if mirror.Status.ActivePVC == "" {
-		return publicationHealth{reason: "Pending", message: "waiting for the initial synchronization"}, nil
-	}
 	if !publishEnabled(mirror) {
-		return publicationHealth{ready: true, reason: "Published", message: fmt.Sprintf("PVC %s is active", mirror.Status.ActivePVC)}, nil
+		drained, err := publishPodsDrained(ctx, r.Client, mirror)
+		return publicationHealth{progressing: !drained, reason: "HTTPDisabled", message: "no HTTP endpoint is configured; waiting for any removed workloads to drain"}, err
 	}
 
-	if mirror.Status.CurrentSync == nil {
+	if mirror.Status.ActivePVC == "" && mirror.Status.Publication == nil {
+		return publicationHealth{reason: "Pending", message: "waiting for a ready snapshot to publish"}, nil
+	}
+	// Re-apply the active publication while no newer synchronization
+	// transaction or publication is pending; the candidate would be undone by
+	// re-asserting ActivePVC here.
+	if mirror.Status.CurrentSync == nil && mirror.Status.Publication == nil {
 		if _, err := r.ensurePublish(ctx, mirror, mirror.Status.ActivePVC); err != nil {
 			return publicationHealth{}, err
 		}
@@ -595,7 +692,25 @@ func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirro
 	if err != nil {
 		return publicationHealth{}, err
 	}
+	drained, err := publishPodsDrained(ctx, r.Client, mirror)
+	if err != nil {
+		return publicationHealth{}, err
+	}
+	converged = converged && drained
+	if publishHTTPEnabled(mirror) {
+		httpOnly := mirror.DeepCopy()
+		httpOnly.Spec.Publish.Rsync = nil
+		available, _, err = observePublishChildren(ctx, r.Client, httpOnly)
+		if err != nil {
+			return publicationHealth{}, err
+		}
+	}
+	failure, err := publishDeploymentFailure(ctx, r.Client, mirror, mirrorPublishProtocols(mirror)...)
+	if err != nil {
+		return publicationHealth{}, err
+	}
 	health := publicationHealth{
+		failure:     failure,
 		ready:       available,
 		progressing: !converged,
 		reason:      "Published",
@@ -610,11 +725,14 @@ func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirro
 	}
 
 	if !publishHTTPEnabled(mirror) {
+		health.ready = false
+		health.reason = "HTTPDisabled"
+		health.message = "no HTTP endpoint is configured"
 		return health, nil
 	}
 	if !r.Config.PublishEnabled() {
 		health.ready = false
-		health.progressing = false
+		health.progressing = true
 		health.reason = "HTTPRouteDisabled"
 		health.message = "HTTP publishing is requested but route generation is disabled"
 		health.failure = &conditionFailure{reason: health.reason, message: health.message}
@@ -630,7 +748,7 @@ func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirro
 	switch routeState {
 	case publishRouteRejected:
 		health.ready = false
-		health.progressing = false
+		health.progressing = true
 		health.reason = "HTTPRouteRejected"
 		health.message = routeMessage
 		health.failure = &conditionFailure{reason: health.reason, message: routeMessage}
@@ -650,15 +768,18 @@ func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirro
 // Mirror. Publication health, current synchronization activity and the last
 // completed synchronization are orthogonal facts, so Ready and Degraded may
 // both legitimately be true.
-func applyMirrorConditions(mirror *mirrorv1alpha1.Mirror, publication publicationHealth, syncProgressing bool, progressReason, progressMessage string, currentFailure *conditionFailure) {
+func applyMirrorConditions(mirror *mirrorv1alpha1.Mirror, publication publicationHealth, progressReason, progressMessage string, currentFailure *conditionFailure) {
+	if publication.reason == "" {
+		publication.reason = "PublicationObserved"
+	}
 	setCondition(mirror, conditionReady, conditionStatus(publication.ready), publication.reason, publication.message)
-	switch {
-	case syncProgressing:
-		setCondition(mirror, conditionProgressing, metav1.ConditionTrue, progressReason, progressMessage)
-	case publication.progressing:
+	if progressReason != "" {
+		mirror.Status.Sync.Reason, mirror.Status.Sync.Message = progressReason, progressMessage
+	}
+	if mirror.Status.Publication != nil || publication.progressing {
 		setCondition(mirror, conditionProgressing, metav1.ConditionTrue, publication.reason, publication.message)
-	default:
-		setCondition(mirror, conditionProgressing, metav1.ConditionFalse, progressReason, progressMessage)
+	} else {
+		setCondition(mirror, conditionProgressing, metav1.ConditionFalse, "Idle", "no publication is in progress")
 	}
 
 	failure := currentFailure
@@ -713,8 +834,15 @@ func validateMirror(mirror *mirrorv1alpha1.Mirror) field.ErrorList {
 	if mirror.Spec.Storage.SyncStorageClassName == "" {
 		errs = append(errs, field.Required(path.Child("storage", "syncStorageClassName"), "must not be empty"))
 	}
-	if mirror.Spec.Storage.PVCSpec.StorageClassName != nil || mirror.Spec.Storage.PVCSpec.DataSource != nil || mirror.Spec.Storage.PVCSpec.DataSourceRef != nil || mirror.Spec.Storage.PVCSpec.VolumeName != "" || mirror.Spec.Storage.PVCSpec.Selector != nil {
-		errs = append(errs, field.Invalid(storagePath, mirror.Spec.Storage.PVCSpec, "storageClassName, dataSource, dataSourceRef, volumeName, and selector are Falcon-managed or unsupported in pvcTemplate"))
+	if mirror.Spec.Storage.PublishStorageClassName == "" {
+		errs = append(errs, field.Required(path.Child("storage", "publishStorageClassName"), "must not be empty"))
+	}
+	// volumeName is deliberately absent from the rejection list: it is the
+	// one PVC field allowed to differ between the sync and publish claims —
+	// the sync claim may pre-bind an existing PV with it (cross-instance
+	// migration), while newDataClaim strips it for the publish clones.
+	if mirror.Spec.Storage.PVCSpec.StorageClassName != nil || mirror.Spec.Storage.PVCSpec.DataSource != nil || mirror.Spec.Storage.PVCSpec.DataSourceRef != nil || mirror.Spec.Storage.PVCSpec.Selector != nil {
+		errs = append(errs, field.Invalid(storagePath, mirror.Spec.Storage.PVCSpec, "storageClassName, dataSource, dataSourceRef, and selector are Falcon-managed or unsupported in pvcTemplate"))
 	}
 	if mirror.Spec.Storage.VolumeSnapshotClassName == "" {
 		errs = append(errs, field.Required(path.Child("storage", "volumeSnapshotClassName"), "is required for atomic publication"))
@@ -738,10 +866,12 @@ func validateMirror(mirror *mirrorv1alpha1.Mirror) field.ErrorList {
 	if services.HTTP != nil {
 		errs = append(errs, validateHTTPAliases(services.HTTP, mirror.Name, servicesPath.Child("http", "aliases"))...)
 	}
-	// There is no placement validation: node locality is K8s-native on the
-	// sync side (WFFC + bound-PV nodeAffinity) and PV-derived on the publish
-	// side (publishPlacement). Multi-replica publishing on shared (RWX)
-	// storage is a legal extension — no nodeName requirement exists any more.
+	// There is no placement validation: node locality is K8s-native on both
+	// sides (the bound PV's nodeAffinity, enforced by the scheduler). The
+	// choice of the publish StorageClass (Falcon recommends an
+	// Immediate-binding one, see the field's documentation) is entirely the
+	// operator's. Multi-replica publishing on shared (RWX) storage is a legal
+	// extension.
 	return errs
 }
 
@@ -842,7 +972,7 @@ func jobSucceeded(job *batchv1.Job) bool {
 			return true
 		}
 	}
-	return job.Status.Succeeded > 0
+	return false
 }
 
 func jobFailed(job *batchv1.Job) bool {

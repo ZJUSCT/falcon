@@ -46,6 +46,18 @@ spec:
           args:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          env:
+            # The node name from the downward API: $HOSTNAME inside a pod is
+            # the POD name, which would leak into /v1/zfs and the OTel node
+            # label (churning the latter on every rollout).
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            {{- with .Values.zfsAgent.otelEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
           # The listen port is part of the aggregation contract (the
           # controller's webapi and this chart hardcode 9474) — not a value.
           ports:

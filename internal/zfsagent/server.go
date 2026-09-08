@@ -10,11 +10,12 @@ import (
 //   - GET /v1/zfs   the node's ZFS usage report
 //   - GET /healthz  liveness/readiness probe (always 200 "ok")
 //
-// Error handling mirrors internal/webapi: JSON bodies {"error": ...} with
-// two-space indent, non-GET requests answered 405 with Allow: GET before any
-// routing, unknown paths 404.
+// The report is served from the Refresher's cache: requests never trigger a
+// collection sweep (see Refresher). Error handling mirrors internal/webapi:
+// JSON bodies {"error": ...} with two-space indent, non-GET requests answered
+// 405 with Allow: GET before any routing, unknown paths 404.
 type Server struct {
-	Collector *Collector
+	Refresher *Refresher
 }
 
 // Handler builds the http.Handler.
@@ -37,9 +38,11 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
-func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
-	report, err := s.Collector.Report(r.Context())
+func (s *Server) handleReport(w http.ResponseWriter, _ *http.Request) {
+	report, err := s.Refresher.Snapshot()
 	if err != nil {
+		// Collection has never succeeded (agent still on its first sweep, or
+		// the toolchain is broken): there is nothing to serve.
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

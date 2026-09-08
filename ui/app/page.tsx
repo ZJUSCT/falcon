@@ -8,6 +8,7 @@ import { Sidebar, PageId } from '@/components/sidebar';
 import { OverviewView } from '@/components/overview-view';
 import { MirrorsView } from '@/components/mirrors-view';
 import { MirrorDetail } from '@/components/mirror-detail';
+import { StorageView } from '@/components/storage-view';
 
 type RouteType =
   | PageId
@@ -25,7 +26,7 @@ export default function Dashboard() {
       const id = hash.substring(8);
       if (id) return { type: 'mirror-detail', mirrorId: decodeURIComponent(id) };
     }
-    const pages: PageId[] = ['overview', 'mirrors'];
+    const pages: PageId[] = ['overview', 'mirrors', 'storage'];
     return pages.includes(hash as PageId) ? (hash as PageId) : 'overview';
   };
 
@@ -69,6 +70,8 @@ export default function Dashboard() {
         return <OverviewView onNavigateToJob={(id) => navigate({ type: 'mirror-detail', mirrorId: id })} />;
       case 'mirrors':
         return <MirrorsView onMirrorClick={(id) => navigate({ type: 'mirror-detail', mirrorId: id })} />;
+      case 'storage':
+        return <StorageView />;
       default:
         return <OverviewView onNavigateToJob={(id) => navigate({ type: 'mirror-detail', mirrorId: id })} />;
     }

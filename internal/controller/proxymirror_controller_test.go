@@ -34,22 +34,18 @@ func testProxyMirror() *mirrorv1alpha1.ProxyMirror {
 		},
 		Spec: mirrorv1alpha1.ProxyMirrorSpec{
 			Info: mirrorv1alpha1.ProxyMirrorInfo{
-				Name:        mirrorv1alpha1.LocalizedString{"en": "PyPI Proxy"},
-				Description: mirrorv1alpha1.LocalizedString{"en": "Caching proxy in front of PyPI"},
+				Description: "Caching proxy in front of PyPI",
 				Upstream:    "https://pypi.org/simple/",
 			},
-			Proxy: mirrorv1alpha1.ProxyMirrorProxySpec{
-				Cache: mirrorv1alpha1.ProxyMirrorCacheSpec{
-					Enabled: ptr.To(true),
-					PVCSpec: corev1.PersistentVolumeClaimSpec{
-						StorageClassName: ptr.To("delete-class"),
-						AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("100Gi")}},
-					},
+			Cache: &mirrorv1alpha1.ProxyMirrorCacheSpec{
+				PVCSpec: corev1.PersistentVolumeClaimSpec{
+					StorageClassName: ptr.To("delete-class"),
+					AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("100Gi")}},
 				},
 			},
 			Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{
-				HTTP: &mirrorv1alpha1.ProxyMirrorServiceSpec{
+				HTTP: &mirrorv1alpha1.ProxyMirrorServiceSpec{MirrorServiceSpec: mirrorv1alpha1.MirrorServiceSpec{
 					PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
 							Name:  "proxy",
@@ -57,7 +53,7 @@ func testProxyMirror() *mirrorv1alpha1.ProxyMirror {
 							Ports: []corev1.ContainerPort{{Name: "web", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
 						}},
 					}},
-				},
+				}},
 			},
 		},
 	}
@@ -159,8 +155,25 @@ func TestProxyMirrorHappyPathPublishesAndProvisionsCache(t *testing.T) {
 	}
 
 	deployment.Status.ObservedGeneration = deployment.Generation
+	deployment.Status.Conditions = []appsv1.DeploymentCondition{{
+		Type: appsv1.DeploymentReplicaFailure, Status: corev1.ConditionTrue,
+		Reason: "FailedCreate", Message: "exceeded quota",
+	}}
+	if err := fakeClient.Status().Update(ctx, deployment); err != nil {
+		t.Fatal(err)
+	}
+	reconcileProxy(t, ctx, reconciler, request)
+	failed := getProxyMirror(t, ctx, fakeClient, request.NamespacedName)
+	degraded := findCondition(failed.Status.Conditions, conditionDegraded)
+	if degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason != "PublishDeploymentFailed" || !strings.Contains(degraded.Message, "exceeded quota") {
+		t.Fatalf("proxy lost Deployment failure: %#v", degraded)
+	}
+	get(t, ctx, fakeClient, client.ObjectKeyFromObject(deployment), deployment)
+	deployment.Status.Conditions = nil
+	deployment.Status.ObservedGeneration = deployment.Generation
 	deployment.Status.AvailableReplicas = 1
 	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.Replicas = 1
 	if err := fakeClient.Status().Update(ctx, deployment); err != nil {
 		t.Fatalf("mark Deployment available: %v", err)
 	}
@@ -171,6 +184,10 @@ func TestProxyMirrorHappyPathPublishesAndProvisionsCache(t *testing.T) {
 	if condReady := findCondition(current.Status.Conditions, conditionReady); condReady == nil || condReady.Status != metav1.ConditionTrue {
 		t.Fatalf("expected Ready=True, got %#v", current.Status.Conditions)
 	}
+	degraded = findCondition(current.Status.Conditions, conditionDegraded)
+	if degraded == nil || degraded.Status != metav1.ConditionFalse {
+		t.Fatalf("proxy retained a recovered failure: %#v", degraded)
+	}
 	// A Ready proxy is published: its publish HTTPRoute must exist.
 	route := &gatewayv1.HTTPRoute{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-publish"}, route)
@@ -180,7 +197,7 @@ func TestProxyMirrorHappyPathPublishesAndProvisionsCache(t *testing.T) {
 func TestProxyMirrorInvalidCacheSpecIsDegraded(t *testing.T) {
 	ctx := context.Background()
 	proxy := testProxyMirror()
-	proxy.Spec.Proxy.Cache.PVCSpec.AccessModes = nil
+	proxy.Spec.Cache.PVCSpec.AccessModes = nil
 	scheme := testProxyScheme(t)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -241,7 +258,7 @@ func TestProxyMirrorDisabledHTTPDeploysNothing(t *testing.T) {
 			if ready := findCondition(current.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionFalse {
 				t.Fatalf("disabled HTTP must report Ready=False, got %#v", current.Status.Conditions)
 			}
-			assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-cache"}, &corev1.PersistentVolumeClaim{})
+			get(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-cache"}, &corev1.PersistentVolumeClaim{})
 		})
 	}
 }

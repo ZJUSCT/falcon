@@ -2,16 +2,22 @@
 // DaemonSet pod per storage node, executes the host's zfs/zpool binaries
 // (chrooted into the /host hostPath mount), and answers:
 //
-//   - GET /v1/zfs   the node's ZFS dataset/snapshot usage report
+//   - GET /v1/zfs   the node's ZFS dataset/snapshot usage report (served from
+//     a background-refreshed cache; see internal/zfsagent/refresher.go)
 //   - GET /healthz  liveness/readiness probe
 //
 // It never talks to the Kubernetes API; the controller's webapi discovers the
 // agents through the headless Service and aggregates their reports (see
 // internal/webapi/usage.go). The listen port (9474) is part of that contract
 // and therefore not configurable.
+//
+// When OTEL_EXPORTER_OTLP_ENDPOINT is set (chart value zfsAgent.otelEndpoint),
+// the agent additionally collects ZFS performance counters every 15s and
+// pushes them as OTLP metrics to that endpoint.
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -36,21 +42,27 @@ func main() {
 	flag.StringVar(&bind, "bind", defaultBind, "Listen address for the HTTP endpoints.")
 	flag.StringVar(&zfsBin, "zfs-bin", "", fmt.Sprintf("Path to the zfs binary (%s). Its directory also provides zpool.", strings.Join(zfsagent.DefaultZfsBinCandidates, ", ")))
 	flag.StringVar(&pools, "pools", "", "Comma-separated ZFS pools to report (default: all pools, via zpool list).")
-	flag.StringVar(&nodeName, "node-name", "", "Node name reported in /v1/zfs (default: $HOSTNAME).")
+	flag.StringVar(&nodeName, "node-name", "", "Node name reported in /v1/zfs (default: $NODE_NAME, then $HOSTNAME).")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	slog.SetDefault(logger)
 
 	if nodeName == "" {
-		nodeName = os.Getenv("HOSTNAME")
+		// The chart injects the Kubernetes node name via the downward API;
+		// $HOSTNAME in a pod is the pod name, the last resort before the
+		// container's hostname.
+		nodeName = os.Getenv("NODE_NAME")
 		if nodeName == "" {
-			name, err := os.Hostname()
-			if err != nil {
-				logger.Error("cannot determine node name", "error", err.Error())
-				os.Exit(1)
+			nodeName = os.Getenv("HOSTNAME")
+			if nodeName == "" {
+				name, err := os.Hostname()
+				if err != nil {
+					logger.Error("cannot determine node name", "error", err.Error())
+					os.Exit(1)
+				}
+				nodeName = name
 			}
-			nodeName = name
 		}
 	}
 
@@ -77,9 +89,30 @@ func main() {
 	collector := zfsagent.NewCollector(nodeName, poolList, zfsagent.NewHostRunner(root, candidates))
 	collector.Log = logger
 
+	// The push pipeline is built before any goroutine starts, so a
+	// construction failure can simply exit. The exporter reads the standard
+	// OTEL_EXPORTER_OTLP_* environment variables.
+	var pusher *zfsagent.OTLPPusher
+	if endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); endpoint != "" {
+		var err error
+		if pusher, err = zfsagent.NewOTLPPusher(context.Background(), nodeName, logger); err != nil {
+			logger.Error("cannot create OTLP pusher", "endpoint", endpoint, "error", err.Error())
+			os.Exit(1)
+		}
+		logger.Info("OTLP metric push enabled", "endpoint", endpoint, "interval", zfsagent.PushInterval.String())
+	}
+
+	// Reports are served from the refresher's cache; until the first sweep
+	// completes (it starts immediately), /v1/zfs answers 500 briefly.
+	refresher := zfsagent.NewRefresher(collector)
+	go refresher.Run(context.Background())
+	if pusher != nil {
+		go pushPerfLoop(collector, refresher, pusher)
+	}
+
 	server := &http.Server{
 		Addr:              bind,
-		Handler:           (&zfsagent.Server{Collector: collector}).Handler(),
+		Handler:           (&zfsagent.Server{Refresher: refresher}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	logger.Info("starting zfs-agent",
@@ -92,6 +125,45 @@ func main() {
 		logger.Error("zfs-agent exited", "error", err.Error())
 		os.Exit(1)
 	}
+}
+
+// pushPerfLoop collects one PerfSample per push interval and hands it to the
+// pusher, with the dataset→PVC index rebuilt from the latest cached report
+// (small: one entry per dataset). The first collection runs immediately so
+// metrics exist from startup rather than after one interval. Push/export
+// failures are logged by the OTLP error handler and never stop the loop.
+func pushPerfLoop(collector *zfsagent.Collector, refresher *zfsagent.Refresher, pusher *zfsagent.OTLPPusher) {
+	collect := func() {
+		index := pvcIndex(refresher)
+		pusher.Push(collector.CollectPerf(context.Background()), func(_, dataset string) string {
+			return index[dataset]
+		})
+	}
+	collect()
+	ticker := time.NewTicker(zfsagent.PushInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		collect()
+	}
+}
+
+// pvcIndex maps dataset names to "namespace/name" PVC references from the
+// latest report (nil when no report exists yet — lookups then return "").
+// Dataset names are pool-qualified, so no pool key is needed.
+func pvcIndex(refresher *zfsagent.Refresher) map[string]string {
+	report, err := refresher.Snapshot()
+	if err != nil {
+		return nil
+	}
+	index := make(map[string]string, 16)
+	for _, pool := range report.Pools {
+		for _, ds := range pool.Datasets {
+			if ds.PVC != nil {
+				index[ds.Name] = ds.PVC.Namespace + "/" + ds.PVC.Name
+			}
+		}
+	}
+	return index
 }
 
 func poolsOrAll(pools string) string {

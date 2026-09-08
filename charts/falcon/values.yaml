@@ -122,6 +122,7 @@ zfsAgent:
     digest: ""         # optional; takes precedence over tag
     pullPolicy: IfNotPresent
   extraArgs: []        # agent flags, e.g. --pools=tank, --zfs-bin=...
+  otelEndpoint: ""     # OTLP HTTP endpoint of the central collector (e.g. http://aggregator-collector.monitoring.svc:4318); empty disables metric push
   nodeSelector: {}     # must match the zfs-localpv nodes (pools are read locally)
   tolerations: []
   resources:

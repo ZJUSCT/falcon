@@ -5,12 +5,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"time"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"go.uber.org/zap/zapcore"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -120,11 +122,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Read-only mirrorz + legacy-compatible API listener (GET only, no auth:
-	// everything it serves is public or spec-only data).
+	// Public catalog reads and authenticated administrator operations.
 	if cfg.API.WebapiBindAddress != "0" {
 		apiServer := &webapi.Server{
-			Client:           mgr.GetClient(),
+			Client:    mgr.GetClient(),
+			Writer:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+			Namespace: podNamespace,
+			LogStream: func(ctx context.Context, namespace, pod string, options *corev1.PodLogOptions) (io.ReadCloser, error) {
+				return clientset.CoreV1().Pods(namespace).GetLogs(pod, options).Stream(ctx)
+			},
 			Site:             webapi.SiteConfig{URL: cfg.Site.URL, Abbr: cfg.Site.Abbr, Name: cfg.Site.Name, Logo: cfg.Site.Logo, LogoDarkmode: cfg.Site.LogoDarkmode, Homepage: cfg.Site.Homepage, Issue: cfg.Site.Issue, Request: cfg.Site.Request, Email: cfg.Site.Email, Group: cfg.Site.Group, Disk: cfg.Site.Disk, Note: cfg.Site.Note, Big: cfg.Site.Big, Disable: cfg.Site.Disable},
 			PublishHostnames: cfg.Publish.Hostnames,
 			CatalogEnabled:   cfg.Catalog.Enabled,

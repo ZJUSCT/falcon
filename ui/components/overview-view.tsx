@@ -172,8 +172,10 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     const twelveHoursLater = new Date(now.getTime() + 12 * 60 * 60 * 1000);
 
     jobs.forEach(job => {
-      // Next attempt (skip for running jobs; only show events near now)
-      if (!isZeroTime(job.next_attempt_at) && job.status !== 'Running') {
+      if (job.kind !== 'Mirror') return;
+      const syncActive = job.sync_phase === 'Syncing' || job.sync_phase === 'Cancelling';
+      // Scheduled attempts only run when the schedule is enabled and no sync is active.
+      if (!isZeroTime(job.next_attempt_at) && !syncActive && !job.paused) {
         const nextAttempt = new Date(job.next_attempt_at);
         // Only show upcoming attempts within the ±12-hour activity window.
         if (nextAttempt >= twelveHoursAgo && nextAttempt <= twelveHoursLater) {
@@ -181,7 +183,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
             time: nextAttempt,
             type: 'nextAttempt',
             jobId: job.id,
-            jobStatus: job.status
+            jobStatus: job.sync_phase ?? 'Waiting'
           });
         }
       }
@@ -194,7 +196,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
             time: lastSuccess,
             type: 'lastSuccess',
             jobId: job.id,
-            jobStatus: job.status
+            jobStatus: job.sync_phase ?? 'Waiting'
           });
         }
       }
@@ -207,19 +209,19 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
             time: lastFailure,
             type: 'lastFailure',
             jobId: job.id,
-            jobStatus: job.status
+            jobStatus: job.sync_phase ?? 'Waiting'
           });
         }
       }
 
       // Last attempt (only for running jobs - show all running regardless of time)
-      if (!isZeroTime(job.last_attempt_at) && job.status === 'Running') {
+      if (!isZeroTime(job.last_attempt_at) && syncActive) {
         const lastAttempt = new Date(job.last_attempt_at);
         events.push({
           time: lastAttempt,
           type: 'lastAttempt',
           jobId: job.id,
-          jobStatus: job.status
+          jobStatus: job.sync_phase ?? 'Waiting'
         });
       }
     });
@@ -415,12 +417,11 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     return positions;
   }, [timeEvents, clockDims.eventRadius]);
 
-  // Derived stats (workers/queue/actions are gone — the controller has no
-  // such concepts anymore; counts come straight from the job list).
+  // Sync activity and schedule controls are independent of publication conditions.
   const totalJobs = jobs.length;
-  const runningJobs = jobs.filter(j => j.status === 'Running').length;
-  const waitingJobs = jobs.filter(j => j.status === 'Waiting').length;
-  const pausedJobs = jobs.filter(j => j.status === 'Paused').length;
+  const runningJobs = jobs.filter(j => j.sync_phase === 'Syncing' || j.sync_phase === 'Cancelling').length;
+  const waitingJobs = jobs.filter(j => j.sync_phase === 'Waiting').length;
+  const pausedJobs = jobs.filter(j => j.kind === 'Mirror' && j.paused).length;
   const failedJobs = jobs.filter(j => j.last_action_status === 'Failed').length;
 
   if (loading) {
@@ -471,9 +472,9 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
           <span className="text-xs text-muted-foreground">Total mirrors: <span className="font-semibold tabular-nums text-foreground">{totalJobs}</span></span>
           <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground">
             <span className="uppercase tracking-wide text-[10px]">Status:</span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500 inline-block" /> Running <span className="font-semibold tabular-nums text-foreground">{runningJobs}</span></span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500 inline-block" /> Active syncs <span className="font-semibold tabular-nums text-foreground">{runningJobs}</span></span>
             <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-yellow-500 inline-block" /> Waiting <span className="font-semibold tabular-nums text-foreground">{waitingJobs}</span></span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-500 inline-block" /> Paused <span className="font-semibold tabular-nums text-foreground">{pausedJobs}</span></span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-500 inline-block" /> Manual mode <span className="font-semibold tabular-nums text-foreground">{pausedJobs}</span></span>
             <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500 inline-block" /> Last Sync Failed <span className="font-semibold tabular-nums text-foreground">{failedJobs}</span></span>
           </div>
         </div>

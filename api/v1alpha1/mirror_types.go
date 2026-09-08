@@ -17,21 +17,40 @@ const (
 	PhasePaused       = "Paused"
 	PhaseDegraded     = "Degraded"
 
-	SyncPhaseSucceeded = "Succeeded"
-	SyncPhaseFailed    = "Failed"
-)
+	SyncStateWaiting      = "Waiting"
+	SyncStatePending      = SyncPhasePending
+	SyncStateSyncing      = "Syncing"
+	SyncStateSnapshotting = SyncPhaseSnapshotting
+	SyncStateRetrying     = "Retrying"
+	SyncStateCancelling   = SyncPhaseCancelling
 
-// +kubebuilder:validation:MinProperties=1
-type LocalizedString map[string]string
+	SyncRequestAnnotation    = "mirrors.zjusct.io/sync-request"
+	AbortRequestAnnotation   = "mirrors.zjusct.io/abort-request"
+	RequestCleanupAnnotation = "mirrors.zjusct.io/request-cleanup"
+	SyncPhaseCancelling      = "Cancelling"
+	SyncPhaseCancelled       = "Cancelled"
+	SyncPhasePending         = "Pending"
+	SyncPhaseRunning         = "Running"
+	SyncPhaseSnapshotting    = "Snapshotting"
+	SyncPhaseSucceeded       = "Succeeded"
+	SyncPhaseFailed          = "Failed"
+)
 
 // MirrorInfo carries the public catalog metadata of a mirror. There is no URL
 // field on purpose: the public path is always the CR name (publish route
 // PathPrefix /<name>, mirrorz entry url <host>/<name>), so same-name CRs can
 // never collide and no per-CR URL bookkeeping is needed.
 type MirrorInfo struct {
-	Name        LocalizedString `json:"name"`
-	Description LocalizedString `json:"description"`
-	Upstream    string          `json:"upstream"`
+	// CName is the MirrorZ catalog grouping name, e.g. AOSP. It is not
+	// constrained to DNS names; upstream cname.json normalizes known aliases.
+	// It defaults to the CR name and does not change the HTTP path.
+	// +kubebuilder:validation:MinLength=1
+	// +optional
+	CName string `json:"cname,omitempty"`
+	// Description is plain text for MirrorZ desc; no localization is performed.
+	// +optional
+	Description string `json:"description,omitempty"`
+	Upstream    string `json:"upstream"`
 }
 
 // MirrorSyncSpec describes one synchronization run. The Job-level knobs
@@ -42,7 +61,7 @@ type MirrorInfo struct {
 // natively (WaitForFirstConsumer decides the volume's node on first supply;
 // the bound PV's nodeAffinity pins every later sync pod) — see docs/spec/k8s.md.
 type MirrorSyncSpec struct {
-	// Paused prevents the controller from starting new synchronization runs.
+	// Paused disables automatic synchronization; explicit requests still run.
 	// Published content and its serving workloads remain available.
 	Paused   bool            `json:"paused,omitempty"`
 	Interval metav1.Duration `json:"interval"`
@@ -83,32 +102,47 @@ type MirrorSyncSpec struct {
 	PodTemplate corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
-type MirrorRetentionSpec struct {
-	// +kubebuilder:default=1
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=10
-	PreviousSnapshots int32 `json:"previousSnapshots,omitempty"`
-}
-
 type MirrorStorageSpec struct {
 	// PVCSpec contains common Kubernetes PVC properties for the sync and
-	// publish claims. StorageClassName is managed by the explicit fields below.
+	// publish claims. storageClassName is managed by the explicit fields
+	// below; dataSource, dataSourceRef, and selector are rejected.
+	// volumeName is honored by the SYNC claim only: it pre-binds the stable
+	// sync PVC to an existing PersistentVolume, e.g. when migrating a mirror
+	// across Falcon instances (delete the old Mirror, let its sync PV be
+	// retained, clear the PV's claimRef, then pre-bind the new instance's
+	// sync PVC here). The publish claims are snapshot clones provisioned
+	// through their dataSource and never carry volumeName: a preset
+	// volumeName keeps the clone Pending forever (the PV controller only
+	// dynamically provisions a claim whose volumeName is empty).
 	PVCSpec corev1.PersistentVolumeClaimSpec `json:"pvcTemplate"`
 	// SyncStorageClassName provisions the stable writable synchronization PVC.
 	SyncStorageClassName string `json:"syncStorageClassName"`
 	// PublishStorageClassName provisions disposable snapshot-derived
-	// publish PVCs. It must provision from the same storage backend and
-	// topology as SyncStorageClassName (under local-PV semantics: the same node),
-	// otherwise the VolumeSnapshot `dataSource` clone cannot be provisioned.
-	// It normally uses reclaimPolicy: Delete so snapshot pruning reclaims the
-	// underlying backend volumes. When omitted, SyncStorageClassName is used.
-	PublishStorageClassName string `json:"publishStorageClassName,omitempty"`
+	// publish PVCs. Required: the publish PVC (a snapshot clone) explicitly
+	// uses this StorageClass, an operational choice that is never inherited
+	// from SyncStorageClassName. An Immediate-binding class is recommended:
+	// under WaitForFirstConsumer the scheduler cannot see the snapshot
+	// clone's locality while placing the publish pod (Kubernetes <= 1.36),
+	// so the pod may be scheduled to a node where the clone cannot be
+	// provisioned — see the "存储的局部性" (storage locality) section of the
+	// documentation. It must provision from the same storage backend and
+	// topology as SyncStorageClassName (under local-PV semantics: the same
+	// node), otherwise the VolumeSnapshot `dataSource` clone cannot be
+	// provisioned, and it normally uses reclaimPolicy: Delete so snapshot
+	// pruning reclaims the underlying backend volumes.
+	// +kubebuilder:validation:MinLength=1
+	PublishStorageClassName string `json:"publishStorageClassName"`
 	// VolumeSnapshotClassName snapshots the sync PVC after every successful
 	// sync; it must be served by the same storage backend as the
 	// StorageClasses above. Required: atomic publication depends on it.
 	// +kubebuilder:validation:MinLength=1
-	VolumeSnapshotClassName string              `json:"volumeSnapshotClassName"`
-	Retention               MirrorRetentionSpec `json:"retention,omitempty"`
+	VolumeSnapshotClassName string `json:"volumeSnapshotClassName"`
+	// Retention counts historical ready snapshots in addition to the latest one,
+	// including sync-only generations. Live publication inputs are protected.
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10
+	Retention int32 `json:"retention,omitempty"`
 }
 
 // MirrorServiceSpec is one publish service of a Mirror, addressed by a fixed
@@ -131,9 +165,10 @@ type MirrorServiceSpec struct {
 	// probe, volume, affinity and so on. Falcon manages the
 	// data-integrity constraints (the read-only `mirror-data` publish PVC
 	// volume in spec.volumes — mounting it, and where, is the user's own
-	// declaration —, pod labels/annotations, placement, naming/selector
-	// identity). No workload fields are defaulted or rewritten; the operator
-	// owns security context, probes, ports, filesystem, and sidecars.
+	// declaration —, pod labels/annotations, naming/selector identity). No
+	// workload fields are defaulted or rewritten; the operator owns security
+	// context, probes, ports, filesystem, sidecars, and placement (volume
+	// locality is the scheduler's job — the bound PV's nodeAffinity).
 	// +optional
 	PodTemplate corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
@@ -194,54 +229,111 @@ type MirrorSpec struct {
 	// Publish declares how the active snapshot clone is published, through
 	// the fixed keys "http" and "rsync" (see MirrorServicesSpec). With every
 	// key absent (including an entirely absent services object) the mirror
-	// is sync-only: the sync/snapshot pipeline still runs and the publish PVC
-	// is still produced, but no publish Deployment/Service/HTTPRoute is
-	// created.
+	// is sync-only: synchronization produces a ready snapshot, without a clone
+	// PVC or publish Deployment/Service/HTTPRoute.
 	// +optional
 	Publish MirrorServicesSpec `json:"publish,omitempty"`
 }
 
+// MirrorSyncStatus records a completed sync Job, independently of publication.
 type MirrorSyncStatus struct {
 	JobName string `json:"jobName"`
-	// +kubebuilder:validation:Enum=Succeeded;Failed
+	// +kubebuilder:validation:Enum=Succeeded;Failed;Cancelled
 	Phase      string       `json:"phase"`
 	StartedAt  *metav1.Time `json:"startedAt,omitempty"`
 	FinishedAt *metav1.Time `json:"finishedAt,omitempty"`
 	Message    string       `json:"message,omitempty"`
 }
 
-// MirrorCurrentSyncStatus is the durable identity of the synchronization
-// transaction currently in progress. Every child name is derived from the
-// Unix seconds of StartedAt, so persisting each deterministic name separately
-// would duplicate the same fact.
+// MirrorCurrentSyncStatus identifies the accepted transaction. Child names use
+// QueuedAt, which stays fixed while the transaction waits for a concurrency slot.
+// Phase includes snapshot preparation after the Job; Job timestamps live in LastSync.
 type MirrorCurrentSyncStatus struct {
-	StartedAt   *metav1.Time `json:"startedAt"`
-	SyncRequest string       `json:"syncRequest,omitempty"`
+	QueuedAt  *metav1.Time `json:"queuedAt"`
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+	// +kubebuilder:validation:Enum=Pending;Running;Snapshotting;Cancelling
+	Phase  string `json:"phase"`
+	Manual bool   `json:"manual,omitempty"`
+}
+
+// MirrorSyncState describes scheduling/execution independently of publication.
+type MirrorSyncState struct {
+	// +kubebuilder:validation:Enum=Waiting;Pending;Syncing;Snapshotting;Retrying;Cancelling
+	Phase   string `json:"phase"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+// MirrorSnapshotStatus records the latest ready output of synchronization,
+// including when publication is disabled. It can be published without a new Job.
+type MirrorSnapshotStatus struct {
+	Name     string       `json:"name"`
+	QueuedAt *metav1.Time `json:"queuedAt"`
+	JobName  string       `json:"jobName"`
+}
+
+// MirrorPublicationStatus consumes a ready snapshot delivered by synchronization.
+// Ready resources are recorded incrementally; ActivePVC/ActiveSnapshot continue
+// to identify the last successfully served generation until the new one is ready.
+type MirrorPublicationStatus struct {
+	QueuedAt *metav1.Time `json:"queuedAt"`
+	JobName  string       `json:"jobName"`
+	// +kubebuilder:validation:Enum=Restoring;RollingOut;Draining
+	Phase    string `json:"phase"`
+	Snapshot string `json:"snapshot"`
+	PVC      string `json:"pvc,omitempty"`
+}
+
+// MirrorRequestCleanup is a durable receipt awaiting annotation cleanup.
+// The metadata acknowledgement prevents a restart from removing a newer request.
+type MirrorRequestCleanup struct {
+	Token string `json:"token"`
+	Sync  bool   `json:"sync,omitempty"`
+	Abort bool   `json:"abort,omitempty"`
 }
 
 type MirrorStatus struct {
-	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
-	WorkPVC            string `json:"workPVC,omitempty"`
+	RequestCleanup *MirrorRequestCleanup `json:"requestCleanup,omitempty"`
+	// LastAcceptedSyncAt reserves a generation second even if its queued run is cancelled.
+	LastAcceptedSyncAt *metav1.Time             `json:"lastAcceptedSyncAt,omitempty"`
+	LastSnapshot       *MirrorSnapshotStatus    `json:"lastSnapshot,omitempty"`
+	Sync               MirrorSyncState          `json:"sync,omitempty"`
+	Publication        *MirrorPublicationStatus `json:"publication,omitempty"`
+	ObservedGeneration int64                    `json:"observedGeneration,omitempty"`
+	// LastAcceptedSpecHash identifies spec.sync accepted for the last
+	// synchronization, excluding paused.
+	LastAcceptedSpecHash string `json:"lastAcceptedSpecHash,omitempty"`
+	WorkPVC              string `json:"workPVC,omitempty"`
 	// ActivePVC is the name of the publish PVC currently published. Names
-	// embed the sync task's start time as a Unix seconds timestamp, e.g.
+	// embed the transaction's queue entry time as a Unix seconds timestamp, e.g.
 	// `<mirror>-snap-1756158000`; the timestamp is allocated once when the
-	// controller creates the sync task and is shared by the sync Job, the
+	// controller accepts the sync task and is shared by the sync Job, the
 	// VolumeSnapshot and the publish PVC.
 	ActivePVC string `json:"activePVC,omitempty"`
 	// ActiveSnapshot is the VolumeSnapshot the ActivePVC was cloned from.
 	ActiveSnapshot string                   `json:"activeSnapshot,omitempty"`
 	CurrentSync    *MirrorCurrentSyncStatus `json:"currentSync,omitempty"`
 	NextSyncAt     *metav1.Time             `json:"nextSyncAt,omitempty"`
-	// ConsecutiveFailures counts failed synchronization runs since the last
-	// successful publication. It drives the failure retry cadence (retryInterval
+	// ConsecutiveFailures counts failed synchronization Jobs since the last
+	// successful Job. It drives the failure retry cadence (retryInterval
 	// below failureRetryLimit, interval afterwards) and resets to zero on
 	// every success.
-	ConsecutiveFailures    int32              `json:"consecutiveFailures,omitempty"`
-	LastPublishedAt        *metav1.Time       `json:"lastPublishedAt,omitempty"`
-	LastHandledSyncRequest string             `json:"lastHandledSyncRequest,omitempty"`
-	SizeBytes              int64              `json:"sizeBytes,omitempty"`
-	LastSync               *MirrorSyncStatus  `json:"lastSync,omitempty"`
-	Conditions             []metav1.Condition `json:"conditions,omitempty"`
+	ConsecutiveFailures int32 `json:"consecutiveFailures,omitempty"`
+	// LastSuccessfulSyncAt retains the latest successful Job completion for
+	// MirrorZ's O token when a later Job is running or has failed.
+	// Required before publication; only absent before the first successful Job.
+	LastSuccessfulSyncAt *metav1.Time `json:"lastSuccessfulSyncAt,omitempty"`
+	// PausedAt is when the controller observed syncing stop under paused=true.
+	// Running Jobs drain first; publication proceeds independently.
+	PausedAt *metav1.Time `json:"pausedAt,omitempty"`
+	// LastAttempt records the last accepted synchronization request outcome,
+	// including cancellation before a Job starts. Success means a ready snapshot
+	// was delivered; LastSync separately records the Job result.
+	LastAttempt     *MirrorSyncStatus  `json:"lastAttempt,omitempty"`
+	LastPublishedAt *metav1.Time       `json:"lastPublishedAt,omitempty"`
+	SizeBytes       int64              `json:"sizeBytes,omitempty"`
+	LastSync        *MirrorSyncStatus  `json:"lastSync,omitempty"`
+	Conditions      []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -263,4 +355,14 @@ type MirrorList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Mirror `json:"items"`
+}
+
+// SyncRequested reports one outstanding manual request. Repeated true writes coalesce.
+func (m *Mirror) SyncRequested() bool {
+	return m.Annotations[SyncRequestAnnotation] == "true"
+}
+
+// AbortRequested applies to the synchronization current when the controller handles it.
+func (m *Mirror) AbortRequested() bool {
+	return m.Annotations[AbortRequestAnnotation] == "true"
 }
