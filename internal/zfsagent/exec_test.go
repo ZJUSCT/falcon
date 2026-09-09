@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeScript creates an executable shell script (no zfs involved: the
@@ -117,5 +118,73 @@ func TestHostRunnerDefaultCandidates(t *testing.T) {
 		if zpool[i] != want {
 			t.Errorf("zpool candidate %d = %q, want %q", i, zpool[i], want)
 		}
+	}
+}
+
+// Interval iostat must not hold the runner lock while it waits, otherwise
+// other pools and the usage reporter cannot run during the sampling window.
+func TestHostRunnerConcurrentCommands(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, filepath.Join(dir, "zfs"), "echo usage\n")
+	marker := filepath.Join(dir, "started")
+	writeScript(t, filepath.Join(dir, "zpool"), "touch "+marker+"\nexec sleep 30\n")
+	runner := NewHostRunner("", []string{filepath.Join(dir, "zfs")})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = runner.Run(ctx, "zpool", "iostat")
+	}()
+	// Synchronize on the child starting, so the fast call cannot win the race.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("iostat test command did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	fastCtx, fastCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer fastCancel()
+	out, err := runner.Run(fastCtx, "zfs", "get")
+	cancel()
+	<-done
+	if err != nil || string(out) != "usage\n" {
+		t.Fatalf("usage command blocked by iostat: %q, %v", out, err)
+	}
+}
+
+func TestHostRunnerStreamsAndCancels(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, filepath.Join(dir, "zpool"), "printf 'first\\nsecond\\n'\nexec sleep 30\n")
+	runner := NewHostRunner("", []string{filepath.Join(dir, "zfs")})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lines := make(chan string, 2)
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.Stream(ctx, "zpool", func(line string) { lines <- line }, "iostat")
+	}()
+	for _, want := range []string{"first", "second"} {
+		select {
+		case got := <-lines:
+			if got != want {
+				t.Fatalf("line = %q, want %q", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("stdout was buffered until command exit")
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancelled command returned success")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled stream did not exit")
 	}
 }

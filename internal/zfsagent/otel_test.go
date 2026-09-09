@@ -2,14 +2,16 @@ package zfsagent
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 // The pusher must export the LAST observed cumulative value, not the sum of
-// every Push: the sources (kstats, zpool iostat) are already-cumulative
+// every Push: the ARC and dataset kstats are already-cumulative
 // counters, and summing snapshots would inflate every rate() by an order of
 // magnitude. This is why the instruments are observable (precomputed sums),
 // and this test pins that semantics.
@@ -106,4 +108,70 @@ func TestOTLPPusherDatasetPVCAttribute(t *testing.T) {
 		}
 	}
 	t.Fatal("zfs_dataset_reads missing from export")
+}
+
+// Interval rates may decrease without any counter reset. They must retain
+// gauge semantics end-to-end and never reuse the old invalid counter names.
+func TestOTLPPusherRateGaugesAndMissingSeries(t *testing.T) {
+	reader := metric.NewManualReader()
+	pusher, err := newPusher("storage-1", reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rate := range []int64{100, 20} {
+		pusher.Push(&PerfSample{Vdevs: []VdevIO{
+			{Pool: "tank", Vdev: "tank", ReadOps: rate, WriteOps: rate, ReadBytes: rate, WriteBytes: rate},
+			{Pool: "tank", Vdev: "sda", ReadOps: rate, WriteOps: rate, ReadBytes: rate, WriteBytes: rate},
+		}}, nil)
+		var md metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &md); err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, sm := range md.ScopeMetrics {
+			for _, m := range sm.Metrics {
+				if !strings.HasSuffix(m.Name, "_per_second") {
+					t.Fatalf("unexpected metric %s", m.Name)
+				}
+				g, ok := m.Data.(metricdata.Gauge[int64])
+				if !ok || len(g.DataPoints) != 1 || g.DataPoints[0].Value != rate {
+					t.Fatalf("%s: want gauge %d, got %+v", m.Name, rate, m.Data)
+				}
+				attrs := g.DataPoints[0].Attributes
+				pool, _ := attrs.Value("pool")
+				if pool.AsString() != "tank" {
+					t.Fatalf("missing pool label: %v", attrs)
+				}
+				if strings.HasPrefix(m.Name, "zfs_vdev_") {
+					vdev, _ := attrs.Value("vdev")
+					if vdev.AsString() != "sda" {
+						t.Fatalf("missing vdev label: %v", attrs)
+					}
+				}
+				count++
+			}
+		}
+		if count != 8 {
+			t.Fatalf("got %d rate gauges, want 8", count)
+		}
+	}
+
+	// A failed/missing source must disappear, not persist as a fresh zero.
+	pusher.Push(&PerfSample{}, nil)
+	var md metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &md); err != nil {
+		t.Fatal(err)
+	}
+	if len(md.ScopeMetrics) != 0 {
+		t.Fatalf("missing sources still exported: %+v", md.ScopeMetrics)
+	}
+
+	pusher.Push(&PerfSample{Arc: map[string]int64{"hits": 1}}, nil)
+	pusher.snapshot.Load().collectedAt = time.Now().Add(-4 * PushInterval)
+	if err := reader.Collect(context.Background(), &md); err != nil {
+		t.Fatal(err)
+	}
+	if len(md.ScopeMetrics) != 0 {
+		t.Fatalf("stale snapshot still exported: %+v", md.ScopeMetrics)
+	}
 }

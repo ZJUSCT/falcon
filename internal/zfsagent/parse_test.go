@@ -273,7 +273,7 @@ func TestParsePoolCapacity(t *testing.T) {
 	}
 }
 
-// cannedIostat mirrors a `zpool iostat -Hp -v tank` run: the pool's summary
+// cannedIostat mirrors an interval `zpool iostat -Hp -v -y tank 15 1` run: the pool's summary
 // row first, then one row per vdev (leaf rows carry 0 alloc/free).
 const cannedIostat = `tank	137438953472	962072674304	123456	234567	999999999999	888888888888
 mirror-0	0	0	123400	234500	999999999900	888888888800
@@ -298,9 +298,18 @@ func TestParseZpoolIostat(t *testing.T) {
 		t.Errorf("vdevs (-want +got):\n%s", diff)
 	}
 
-	// Rows with the wrong column count or non-numeric fields are skipped.
+	// Some CLI versions emit "-" capacity fields for leaf vdevs. These
+	// must not hide otherwise valid I/O rates.
+	leaf := parseZpoolIostat("tank", []byte("sdc\t-\t-\t0\t9\t0\t4096\n"))
+	if len(leaf) != 1 || leaf[0].WriteBytes != 4096 {
+		t.Fatalf("leaf with absent capacity: %+v", leaf)
+	}
+
+	// Rows with the wrong column count or invalid I/O fields are skipped.
 	broken := parseZpoolIostat("tank", []byte("tank\t1\t2\t3\t4\t5\n"+ // 6 columns
 		"weird\t1\t2\tthree\t4\t5\t6\n"+ // unparsable number
+		"negative\t1\t2\t-1\t4\t5\t6\n"+
+		"missing\t0\t0\t-\t4\t5\t6\n"+
 		"spaced 1 2 3 4 5 6\n")) // not tab-separated
 	if len(broken) != 0 {
 		t.Errorf("broken rows must be skipped, got %+v", broken)

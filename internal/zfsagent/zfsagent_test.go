@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -13,14 +14,32 @@ import (
 // tests can assert what the collector executed. respond is keyed by the full
 // command line ("zfs get -r ... tank").
 type fakeRunner struct {
+	mu       sync.Mutex
 	commands []string
 	respond  func(command string) ([]byte, error)
 }
 
 func (f *fakeRunner) Run(_ context.Context, bin string, args ...string) ([]byte, error) {
 	command := bin + " " + strings.Join(args, " ")
+	f.mu.Lock()
 	f.commands = append(f.commands, command)
+	f.mu.Unlock()
 	return f.respond(command)
+}
+
+// Stream adapts canned finite output to a live timestamp-framed source.
+func (f *fakeRunner) Stream(ctx context.Context, bin string, line func(string), args ...string) error {
+	out, err := f.Run(ctx, bin, args...)
+	if err != nil {
+		return err
+	}
+	line("100")
+	for _, row := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line(row)
+	}
+	line("115")
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 // zpoolGetCommand is the exact zpool get invocation Report issues per pool

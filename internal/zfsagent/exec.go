@@ -1,6 +1,7 @@
 package zfsagent
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -17,6 +18,7 @@ import (
 // can feed canned output instead of requiring a real ZFS toolchain.
 type Runner interface {
 	Run(ctx context.Context, bin string, args ...string) ([]byte, error)
+	Stream(ctx context.Context, bin string, line func(string), args ...string) error
 }
 
 // DefaultZfsBinCandidates are the well-known absolute zfs paths probed in
@@ -67,17 +69,33 @@ func (r *HostRunner) candidatesFor(bin string) []string {
 
 // Run implements Runner.
 func (r *HostRunner) Run(ctx context.Context, bin string, args ...string) ([]byte, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	return r.run(ctx, bin, args, nil)
+}
 
-	if path := r.chosen[bin]; path != "" {
-		return r.exec(ctx, path, args)
+// Stream delivers complete stdout lines until the command exits or ctx is
+// cancelled. It shares binary discovery with Run but never buffers a whole
+// long-running iostat process in memory.
+func (r *HostRunner) Stream(ctx context.Context, bin string, line func(string), args ...string) error {
+	_, err := r.run(ctx, bin, args, line)
+	return err
+}
+
+func (r *HostRunner) run(ctx context.Context, bin string, args []string, line func(string)) ([]byte, error) {
+	// Only protect candidate memoization, never a running command: interval
+	// iostat must not serialize other pools or block usage refreshes.
+	r.mu.Lock()
+	path := r.chosen[bin]
+	r.mu.Unlock()
+	if path != "" {
+		return r.exec(ctx, path, args, line)
 	}
 	var attempts []string
 	for _, path := range r.candidatesFor(bin) {
-		out, err := r.exec(ctx, path, args)
+		out, err := r.exec(ctx, path, args, line)
 		if err == nil {
+			r.mu.Lock()
 			r.chosen[bin] = path
+			r.mu.Unlock()
 			return out, nil
 		}
 		var start *startError
@@ -91,17 +109,36 @@ func (r *HostRunner) Run(ctx context.Context, bin string, args ...string) ([]byt
 }
 
 // exec runs one candidate and captures stdout/stderr.
-func (r *HostRunner) exec(ctx context.Context, path string, args []string) ([]byte, error) {
+func (r *HostRunner) exec(ctx context.Context, path string, args []string, line func(string)) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, path, args...)
 	if r.root != "" {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Chroot: r.root}
 	}
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	var scanner *bufio.Scanner
+	if line == nil {
+		cmd.Stdout = &stdout
+	} else {
+		pipe, err := cmd.StdoutPipe()
+		if err != nil {
+			return nil, err
+		}
+		scanner = bufio.NewScanner(pipe)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return nil, &startError{path: path, err: err}
+	}
+	if scanner != nil {
+		for scanner.Scan() {
+			line(scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return nil, fmt.Errorf("read %s stdout: %w", path, err)
+		}
 	}
 	if err := cmd.Wait(); err != nil {
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {

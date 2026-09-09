@@ -17,15 +17,15 @@ import (
 )
 
 // PushInterval is both the SDK's export interval (PeriodicReader) and the
-// agent's perf collection interval, so exactly one collection feeds one
-// export.
+// agent's physical I/O sampling window. Collection and export run
+// independently; the exporter observes the latest completed window.
 const PushInterval = 15 * time.Second
 
 // Metric naming: the counters below deliberately do NOT carry a _total
 // suffix. Prometheus' OTLP ingest appends _total to monotonic sums on its
 // own, so an explicit suffix would surface as zfs_*_total_total.
 //
-// All instruments are observable (async): the sources are kernel counters
+// ARC and dataset instruments are observable counters: their sources are kernel counters
 // that are already cumulative, and the collection loop only stores the
 // latest reading. A sync Int64Counter would be wrong here — its cumulative
 // aggregation sums every Add(), so recording absolute counter snapshots
@@ -34,6 +34,9 @@ const PushInterval = 15 * time.Second
 // observable precomputed sum reports the last observed value as-is, exactly
 // like a Prometheus scrape of the same counter, and counter resets (a
 // dataset remount zeroes its objset kstats) flow through to the backend.
+// Pool/vdev I/O comes from interval iostat and uses per-second gauges. Old
+// zfs_{pool,vdev}_{read,write}_{bytes,ops} counters were invalid lifetime
+// averages: new names prevent mixing those historical values with real rates.
 
 // OTLPPusher turns PerfSamples into OTLP metrics. Push only stores the
 // sample; the instruments observe it from the SDK reader's callback at each
@@ -55,16 +58,16 @@ type OTLPPusher struct {
 	arcL2Misses metric.Int64ObservableCounter
 
 	// Pool metrics, from each pool's own iostat summary row (node, pool).
-	poolReadBytes  metric.Int64ObservableCounter
-	poolWriteBytes metric.Int64ObservableCounter
-	poolReadOps    metric.Int64ObservableCounter
-	poolWriteOps   metric.Int64ObservableCounter
+	poolReadBytes  metric.Int64ObservableGauge
+	poolWriteBytes metric.Int64ObservableGauge
+	poolReadOps    metric.Int64ObservableGauge
+	poolWriteOps   metric.Int64ObservableGauge
 
 	// Vdev metrics, from the per-vdev iostat rows (node, pool, vdev).
-	vdevReadBytes  metric.Int64ObservableCounter
-	vdevWriteBytes metric.Int64ObservableCounter
-	vdevReadOps    metric.Int64ObservableCounter
-	vdevWriteOps   metric.Int64ObservableCounter
+	vdevReadBytes  metric.Int64ObservableGauge
+	vdevWriteBytes metric.Int64ObservableGauge
+	vdevReadOps    metric.Int64ObservableGauge
+	vdevWriteOps   metric.Int64ObservableGauge
 
 	// Dataset metrics, from the objset kstats (node, pool, dataset, pvc).
 	dsReads      metric.Int64ObservableCounter
@@ -77,7 +80,8 @@ type OTLPPusher struct {
 // dataset→PVC references resolved at collection time (the callback must not
 // call back into live state).
 type pushSnapshot struct {
-	sample *PerfSample
+	sample      *PerfSample
+	collectedAt time.Time
 	// pvc maps a dataset name to "namespace/name" ("" = not zfs-localpv).
 	pvc map[string]string
 }
@@ -134,6 +138,16 @@ func newPusher(node string, reader sdkmetric.Reader) (*OTLPPusher, error) {
 		return nil
 	}
 
+	newRate := func(name, description string, target *metric.Int64ObservableGauge) error {
+		inst, err := meter.Int64ObservableGauge(name, metric.WithDescription(description))
+		if err != nil {
+			return err
+		}
+		*target = inst
+		instruments = append(instruments, inst)
+		return nil
+	}
+
 	arcSize, err := meter.Int64ObservableGauge("zfs_arc_size_bytes",
 		metric.WithDescription("ZFS ARC size in bytes."))
 	if err != nil {
@@ -153,28 +167,28 @@ func newPusher(node string, reader sdkmetric.Reader) (*OTLPPusher, error) {
 	if err := newCounter("zfs_arc_l2_misses", "ZFS ARC L2 (cache device) misses.", &p.arcL2Misses); err != nil {
 		return nil, err
 	}
-	if err := newCounter("zfs_pool_read_bytes", "ZFS pool bytes read since pool import.", &p.poolReadBytes); err != nil {
+	if err := newRate("zfs_pool_read_bytes_per_second", "ZFS pool read bytes per second over the last collection interval.", &p.poolReadBytes); err != nil {
 		return nil, err
 	}
-	if err := newCounter("zfs_pool_write_bytes", "ZFS pool bytes written since pool import.", &p.poolWriteBytes); err != nil {
+	if err := newRate("zfs_pool_write_bytes_per_second", "ZFS pool write bytes per second over the last collection interval.", &p.poolWriteBytes); err != nil {
 		return nil, err
 	}
-	if err := newCounter("zfs_pool_read_ops", "ZFS pool read operations since pool import.", &p.poolReadOps); err != nil {
+	if err := newRate("zfs_pool_read_ops_per_second", "ZFS pool read operations per second over the last collection interval.", &p.poolReadOps); err != nil {
 		return nil, err
 	}
-	if err := newCounter("zfs_pool_write_ops", "ZFS pool write operations since pool import.", &p.poolWriteOps); err != nil {
+	if err := newRate("zfs_pool_write_ops_per_second", "ZFS pool write operations per second over the last collection interval.", &p.poolWriteOps); err != nil {
 		return nil, err
 	}
-	if err := newCounter("zfs_vdev_read_bytes", "ZFS vdev bytes read since pool import.", &p.vdevReadBytes); err != nil {
+	if err := newRate("zfs_vdev_read_bytes_per_second", "ZFS vdev read bytes per second over the last collection interval.", &p.vdevReadBytes); err != nil {
 		return nil, err
 	}
-	if err := newCounter("zfs_vdev_write_bytes", "ZFS vdev bytes written since pool import.", &p.vdevWriteBytes); err != nil {
+	if err := newRate("zfs_vdev_write_bytes_per_second", "ZFS vdev write bytes per second over the last collection interval.", &p.vdevWriteBytes); err != nil {
 		return nil, err
 	}
-	if err := newCounter("zfs_vdev_read_ops", "ZFS vdev read operations since pool import.", &p.vdevReadOps); err != nil {
+	if err := newRate("zfs_vdev_read_ops_per_second", "ZFS vdev read operations per second over the last collection interval.", &p.vdevReadOps); err != nil {
 		return nil, err
 	}
-	if err := newCounter("zfs_vdev_write_ops", "ZFS vdev write operations since pool import.", &p.vdevWriteOps); err != nil {
+	if err := newRate("zfs_vdev_write_ops_per_second", "ZFS vdev write operations per second over the last collection interval.", &p.vdevWriteOps); err != nil {
 		return nil, err
 	}
 	if err := newCounter("zfs_dataset_reads", "ZFS dataset read operations since mount.", &p.dsReads); err != nil {
@@ -197,7 +211,7 @@ func newPusher(node string, reader sdkmetric.Reader) (*OTLPPusher, error) {
 	// attribute keeps the series directly queryable by node in Prometheus.
 	if _, err := meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		snap := p.snapshot.Load()
-		if snap == nil {
+		if snap == nil || time.Since(snap.collectedAt) > 3*PushInterval {
 			return nil
 		}
 		node := attribute.String("node", p.node)
@@ -258,7 +272,7 @@ func (p *OTLPPusher) Push(sample *PerfSample, pvcOf func(pool, dataset string) s
 	if sample == nil {
 		return
 	}
-	snap := &pushSnapshot{sample: sample, pvc: make(map[string]string, len(sample.Datasets))}
+	snap := &pushSnapshot{sample: sample, collectedAt: time.Now(), pvc: make(map[string]string, len(sample.Datasets))}
 	for _, d := range sample.Datasets {
 		if pvcOf != nil {
 			snap.pvc[d.Dataset] = pvcOf(d.Pool, d.Dataset)
