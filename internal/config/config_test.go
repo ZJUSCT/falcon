@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -124,5 +125,114 @@ func TestLoadInvalidConfigs(t *testing.T) {
 func TestLoadMissingFile(t *testing.T) {
 	if _, err := Load(filepath.Join(t.TempDir(), "absent.yaml")); err == nil {
 		t.Fatal("Load of missing file succeeded, want error")
+	}
+}
+
+func TestLoadEnvironment(t *testing.T) {
+	// 故意包含 YAML 特殊字符和占位符：这些内容必须原样进入字段，不能再次解析或替换。
+	secret := "'\"\\\n: {injected: true} # $HOME ${FALCON_TEST_UNSET} $${LITERAL}"
+	t.Setenv("FALCON_TEST_SECRET", secret)
+	t.Setenv("FALCON_TEST_HOST", "mirrors.example.org")
+	t.Setenv("FALCON_TEST_CLIENT", "client-id")
+	path := writeTemp(t, `
+site:
+  url: https://${FALCON_TEST_HOST}/
+auth:
+  github:
+    clientID: ${FALCON_TEST_CLIENT}
+    clientSecret: ${FALCON_TEST_SECRET}
+    allowedUserIDs: [9007199254740993]
+publish:
+  gatewayRef:
+    name: gateway
+  hostnames: ["${FALCON_TEST_HOST}"]
+  annotations:
+    '${UNCHANGED_KEY}': '${FALCON_TEST_CLIENT}/${FALCON_TEST_HOST}'
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Auth.GitHub.ClientSecret != secret {
+		t.Fatal("clientSecret was not preserved exactly")
+	}
+	if cfg.Auth.GitHub.ClientID != "client-id" || cfg.Site.URL != "https://mirrors.example.org" {
+		t.Fatal("nested string expansion or subsequent normalization failed")
+	}
+	if len(cfg.Publish.Hostnames) != 1 || cfg.Publish.Hostnames[0] != "mirrors.example.org" {
+		t.Fatal("string list expansion failed")
+	}
+	if cfg.Publish.Annotations["${UNCHANGED_KEY}"] != "client-id/mirrors.example.org" {
+		t.Fatal("map value expansion changed the key or failed to expand the value")
+	}
+	if len(cfg.Auth.GitHub.AllowedUserIDs) != 1 || cfg.Auth.GitHub.AllowedUserIDs[0] != 9007199254740993 {
+		t.Fatal("integer configuration lost precision")
+	}
+}
+
+func TestLoadEnvironmentLiterals(t *testing.T) {
+	t.Setenv("FALCON_TEST_VALUE", "expanded")
+	path := writeTemp(t, `
+site:
+  url: https://mirrors.example.org
+  note: '$HOME $request_uri $1 $$ $ $${FALCON_TEST_VALUE} $${UNSET:-default} ${FALCON_TEST_VALUE}'
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := "$HOME $request_uri $1 $$ $ ${FALCON_TEST_VALUE} ${UNSET:-default} expanded"
+	if cfg.Site.Note != want {
+		t.Errorf("site.note = %q, want %q", cfg.Site.Note, want)
+	}
+}
+
+func TestLoadEnvironmentErrors(t *testing.T) {
+	t.Setenv("FALCON_TEST_EMPTY", "")
+	t.Setenv("FALCON_TEST_MISSING", "")
+	if err := os.Unsetenv("FALCON_TEST_MISSING"); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]struct {
+		input string
+		want  string
+	}{
+		"missing":      {"${FALCON_TEST_MISSING}", `environment variable "FALCON_TEST_MISSING" must be set and non-empty`},
+		"empty":        {"${FALCON_TEST_EMPTY}", `environment variable "FALCON_TEST_EMPTY" must be set and non-empty`},
+		"unclosed":     {"${FALCON_TEST_MISSING", "unterminated environment placeholder"},
+		"empty name":   {"${}", "environment placeholder must use ${NAME}"},
+		"invalid name": {"${BAD-NAME}", "environment placeholder must use ${NAME}"},
+		"numeric name": {"${1}", "environment placeholder must use ${NAME}"},
+		"shell default": {"${FALCON_TEST_EMPTY:-fallback}",
+			"environment placeholder must use ${NAME}"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := writeTemp(t, "site:\n  url: https://mirrors.example.org\nauth:\n  github:\n    clientSecret: '"+tc.input+"'\n")
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), "auth.github.clientSecret: "+tc.want) {
+				t.Fatalf("Load error = %v, want field path and %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadEnvironmentValidationDoesNotExposeValues(t *testing.T) {
+	t.Setenv("FALCON_TEST_SENSITIVE", "sensitive/invalid-value")
+	cases := map[string]string{
+		"log level": "site:\n  url: https://mirrors.example.org\nlog:\n  level: ${FALCON_TEST_SENSITIVE}\n",
+		"site URL":  "site:\n  url: ${FALCON_TEST_SENSITIVE}\n",
+		"hostname":  "site:\n  url: https://mirrors.example.org\npublish:\n  gatewayRef:\n    name: gw\n  hostnames: ['${FALCON_TEST_SENSITIVE}']\n",
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(writeTemp(t, content))
+			if err == nil {
+				t.Fatal("Load succeeded with invalid expanded configuration")
+			}
+			if strings.Contains(err.Error(), "sensitive/invalid-value") {
+				t.Fatal("validation error exposed an environment value")
+			}
+		})
 	}
 }

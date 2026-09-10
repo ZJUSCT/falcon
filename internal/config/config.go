@@ -8,6 +8,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 
 	"sigs.k8s.io/yaml"
@@ -112,6 +113,9 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	if err := expandConfigEnv(reflect.ValueOf(cfg).Elem(), ""); err != nil {
+		return nil, fmt.Errorf("expand config %s: %w", path, err)
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
@@ -128,7 +132,7 @@ func (c *Config) Validate() error {
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
 	default:
-		return fmt.Errorf("log.level %q is not one of debug, info, warn, error", c.Log.Level)
+		return fmt.Errorf("log.level must be one of debug, info, warn, error")
 	}
 	if c.Site.URL == "" {
 		return fmt.Errorf("site.url must not be empty")
@@ -140,7 +144,7 @@ func (c *Config) Validate() error {
 		}
 	}
 	if !strings.Contains(c.Site.URL, "://") {
-		return fmt.Errorf("site.url %q must carry a scheme (e.g. https://...)", c.Site.URL)
+		return fmt.Errorf("site.url must carry a scheme (e.g. https://...)")
 	}
 	if len(c.Publish.Hostnames) > 0 && c.Publish.GatewayRef.Name == "" {
 		return fmt.Errorf("publish.gatewayRef.name is required when publish.hostnames is set")
@@ -150,7 +154,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("publish.hostnames must not contain empty entries")
 		}
 		if strings.Contains(host, "/") {
-			return fmt.Errorf("publish.hostnames entry %q must be a bare hostname", host)
+			return fmt.Errorf("publish.hostnames entries must be bare hostnames")
 		}
 	}
 	return nil

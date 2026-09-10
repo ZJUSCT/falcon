@@ -292,6 +292,8 @@ publish:
   annotations: {}
 ```
 
+配置支持 `${NAME}` 环境变量代换，`$${NAME}` 保持原样，不支持 `${NAME:-default}` 等 shell 表达式。
+
 ### CRD
 
 镜像 CRD 需要回答四个问题：
