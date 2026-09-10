@@ -1,13 +1,17 @@
-name: Checks
+name: CI
+
+# Branch pushes and PRs run the checks. Tag pushes are intentionally not
+# triggered here: release.yml publishes artifacts from a tag without
+# re-running checks — tag a commit whose CI has already passed.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
   push:
-    branches: ['*']
-  # Reused by release.yml as the check stage for tag pushes; tags do not
-  # trigger this workflow directly to avoid a duplicate check run.
-  workflow_call:
+    branches: ['**']
+
+permissions:
+  contents: read
 
 jobs:
   checks:

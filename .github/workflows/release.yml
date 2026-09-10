@@ -1,7 +1,9 @@
 name: release
 
-# Tag pipeline: checks gate image builds, and images gate the chart
-# release, so a tag whose checks fail never produces artifacts.
+# Tag pipeline: build and publish all artifacts from a v* tag. Checks are
+# NOT re-run here — the tag is expected to point at a commit that already
+# passed CI on its branch (push, wait for green, then tag). images gate
+# the chart release, so a tag whose images fail to build publishes no chart.
 
 on:
   push:
@@ -21,13 +23,8 @@ env:
   CHART_REPO_PATH: charts
 
 jobs:
-  check:
-    name: Check
-    uses: ./.github/workflows/go.yml
-
   images:
     name: Build and push ${{ matrix.name }} image
-    needs: check
     runs-on: ubuntu-latest
     strategy:
       # An image that can build still publishes when a sibling fails; the

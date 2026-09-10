@@ -910,6 +910,10 @@ make format    # Go 格式化及仓库文件格式修复
 
 写入容器以当前用户的 UID/GID 运行，保留已有暂存区，修改后仍需 review 并自行 stage。格式修复不能自动解决的错误仍会报告；修复后重新执行检查。
 
+### Action
+
+Action 有检查和发版两个 workflow。在检查的 workflow 通过之前，不要打 tag 并推送。
+
 ### Roadmap & Todo
 
 - [ ] zfs-agent：在 Grafana 中对采集的信息进行校验，并制作 Dashboard。
