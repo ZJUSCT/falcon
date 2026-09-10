@@ -71,11 +71,15 @@ func TestIostatStreamingLifecycle(t *testing.T) {
 	}
 
 	failed := collect()
+	// The sweep observing the exit drops the dead source instead of
+	// restarting mid-sweep, so the map stops holding it — capture it before
+	// the failure to still observe its termination below.
+	dying := c.ioSources["tank"]
 	send("fail")
 	if rows := <-failed; len(rows) != 0 {
 		t.Fatalf("failed stream replayed stale rates: %+v", rows)
 	}
-	<-c.ioSources["tank"].done
+	<-dying.done
 	restarted := collect()
 	send("200")
 	send("tank\t1\t2\t0\t0\t0\t0")
