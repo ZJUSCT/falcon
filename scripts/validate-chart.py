@@ -20,11 +20,28 @@ import yaml
 
 CHART = Path(__file__).resolve().parent.parent / "charts" / "falcon"
 
+# The chart ships no site identity (site.url is required but empty by
+# default), so even the "defaults" render needs this minimal overlay.
+REQUIRED = """
+controller:
+  config:
+    site:
+      url: https://mirrors.example.org
+"""
+
 # Overlay that turns on every conditional template block.
-ALL_ON = """
+ALL_ON = REQUIRED + """
+global:
+  gatewayRef:
+    name: mirror-gateway
+    namespace: gateway-system
+    sectionName: https
 webui: {enabled: true}
 admin: {enabled: true, host: admin.example.org}
 zfsAgent: {enabled: true}
+catalog:
+  enabled: true
+  hosts: [mirrors.example.org]
 """
 
 
@@ -90,7 +107,7 @@ def check(docs: list[dict]) -> list[str]:
 
 def main() -> None:
     chart = Path(sys.argv[1]) if len(sys.argv) > 1 else CHART
-    renders = {"defaults": render(chart, None), "all-on": render(chart, ALL_ON)}
+    renders = {"defaults": render(chart, REQUIRED), "all-on": render(chart, ALL_ON)}
 
     failures = []
     for label, docs in renders.items():
@@ -101,9 +118,15 @@ def main() -> None:
         (d.get("kind"), d.get("metadata", {}).get("name"))
         for d in renders["all-on"]
     }
+    expected = [
+        ("ClusterRole", "falcon-node-stats"),
+        ("Deployment", "falcon"),
+        ("HTTPRoute", "falcon-admin"),
+        ("HTTPRoute", "falcon-catalog"),
+    ]
     failures += [
         f"expected resource absent: {r}"
-        for r in [("ClusterRole", "falcon-node-stats"), ("Deployment", "falcon")]
+        for r in expected
         if r not in identities
     ]
 

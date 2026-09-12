@@ -46,7 +46,9 @@ func publishDeploymentFailure(ctx context.Context, c client.Client, owner client
 
 func mirrorPublishProtocols(mirror *mirrorv1alpha1.Mirror) []string {
 	var protocols []string
-	if mirror.Spec.Publish.HTTP != nil {
+	// A redirect-mode http key deploys nothing, so there is no Deployment
+	// whose rollout could fail.
+	if mirror.Spec.Publish.HTTP.Serving() {
 		protocols = append(protocols, PublishProtocolHTTP)
 	}
 	if mirror.Spec.Publish.Rsync != nil {

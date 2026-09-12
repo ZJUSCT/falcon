@@ -83,6 +83,7 @@ controller:
     serviceMonitor:
       enabled: false # 集群已安装 Prometheus Operator 时可启用
 catalog:
+  enabled: true
   hosts:
     - mirrors.example.org
 ```
@@ -162,7 +163,7 @@ kubectl -n mirror describe mirror demo
 
 首次同步、快照恢复及路由就绪后，可以访问 `https://mirrors.example.org/demo/index.html` 和 `https://mirrors.example.org/mirrorz.json`。
 
-该示例只用于验证流程。接入真实软件源时，应配置对应同步工具、服务配置、资源需求和退出行为。相关内容见 [TODO](TODO)。
+该示例只用于验证流程。接入真实软件源时，应配置对应同步工具、服务配置、资源需求和退出行为。
 
 ## K8s 基础
 
@@ -360,10 +361,13 @@ spec:
     # int32：快速重试次数上限；0 = 无快速重试
     # 可选：默认 3
     # 校验（schema）：Minimum=0
-    keepFailedJobs: 1
-    # int32：按创建时间保留的最近失败 Job 数
-    # 可选：默认 1
+    keepJobs: 3
+    # int32：按创建时间保留的最近同步 Job 数（无论成败，含日志等历史记录）
+    # 可选：默认 3
     # 校验（schema）：Minimum=0
+    # Job 仅按此数量清理，与快照代次解耦：小数值时 Job 可能先于其快照被清理，
+    # 大数值时 Job 可在快照消失后继续留存（日志开销远小于存储）
+    # 0 = 不保留任何 Job
     podTemplate:
       # PodTemplateSpec：同步 Job 的完整 PodTemplate
       # schema 可省略，但控制器要求有效模板
@@ -424,8 +428,9 @@ spec:
   publish:
     # 可选；固定 key：http / rsync；key 出现 = 启用，不出现 = 禁用；
     # 全禁用 = 纯同步镜像（保存就绪快照，跳过发布，不创建克隆 PVC）
+    # http 声明 podTemplate（服务模式）或 redirect（重定向模式），见「HTTP 重定向」
     http:
-      # 形状 = MirrorServiceSpec + aliases
+      # 形状 = MirrorServiceSpec + aliases + redirect
       replicas: 1
       # int32：发布副本数
       # 可选：默认 1
@@ -439,10 +444,16 @@ spec:
       # 校验（schema）：最多 8 项、每项 ≤200 字符
       # 校验（控制器）：无重复、不等于规范路径 /<CR 名>、逐项语法（/ 开头、不以 / 结尾、
       # 无 //、无空白；大小写敏感、允许大写）
+      redirect: mirrors.cernet.edu.cn
+      # string：重定向目标主机名（裸主机名，无 scheme/端口/路径）
+      # 可选；未声明 podTemplate 时启用重定向模式，见「HTTP 重定向」
+      # 校验（CEL）：podTemplate.spec 与 redirect 至少其一
+      # 校验（schema）：小写 DNS 主机名 1–253 字符（Gateway API PreciseHostname 同型）
+      # 校验（控制器）：镜像 schema Pattern，兜底绕过准入的 spec
       podTemplate:
         # PodTemplateSpec：发布 Deployment 的完整 PodTemplate，由运维人员声明全部工作负载字段
         # 对应：发布 Deployment spec.template
-        # 校验（CEL）：key 出现时 podTemplate.spec 存在
+        # 校验（CEL）：与 redirect 至少其一；声明后服务模式优先，redirect 被忽略
         # 校验（控制器）：至少一容器、第一容器至少一个 containerPort；volumes 不得含保留卷名 mirror-data；
         # 对其挂载必须 readOnly
         # Falcon 管理只读 mirror-data PVC 卷和控制器标签；不注入放置约束、安全设置、探针、端口、
@@ -594,11 +605,13 @@ spec:
   publish:
     # 仅 http 一个 key（代理即 HTTP 发布者）；key 未出现 = 不部署负载，代理不对外发布
     http:
+      # 形状与 Mirror 相同（replicas、aliases、redirect、podTemplate；redirect 的
+      # 重定向模式与 CEL 规则亦同）
       replicas: 1
       # 同 Mirror（略）
       podTemplate:
         # PodTemplateSpec：发布容器的完整声明
-        # 启用 http 时必填；校验（CEL）：podTemplate.spec 必须存在
+        # 服务模式必填；校验（CEL）：podTemplate.spec 与 redirect 至少其一
         # 对应：发布 Deployment spec.template
         # 校验（控制器）：至少一容器、第一容器至少一个 containerPort
         # 以下仅示意控制器注入后的字段，不是用户输入；不得声明同名 volume。
@@ -694,7 +707,7 @@ ProxyMirror 不存在同步和发布流程。Falcon 按照其配置创建好相�
     - Job 结束，记录 Job 结果并释放并发配额
     - 成功后创建快照，等待 `readyToUse=true`
     - 保存 `lastSnapshot`（启用发布服务时还包括 `publication.snapshot`），交付 readyToUse 的快照作为本次同步的产物
-- 发布：没有配置 `publish` 时直接跳过
+- 发布：没有配置 `publish`（或 http 处于重定向模式）时直接跳过
     - 接收同步流程交付的就绪快照
     - 克隆 PVC
     - 创建/更新发布 Deployment
@@ -707,7 +720,7 @@ ProxyMirror 不存在同步和发布流程。Falcon 按照其配置创建好相�
 - 成功的同步触发发布
 - 未完成的发布阻塞下一轮同步，避免覆盖待发布的数据或积累更多代次。
 
-没有进行中的同步或发布流程时，控制器仍维护已启用的发布 Deployment、Service 和 HTTPRoute。
+没有进行中的同步或发布流程时，控制器仍维护已启用的发布 Deployment、Service 和 HTTPRoute；重定向模式的 http 仅维护其路由（见「HTTP 重定向」）。
 
 其他边边角角的 case：
 
@@ -720,7 +733,7 @@ ProxyMirror 不存在同步和发布流程。Falcon 按照其配置创建好相�
 
 | Condition | 含义 |
 | --- | --- |
-| `Ready` | HTTP endpoint 可对外提供服务，与 MirrorZ 收录条件一致；新发布失败不必使仍可用的旧内容离线。纯同步、仅 Rsync 镜像不满足此条件。 |
+| `Ready` | HTTP endpoint 可对外提供服务。服务模式要求发布工作负载与路由就绪；重定向模式要求重定向路由被网关接受且旧工作负载排空。纯同步、仅 Rsync 镜像不满足此条件。 |
 | `Progressing` | 发布仍未完成，包括克隆、初次部署、滚动更新、路由等待和旧 Pod 排空；不表示同步 Job 正在运行。 |
 | `Degraded` | 存在已报告的异常，原因和消息说明其来源。 |
 
@@ -759,6 +772,25 @@ ProxyMirror 不存在同步和发布流程。Falcon 按照其配置创建好相�
 
 K8s 已接受的停服配置不会被其他字段的控制器校验错误或尚未完成的同步取消所阻塞；移除 HTTP 后 `Ready=False`。
 
+#### HTTP 重定向
+
+`publish.http.redirect` 是 http 服务的另一种启用方式，设计用于**临时运维**：例如在节点间迁移镜像数据时，把该镜像的全部 HTTP 流量临时导向另一个镜像站，迁完再切回服务模式。声明一个裸主机名即可启用：
+
+```yaml
+publish:
+  http:
+    redirect: mirrors.cernet.edu.cn
+```
+
+重定向模式的镜像不会被 mirroz.json 收录。重定向包括 `aliases` 指定的路径。
+
+如果 `publish.http.podTemplate` 也存在，则 redirect 不生效。
+
+工作方式：
+
+- 控制器不部署任何工作负载，只把发布 HTTPRoute（`<base>-publish`）的规则改写为 Gateway API 的 `RequestRedirect` 过滤器。
+- 过滤器只设置 `hostname` 和固定的 `statusCode: 302`，scheme 与 path 留空：网关按规范保持请求协议（http→http，https→https），并原样复用请求路径。`/debian/pool/x` 因此重定向到 `http(s)://mirrors.cernet.edu.cn/debian/pool/x`。
+
 #### 镜像的删除与数据保留
 
 删除 Mirror 时，Falcon 按「同步 Job 和发布 Deployment → PVC → VolumeSnapshot」的顺序删除属于该 Mirror 的资源，各阶段等待对应资源消失后再继续，最后移除 finalizer。工作负载使用 foreground deletion，等待其 Pod 正常终止；Service 和 HTTPRoute 由 owner-reference GC 回收。
@@ -786,7 +818,9 @@ Falcon 不直接管理 PV 或后端数据；PVC 消失不表示后端卷已完�
 MirrorZ 字段与 Falcon 字段的映射：
 
 ```jsonc
-// 收录条件：spec.publish.http 已配置，且当前 metadata.generation 对应的 Ready condition 为 True。
+// 收录条件：spec.publish.http 处于服务模式（声明了 podTemplate），且当前
+// metadata.generation 对应的 Ready condition 为 True。
+// 重定向模式的条目不收录：302 导向别站不是本站在提供该镜像。
 // 排序：按 cname 字典序。
 {
   "version": 1.7,
@@ -856,7 +890,7 @@ Falcon 的 `/api` 仅供 WebUI 使用。
     - 镜像详情页面显示：
         - 同步状态
         - 存储占用：总容量和每个快照的增量
-        - 同步日志：当前或上次的 Job 日志，显示方式和功能直接抄 Headlamp。
+        - 同步日志：保留的 Job 日志（`sync.keepJobs`，默认 3），可在下拉中按时间与结局选择；显示方式和功能直接抄 Headlamp。
         - 该镜像的 CR YAML
 - Storage（ZFS）：根据 zfs-agent 上报的数据显示各节点 ZFS 情况。
 
@@ -916,6 +950,7 @@ Action 有检查和发版两个 workflow。在检查的 workflow 通过之前，
 
 ### Roadmap & Todo
 
+- [ ] 在生命周期中实现 reloader 的功能
 - [ ] zfs-agent：在 Grafana 中对采集的信息进行校验，并制作 Dashboard。
 - [ ] 设计 e2e 测试并在 CI 中运行
 

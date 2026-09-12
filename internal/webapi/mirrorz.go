@@ -293,11 +293,12 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 	entries := make([]mirrorzMirror, 0, len(mirrors.Items)+len(proxies.Items))
 	for i := range mirrors.Items {
 		m := &mirrors.Items[i]
-		// The catalog contains only an explicitly requested HTTP endpoint
-		// that the controller has declared Ready for this exact CR
-		// generation. Sync-only, disabled, stale and unhealthy endpoints are
-		// omitted so MirrorZ consumers are never directed to them.
-		if m.Spec.Publish.HTTP == nil || !readyForCurrentGeneration(m.Status.Conditions, m.Generation) {
+		// The catalog contains only an explicitly requested SERVING http
+		// endpoint that the controller has declared Ready for this exact CR
+		// generation. Sync-only, disabled, stale, unhealthy and redirect-mode
+		// endpoints are omitted so MirrorZ consumers are never directed to
+		// them — a 302 away from this site is not this site serving.
+		if !m.Spec.Publish.HTTP.Serving() || !readyForCurrentGeneration(m.Status.Conditions, m.Generation) {
 			continue
 		}
 		status, err := mirrorzStatusForMirror(m)
@@ -315,7 +316,7 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 	}
 	for i := range proxies.Items {
 		p := &proxies.Items[i]
-		if p.Spec.Publish.HTTP == nil || !readyForCurrentGeneration(p.Status.Conditions, p.Generation) {
+		if !p.Spec.Publish.HTTP.Serving() || !readyForCurrentGeneration(p.Status.Conditions, p.Generation) {
 			continue
 		}
 		status, err := mirrorzStatusForProxyMirror(p)

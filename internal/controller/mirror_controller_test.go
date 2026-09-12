@@ -356,7 +356,7 @@ func testMirror() *mirrorv1alpha1.Mirror {
 				RetryInterval:     metav1.Duration{Duration: 15 * time.Minute},
 				Timeout:           metav1.Duration{Duration: 10 * time.Minute},
 				FailureRetryLimit: 3,
-				KeepFailedJobs:    1,
+				KeepJobs:          3,
 				PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
 						Name:    "sync",
@@ -663,14 +663,14 @@ func TestFailureRetryIntervals(t *testing.T) {
 	}
 }
 
-// TestKeepFailedJobsPrunesOldestFailed: after a sync terminal state the
-// controller keeps only the newest spec.sync.keepFailedJobs failed Jobs (by
-// creation time) and never touches succeeded Jobs (they are pruned with their
-// snapshot generation).
-func TestKeepFailedJobsPrunesOldestFailed(t *testing.T) {
+// TestKeepJobsPrunesOldestRegardlessOfOutcome: after a sync terminal state
+// the controller keeps only the newest spec.sync.keepJobs Jobs (by creation
+// time) — succeeded Jobs are history too — and never touches foreign ones.
+func TestKeepJobsPrunesOldestRegardlessOfOutcome(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 30, 14, 0, 0, 0, time.UTC)
 	mirror := testMirror()
+	mirror.Spec.Sync.KeepJobs = 2
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Annotations = map[string]string{SyncRequestAnnotation: "true"}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
@@ -681,38 +681,40 @@ func TestKeepFailedJobsPrunesOldestFailed(t *testing.T) {
 	scheme := testScheme(t)
 	objects := []client.Object{mirror}
 	currentJob := currentSyncJobName(mirror)
-	failedNames := []string{"smoke-sync-oldest", "smoke-sync-middle", currentJob}
-	for i, name := range failedNames {
-		job := &batchv1.Job{
+	owned := []struct {
+		name   string
+		age    time.Duration
+		failed bool
+	}{
+		{currentJob, 0, true},
+		{"smoke-sync-succeeded", time.Minute, false},
+		{"smoke-sync-oldest", 2 * time.Minute, true},
+	}
+	for _, entry := range owned {
+		condition := batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}
+		if entry.failed {
+			condition = batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}
+		}
+		objects = append(objects, &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace:         mirror.Namespace,
-				Name:              name,
+				Name:              entry.name,
 				Labels:            map[string]string{MirrorLabel: "smoke"},
-				CreationTimestamp: metav1.NewTime(now.Add(time.Duration(i) * time.Minute)),
+				CreationTimestamp: metav1.NewTime(now.Add(-entry.age)),
 				OwnerReferences: []metav1.OwnerReference{{
 					APIVersion: mirrorv1alpha1.GroupVersion.String(), Kind: "Mirror",
 					Name: mirror.Name, UID: mirror.UID, Controller: ptr.To(true),
 				}},
 			},
-			Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}},
-		}
-		objects = append(objects, job)
+			Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{condition}},
+		})
 	}
-	// A succeeded Job with a sync-timestamp label: never touched by the
-	// failed-Job pruning.
-	objects = append(objects, &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:         mirror.Namespace,
-			Name:              "smoke-sync-1756147200",
-			Labels:            map[string]string{MirrorLabel: "smoke", SyncTimestampLabel: "1756147200"},
-			CreationTimestamp: metav1.NewTime(now.Add(-time.Hour)),
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: mirrorv1alpha1.GroupVersion.String(), Kind: "Mirror",
-				Name: mirror.Name, UID: mirror.UID, Controller: ptr.To(true),
-			}},
-		},
-		Status: batchv1.JobStatus{Succeeded: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}},
-	})
+	foreign := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Namespace: mirror.Namespace, Name: "smoke-sync-foreign",
+		Labels:            map[string]string{MirrorLabel: "smoke"},
+		CreationTimestamp: metav1.NewTime(now.Add(-3 * time.Minute)),
+	}}
+	objects = append(objects, foreign)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &batchv1.Job{}).
@@ -731,11 +733,12 @@ func TestKeepFailedJobsPrunesOldestFailed(t *testing.T) {
 	if degraded := findCondition(current.Status.Conditions, conditionDegraded); degraded == nil || degraded.Status != metav1.ConditionTrue || current.Status.ConsecutiveFailures != 1 {
 		t.Fatalf("expected the failure path to record the failure, got %#v", current.Status)
 	}
-	for _, name := range []string{"smoke-sync-oldest", "smoke-sync-middle"} {
-		assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: name}, &batchv1.Job{})
-	}
+	// keepJobs=2 retains the newest two regardless of outcome; only the
+	// oldest owned Job goes, and the foreign one is never touched.
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-sync-oldest"}, &batchv1.Job{})
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentJob}, &batchv1.Job{})
-	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-sync-1756147200"}, &batchv1.Job{})
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-sync-succeeded"}, &batchv1.Job{})
+	get(t, ctx, fakeClient, client.ObjectKeyFromObject(foreign), &batchv1.Job{})
 }
 
 // TestVolumeSnapshotClassNameIsRequired: the CRD no longer defaults
@@ -1007,8 +1010,9 @@ func TestPublishSchemaInCRDs(t *testing.T) {
 				t.Fatal("podTemplate.spec.containers must carry the full corev1 schema")
 			}
 
-			// The declaration-time presence CEL rule on the service spec
-			// (key present -> podTemplate.spec present).
+			// The declaration-time presence CEL rules: the http key admits
+			// either a serving podTemplate.spec or a redirect; the rsync key
+			// (validated at the services level) keeps requiring podTemplate.spec.
 			rules, _ := http["x-kubernetes-validations"].([]interface{})
 			messages := map[string]bool{}
 			for _, rule := range rules {
@@ -1018,8 +1022,33 @@ func TestPublishSchemaInCRDs(t *testing.T) {
 					}
 				}
 			}
-			if !messages["podTemplate.spec is required when the service key is declared"] {
-				t.Fatalf("podTemplate presence CEL rule missing, got %#v", rules)
+			if !messages["podTemplate.spec or redirect is required when the http service key is declared"] {
+				t.Fatalf("http either-or CEL rule missing, got %#v", rules)
+			}
+			// Only the Mirror CRD has an rsync key; its podTemplate presence
+			// rule moved to the services level.
+			if crd == "mirrors.zjusct.io_mirrors.yaml" {
+				servicesRules, _ := services["x-kubernetes-validations"].([]interface{})
+				rsyncRule := false
+				for _, rule := range servicesRules {
+					if r, ok := rule.(map[string]interface{}); ok {
+						if ruleText, _ := r["rule"].(string); ruleText == "!has(self.rsync) || has(self.rsync.podTemplate.spec)" {
+							rsyncRule = true
+						}
+					}
+				}
+				if !rsyncRule {
+					t.Fatalf("rsync podTemplate presence CEL rule missing, got %#v", servicesRules)
+				}
+			}
+			// The redirect field carries the PreciseHostname shape so its
+			// value maps onto the generated RequestRedirect filter verbatim.
+			redirect, _ := httpProperties["redirect"].(map[string]interface{})
+			if redirect == nil {
+				t.Fatalf("services.http.redirect schema missing, got %v", httpProperties)
+			}
+			if pattern, _ := redirect["pattern"].(string); pattern != `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` {
+				t.Fatalf("redirect must carry the PreciseHostname pattern, got %v", redirect["pattern"])
 			}
 		})
 	}

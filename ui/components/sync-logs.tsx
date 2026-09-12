@@ -5,10 +5,19 @@ import { ArrowDown, RefreshCw } from 'lucide-react';
 
 interface Container { name: string; init: boolean; state: 'waiting' | 'running' | 'terminated' }
 interface Pod { name: string; uid: string; containers: Container[] }
-interface Source { job?: string; jobUID?: string; startedAt?: string; current: boolean; phase?: string; message?: string; pods: Pod[] }
+interface Job { name: string; uid: string; startedAt?: string; finishedAt?: string; result?: string; current: boolean }
+interface Source { job?: string; jobUID?: string; startedAt?: string; current: boolean; phase?: string; message?: string; jobs: Job[]; pods: Pod[] }
 const minHeight = 160;
 const maxHeight = 900;
 const heightKey = 'falcon-log-height';
+
+// Job names are <mirror>-sync-<unix-seconds>; the trailing timestamp is the
+// readable identity (foreign shapes fall back to the raw name).
+function jobLabel(job: Job) {
+  const ts = Number(job.name.split('-').pop());
+  const when = Number.isFinite(ts) && ts > 0 ? new Date(ts * 1000).toLocaleString() : job.name;
+  return job.result ? `${when} · ${job.result}` : when;
+}
 
 async function responseError(response: Response) {
   try { return (await response.json()).error || `Log request failed (${response.status})`; }
@@ -18,6 +27,7 @@ async function responseError(response: Response) {
 export function SyncLogs({ mirrorId }: { mirrorId: string }) {
   const [source, setSource] = useState<Source | null>(null);
   const [sourceError, setSourceError] = useState('');
+  const [jobName, setJobName] = useState('');
   const [podUID, setPodUID] = useState('');
   const [containerName, setContainerName] = useState('');
   const [lines, setLines] = useState(1000);
@@ -33,6 +43,7 @@ export function SyncLogs({ mirrorId }: { mirrorId: string }) {
   const viewport = useRef<HTMLPreElement>(null);
   const drag = useRef<{ y: number; height: number } | null>(null);
   const base = `/api/mirrors/${encodeURIComponent(mirrorId)}/logs`;
+  const sourceURL = jobName ? `${base}?job=${encodeURIComponent(jobName)}` : base;
 
   useEffect(() => {
     try { const value = Number(localStorage.getItem(heightKey)); if (value >= minHeight && value <= maxHeight) setHeight(value); } catch {}
@@ -44,8 +55,14 @@ export function SyncLogs({ mirrorId }: { mirrorId: string }) {
     setSource(null); setSourceError('');
     async function poll() {
       try {
-        const response = await fetch(base, { signal: abort.signal });
-        if (!response.ok) throw new Error(await responseError(response));
+        const response = await fetch(sourceURL, { signal: abort.signal });
+        if (!response.ok) {
+          if (response.status === 404 && jobName) {
+            setJobName(''); setPodUID(''); setContainerName('');
+            throw new Error('The selected Job is no longer retained; showing the latest one.');
+          }
+          throw new Error(await responseError(response));
+        }
         const next: Source = await response.json();
         if (abort.signal.aborted) return;
         setSource(previous => JSON.stringify(previous) === JSON.stringify(next) ? previous : next);
@@ -56,8 +73,9 @@ export function SyncLogs({ mirrorId }: { mirrorId: string }) {
     }
     poll();
     return () => { abort.abort(); clearTimeout(timer); };
-  }, [base, refresh]);
+  }, [sourceURL, jobName, refresh]);
 
+  const job = source?.jobs.find(j => j.name === jobName) || source?.jobs[0];
   const pod = source?.pods.find(p => p.uid === podUID) || source?.pods[0];
   const container = pod?.containers.find(c => c.name === containerName) || pod?.containers[0];
   const selectedPodName = pod?.name;
@@ -136,9 +154,10 @@ export function SyncLogs({ mirrorId }: { mirrorId: string }) {
           <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Sync Logs</h3>
           <button type="button" aria-label="Refresh logs" title="Refresh logs" onClick={() => setRefresh(v => v + 1)} className="rounded border border-border p-1.5 hover:bg-accent"><RefreshCw className="h-4 w-4" aria-hidden="true" /></button>
         </div>
-        {source?.job && <div className="text-xs text-muted-foreground break-all">{source.current ? 'Current Job' : 'Latest retained Job'}: <span className="font-mono">{source.job}</span>{source.startedAt && <> · <time dateTime={source.startedAt}>{new Date(source.startedAt).toLocaleString()}</time></>}</div>}
+        {source?.job && <div className="text-xs text-muted-foreground break-all">{source.current ? 'Current Job' : jobName ? 'Retained Job' : 'Latest retained Job'}: <span className="font-mono">{source.job}</span>{source.startedAt && <> · <time dateTime={source.startedAt}>{new Date(source.startedAt).toLocaleString()}</time></>}</div>}
         {source?.message && <p className="text-xs text-muted-foreground">{source.message}{source.phase && ` Current phase: ${source.phase}.`}</p>}
         <div className="flex flex-wrap items-center gap-3 text-xs">
+          {(source?.jobs.length || 0) > 1 && <label className="flex items-center gap-1">Job<select aria-label="Log Job" value={job?.name || ''} onChange={e => { setJobName(e.target.value); setPodUID(''); setContainerName(''); }} className={`${field} max-w-72`}>{source?.jobs.map(j => <option key={j.uid} value={j.name}>{jobLabel(j)}{j.current ? ' · current' : ''}</option>)}</select></label>}
           {(source?.pods.length || 0) > 1 && <label className="flex items-center gap-1">Pod<select aria-label="Log Pod" value={pod?.uid || ''} onChange={e => { setPodUID(e.target.value); setContainerName(''); }} className={`${field} max-w-64`}>{source?.pods.map(p => <option key={p.uid} value={p.uid}>{p.name}</option>)}</select></label>}
           <label className="flex items-center gap-1">Container<select aria-label="Log container" disabled={!container} value={container?.name || ''} onChange={e => setContainerName(e.target.value)} className={field}>{!container && <option value="">None</option>}{pod?.containers.map(c => <option key={c.name} value={c.name}>{c.name}{c.init ? ' (init)' : ''}</option>)}</select></label>
           <label className="flex items-center gap-1">Lines<select aria-label="Log lines" value={lines} onChange={e => setLines(Number(e.target.value))} className={field}>{[100, 1000, 2500].map(n => <option key={n}>{n}</option>)}</select></label>

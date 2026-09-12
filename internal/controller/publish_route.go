@@ -101,7 +101,23 @@ func validatePublishPodTemplate(template *corev1.PodTemplateSpec, path *field.Pa
 	return errs
 }
 
-// ensurePublishRouteFor idempotently maintains the publish HTTPRoute
+// pathPrefixMatches builds one PathPrefix match per public path prefix
+// (canonical first, then aliases in declaration order — matches within a rule
+// are OR).
+func pathPrefixMatches(pathPrefixes []string) []gatewayv1.HTTPRouteMatch {
+	matches := make([]gatewayv1.HTTPRouteMatch, 0, len(pathPrefixes))
+	for _, prefix := range pathPrefixes {
+		matches = append(matches, gatewayv1.HTTPRouteMatch{
+			Path: &gatewayv1.HTTPPathMatch{
+				Type:  ptr.To(gatewayv1.PathMatchPathPrefix),
+				Value: ptr.To(prefix),
+			},
+		})
+	}
+	return matches
+}
+
+// ensureRouteWithRules idempotently maintains the publish HTTPRoute
 // (<base>-publish) of one published Mirror or ProxyMirror in the owner's
 // namespace:
 //
@@ -112,33 +128,20 @@ func validatePublishPodTemplate(template *corev1.PodTemplateSpec, path *field.Pa
 //   - parentRefs: [config publish.gatewayRef] (namespace omitted when it
 //     equals the CR namespace);
 //   - hostnames: config publish.hostnames;
-//   - one rule with one PathPrefix match PER public path (canonical first,
-//     then aliases in declaration order — matches within a rule are OR),
-//     all pointing at Service <base>-publish-http port 80.
+//   - the caller's rules (serving or redirect mode of the same object —
+//     switching modes rewrites the rules in place and never leaves two
+//     routes competing for the same paths).
 //
-// It is the caller's responsibility to invoke this only when HTTP publishing
+// It is the caller's responsibility to invoke this only when an HTTP endpoint
 // is desired and config.PublishEnabled() is true.
-func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record.EventRecorder, scheme *runtime.Scheme, cfg *config.Config, owner client.Object, pathPrefixes []string) error {
+func ensureRouteWithRules(ctx context.Context, c client.Client, recorder record.EventRecorder, scheme *runtime.Scheme, cfg *config.Config, owner client.Object, rules []gatewayv1.HTTPRouteRule, detail string) error {
 	base := childBase(owner.GetName())
 	routeName := resourceName(base, "publish")
 	routeKey := types.NamespacedName{Namespace: owner.GetNamespace(), Name: routeName}
 	route := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: routeKey.Namespace, Name: routeKey.Name}}
-	// The route always targets the http service: the rsync service is
-	// Service-only and never routed.
-	httpServiceName := publishChildName(base, PublishProtocolHTTP)
 
 	labels := objectLabels(base, publishRole(PublishProtocolHTTP))
 	maps.Copy(labels, cfg.Publish.Labels)
-
-	matches := make([]gatewayv1.HTTPRouteMatch, 0, len(pathPrefixes))
-	for _, prefix := range pathPrefixes {
-		matches = append(matches, gatewayv1.HTTPRouteMatch{
-			Path: &gatewayv1.HTTPPathMatch{
-				Type:  ptr.To(gatewayv1.PathMatchPathPrefix),
-				Value: ptr.To(prefix),
-			},
-		})
-	}
 
 	op, err := controllerutil.CreateOrUpdate(ctx, c, route, func() error {
 		route.Labels = labels
@@ -155,20 +158,7 @@ func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record
 				ParentRefs: []gatewayv1.ParentReference{publishGatewayParentRef(cfg, owner.GetNamespace())},
 			},
 			Hostnames: hostnamesAsGatewayHostnames(cfg.Publish.Hostnames),
-			Rules: []gatewayv1.HTTPRouteRule{{
-				Matches: matches,
-				BackendRefs: []gatewayv1.HTTPBackendRef{{
-					BackendRef: gatewayv1.BackendRef{
-						BackendObjectReference: gatewayv1.BackendObjectReference{
-							Group: ptr.To(gatewayv1.Group("")),
-							Kind:  ptr.To(gatewayv1.Kind("Service")),
-							Name:  gatewayv1.ObjectName(httpServiceName),
-							Port:  ptr.To(gatewayv1.PortNumber(publishServicePort)),
-						},
-						Weight: ptr.To(int32(1)), // Gateway API defaults this to 1; set it explicitly for idempotence.
-					},
-				}},
-			}},
+			Rules:     rules,
 		}
 		return controllerutil.SetControllerReference(owner, route, scheme)
 	})
@@ -179,13 +169,61 @@ func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record
 		switch op {
 		case controllerutil.OperationResultCreated:
 			recorder.Eventf(owner, corev1.EventTypeNormal, "PublishRouteCreated",
-				"Created publish HTTPRoute %s/%s (PathPrefix /%s)", routeKey.Namespace, routeKey.Name, owner.GetName())
+				"Created publish HTTPRoute %s/%s (%s)", routeKey.Namespace, routeKey.Name, detail)
 		case controllerutil.OperationResultUpdated:
 			recorder.Eventf(owner, corev1.EventTypeNormal, "PublishRouteUpdated",
 				"Updated publish HTTPRoute %s/%s", routeKey.Namespace, routeKey.Name)
 		}
 	}
 	return nil
+}
+
+// ensurePublishRouteFor maintains the SERVING-mode publish HTTPRoute: one rule
+// with one PathPrefix match per public path, all pointing at Service
+// <base>-publish-http port 80. The route always targets the http service: the
+// rsync service is Service-only and never routed.
+func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record.EventRecorder, scheme *runtime.Scheme, cfg *config.Config, owner client.Object, pathPrefixes []string) error {
+	httpServiceName := publishChildName(childBase(owner.GetName()), PublishProtocolHTTP)
+	rules := []gatewayv1.HTTPRouteRule{{
+		Matches: pathPrefixMatches(pathPrefixes),
+		BackendRefs: []gatewayv1.HTTPBackendRef{{
+			BackendRef: gatewayv1.BackendRef{
+				BackendObjectReference: gatewayv1.BackendObjectReference{
+					Group: ptr.To(gatewayv1.Group("")),
+					Kind:  ptr.To(gatewayv1.Kind("Service")),
+					Name:  gatewayv1.ObjectName(httpServiceName),
+					Port:  ptr.To(gatewayv1.PortNumber(publishServicePort)),
+				},
+				Weight: ptr.To(int32(1)), // Gateway API defaults this to 1; set it explicitly for idempotence.
+			},
+		}},
+	}}
+	return ensureRouteWithRules(ctx, c, recorder, scheme, cfg, owner, rules, fmt.Sprintf("PathPrefix /%s", owner.GetName()))
+}
+
+// ensureRedirectRouteFor maintains the REDIRECT-mode publish HTTPRoute: the
+// same object as the serving variant (name, labels, annotations, parentRef,
+// hostnames), but the single rule answers every matched path with a
+// RequestRedirect filter instead of backendRefs. Scheme and path stay unset
+// in the filter: the gateway then preserves the request scheme (http stays
+// http, https stays https) and reuses the request path as-is, so every public
+// path — canonical and aliases alike, matches within a rule being OR — maps
+// to the same path on the redirect hostname over the incoming scheme. The
+// redirect is temporary ops tooling (e.g. migrating data across nodes), hence
+// the explicit 302: clients must not cache it.
+func ensureRedirectRouteFor(ctx context.Context, c client.Client, recorder record.EventRecorder, scheme *runtime.Scheme, cfg *config.Config, owner client.Object, pathPrefixes []string, hostname string) error {
+	rules := []gatewayv1.HTTPRouteRule{{
+		Matches: pathPrefixMatches(pathPrefixes),
+		Filters: []gatewayv1.HTTPRouteFilter{{
+			Type: gatewayv1.HTTPRouteFilterRequestRedirect,
+			RequestRedirect: &gatewayv1.HTTPRequestRedirectFilter{
+				Hostname: ptr.To(gatewayv1.PreciseHostname(hostname)),
+				// Gateway API defaults this to 302; set it explicitly for idempotence.
+				StatusCode: ptr.To(302),
+			},
+		}},
+	}}
+	return ensureRouteWithRules(ctx, c, recorder, scheme, cfg, owner, rules, fmt.Sprintf("302 /%s -> %s", owner.GetName(), hostname))
 }
 
 // publishGatewayParentRef builds the single parentRef pointing at the
@@ -214,25 +252,44 @@ func hostnamesAsGatewayHostnames(hostnames []string) []gatewayv1.Hostname {
 	return out
 }
 
-// ensurePublishedMirrorRoute guards the Mirror-specific invocation: only
-// published Mirrors (status.activePVC non-empty) get a publish route, exposing
-// the canonical /<mirror name> path first and every declared http alias after
-// it (in declaration order).
+// ensurePublishedMirrorRoute guards the Mirror-specific invocation of the
+// publish route, in whichever mode the http service declares. Published
+// serving Mirrors (status.activePVC non-empty) get the serving route,
+// exposing the canonical /<mirror name> path first and every declared http
+// alias after it (in declaration order). Redirect-mode Mirrors get the
+// redirect variant instead, regardless of publication state — no workload
+// depends on it.
 func ensurePublishedMirrorRoute(ctx context.Context, r *MirrorReconciler, mirror *mirrorv1alpha1.Mirror) error {
 	if !r.Config.PublishEnabled() {
 		return nil
 	}
-	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, mirror, mirrorRoutePaths(mirror))
+	// A parked redirect next to a serving podTemplate is legal but inert:
+	// say so, so a stale field cannot confuse an operator mid-incident.
+	if http := mirror.Spec.Publish.HTTP; r.Recorder != nil && http != nil && http.Serving() && http.Redirect != "" {
+		r.Recorder.Event(mirror, corev1.EventTypeNormal, "RedirectIgnored",
+			"publish.http.redirect is ignored while podTemplate serves")
+	}
+	paths := mirrorRoutePaths(mirror)
+	if hostname, ok := mirror.Spec.Publish.HTTP.RedirectActive(); ok {
+		return ensureRedirectRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, mirror, paths, hostname)
+	}
+	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, mirror, paths)
 }
 
-// ensureReadyProxyRoute is the ProxyMirror-specific invocation. The route is
+// ensureReadyProxyRoute is the ProxyMirror-specific invocation, serving or
+// redirect mode like ensurePublishedMirrorRoute. In serving mode the route is
 // created while the Deployment converges so both resources can become ready
-// in parallel. The canonical path and aliases have the same semantics as Mirror.
+// in parallel. The canonical path and aliases have the same semantics as
+// Mirror.
 func ensureReadyProxyRoute(ctx context.Context, r *ProxyMirrorReconciler, proxy *mirrorv1alpha1.ProxyMirror) error {
 	if !r.Config.PublishEnabled() {
 		return nil
 	}
-	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, proxy, append([]string{"/" + proxy.GetName()}, proxyHTTPAliases(proxy)...))
+	paths := append([]string{"/" + proxy.GetName()}, proxyHTTPAliases(proxy)...)
+	if hostname, ok := proxy.Spec.Publish.HTTP.RedirectActive(); ok {
+		return ensureRedirectRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, proxy, paths, hostname)
+	}
+	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, proxy, paths)
 }
 
 // deletePublishRouteFor removes the deterministic route when HTTP publishing

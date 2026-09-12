@@ -79,13 +79,18 @@ spec:
                   the fixed keys "http" and "rsync" (see MirrorServicesSpec). With every
                   key absent (including an entirely absent services object) the mirror
                   is sync-only: synchronization produces a ready snapshot, without a clone
-                  PVC or publish Deployment/Service/HTTPRoute.
+                  PVC or publish Deployment/Service/HTTPRoute. An http key in redirect
+                  mode (no podTemplate, a redirect hostname) deploys nothing either: the
+                  publish HTTPRoute 302-redirects the public paths away while
+                  synchronization (and any rsync service) continues.
                 properties:
                   http:
                     description: |-
                       HTTP is the HTTP publish service (web server, git http-backend via
                       fastcgi, ...). It owns the publish HTTPRoute when enabled, publishing the
-                      canonical /<mirror name> path plus any declared aliases.
+                      canonical /<mirror name> path plus any declared aliases — either by
+                      forwarding to the publish Deployment (serving mode) or by 302-redirecting
+                      every public path to the configured hostname (redirect mode).
                     properties:
                       aliases:
                         description: |-
@@ -8746,6 +8751,19 @@ spec:
                             - containers
                             type: object
                         type: object
+                      redirect:
+                        description: |-
+                          Redirect is the bare hostname every public path of the http service is
+                          302-redirected to in redirect mode (no serving podTemplate declared;
+                          a declared podTemplate ignores it). It is a lowercase DNS hostname
+                          like the gateway API's PreciseHostname — no scheme, port, or path:
+                          the redirect preserves the request scheme (http stays http,
+                          https stays https) and reuses the request path unchanged, so every
+                          public path maps to the same path on this host.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
                       replicas:
                         default: 1
                         format: int32
@@ -8754,9 +8772,9 @@ spec:
                         type: integer
                     type: object
                     x-kubernetes-validations:
-                    - message: podTemplate.spec is required when the service key is
-                        declared
-                      rule: has(self.podTemplate.spec)
+                    - message: podTemplate.spec or redirect is required when the http
+                        service key is declared
+                      rule: has(self.podTemplate.spec) || has(self.redirect)
                   rsync:
                     description: |-
                       Rsync is the rsync publish service. It only gets a Deployment and a
@@ -17404,11 +17422,11 @@ spec:
                         minimum: 1
                         type: integer
                     type: object
-                    x-kubernetes-validations:
-                    - message: podTemplate.spec is required when the service key is
-                        declared
-                      rule: has(self.podTemplate.spec)
                 type: object
+                x-kubernetes-validations:
+                - message: podTemplate.spec is required when the rsync service key
+                    is declared
+                  rule: '!has(self.rsync) || has(self.rsync.podTemplate.spec)'
               storage:
                 properties:
                   publishStorageClassName:
@@ -17668,7 +17686,8 @@ spec:
                   Job, symmetric to the publish services' podTemplate. There are no placement
                   fields: sync pods reference the sync PVC, so the scheduler handles locality
                   natively (WaitForFirstConsumer decides the volume's node on first supply;
-                  the bound PV's nodeAffinity pins every later sync pod) — see docs/spec/k8s.md.
+                  the bound PV's nodeAffinity pins every later sync pod) — see the
+                  "存储的局部性" (storage locality) section of the documentation.
                 properties:
                   failureRetryLimit:
                     default: 3
@@ -17682,14 +17701,18 @@ spec:
                     type: integer
                   interval:
                     type: string
-                  keepFailedJobs:
-                    default: 1
+                  keepJobs:
+                    default: 3
                     description: |-
-                      KeepFailedJobs is the number of newest failed sync Jobs (by creation
-                      time) the controller retains for debugging. After every sync run
-                      reaches a terminal state, older failed Jobs are deleted (background
-                      propagation removes their pods). Succeeded Jobs are untouched: they are
-                      pruned with their snapshot generation. 0 keeps no failed Jobs.
+                      KeepJobs is the number of newest sync Jobs (by creation time, any
+                      outcome) the controller retains as synchronization history — status
+                      inspection and log browsing. After every sync run reaches a terminal
+                      state, older Jobs are deleted (background propagation removes their
+                      pods, and with them the logs). Jobs are pruned by this count alone:
+                      snapshot retention never deletes Jobs, so a Job may outlive its
+                      snapshot generation (logs are cheap) or be pruned while its snapshot
+                      is still retained (a small count trims history faster than storage).
+                      0 keeps no Jobs.
                     format: int32
                     minimum: 0
                     type: integer
@@ -26254,7 +26277,7 @@ spec:
                 required:
                 - failureRetryLimit
                 - interval
-                - keepFailedJobs
+                - keepJobs
                 - retryInterval
                 - timeout
                 type: object

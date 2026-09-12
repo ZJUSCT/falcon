@@ -72,7 +72,7 @@ func TestRetentionCountsReadySnapshotsAndProtectsLiveGenerations(t *testing.T) {
 	}
 }
 
-func TestRetentionWaitsForCloneDeletionAndKeepsFailedJobPolicy(t *testing.T) {
+func TestRetentionWaitsForCloneDeletionAndNeverPrunesJobs(t *testing.T) {
 	m := testMirror()
 	m.UID = "mirror-uid"
 	m.Spec.Storage.Retention = 1
@@ -108,7 +108,9 @@ func TestRetentionWaitsForCloneDeletionAndKeepsFailedJobPolicy(t *testing.T) {
 		}
 	}
 	assertNotFound(t, t.Context(), c, client.ObjectKeyFromObject(old), &snapshotv1.VolumeSnapshot{})
-	assertNotFound(t, t.Context(), c, client.ObjectKeyFromObject(job), &batchv1.Job{})
+	// Jobs are synchronization history and outlive their snapshot generation:
+	// snapshot retention never deletes them (pruneJobs owns that policy).
+	get(t, t.Context(), c, client.ObjectKeyFromObject(job), &batchv1.Job{})
 	get(t, t.Context(), c, client.ObjectKeyFromObject(failed), &batchv1.Job{})
 }
 

@@ -285,3 +285,53 @@ func findCondition(conditions []metav1.Condition, conditionType string) *metav1.
 	}
 	return nil
 }
+
+// TestProxyMirrorRedirectModeRedirectsWithoutWorkload: a redirect-mode proxy
+// http key deploys no Deployment/Service; the redirect route is the whole
+// endpoint and becomes Ready on gateway acceptance, while the declared cache
+// PVC keeps being maintained (a temporary redirect preserves the cache for
+// the switch back to serving).
+func TestProxyMirrorRedirectModeRedirectsWithoutWorkload(t *testing.T) {
+	ctx := context.Background()
+	proxy := testProxyMirror()
+	proxy.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
+	proxy.Spec.Publish.HTTP.Redirect = "mirrors.cernet.edu.cn"
+	proxy.Spec.Publish.HTTP.Aliases = []mirrorv1alpha1.MirrorHTTPAlias{"/pypi-files"}
+	scheme := testProxyScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.ProxyMirror{}, &appsv1.Deployment{}).
+		WithObjects(proxy).
+		Build()
+	reconciler := &ProxyMirrorReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(20),
+		Now:      func() time.Time { return time.Now().UTC() },
+		Config:   testConfig(),
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: proxy.Namespace, Name: proxy.Name}}
+
+	reconcileProxy(t, ctx, reconciler, request) // cache PVC + redirect route
+	claim := &corev1.PersistentVolumeClaim{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-cache"}, claim)
+	if len(claim.OwnerReferences) != 1 || claim.OwnerReferences[0].Kind != "ProxyMirror" {
+		t.Fatalf("the cache PVC must stay owned and maintained across a redirect: %#v", claim.OwnerReferences)
+	}
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-publish-http"}, &appsv1.Deployment{})
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-publish-http"}, &corev1.Service{})
+	route := &gatewayv1.HTTPRoute{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-publish"}, route)
+	assertRedirectRouteShape(t, route, proxy, []string{"/pypi-proxy", "/pypi-files"}, "mirrors.cernet.edu.cn")
+	pending := getProxyMirror(t, ctx, fakeClient, request.NamespacedName)
+	if ready := findCondition(pending.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "RedirectProgressing" {
+		t.Fatalf("a redirect proxy awaits route acceptance as Ready=False/RedirectProgressing, got %#v", pending.Status.Conditions)
+	}
+
+	markRouteAccepted(t, ctx, fakeClient, proxy.Namespace, "pypi-proxy-publish")
+	reconcileProxy(t, ctx, reconciler, request)
+	current := getProxyMirror(t, ctx, fakeClient, request.NamespacedName)
+	if ready := findCondition(current.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != "RedirectActive" {
+		t.Fatalf("an accepted redirect route must make the proxy Ready=True/RedirectActive, got %#v", current.Status.Conditions)
+	}
+}

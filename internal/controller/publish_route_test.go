@@ -1170,3 +1170,329 @@ func TestGatewayRejectionSelfHeals(t *testing.T) {
 		t.Fatalf("expected Ready=True/Published after self-heal, got %#v", ready)
 	}
 }
+
+// assertRedirectRouteShape pins the REDIRECT-mode HTTPRoute shape: the same
+// object identity and stamps as the serving route, but one rule answering
+// every public path with a RequestRedirect filter — hostname plus an explicit
+// 302, scheme/path/port unset so the gateway preserves the request scheme and
+// reuses the request path — and no backendRefs at all.
+func assertRedirectRouteShape(t *testing.T, route *gatewayv1.HTTPRoute, owner client.Object, wantPaths []string, wantHostname string) {
+	t.Helper()
+	if len(route.OwnerReferences) != 1 || route.OwnerReferences[0].UID != owner.GetUID() || !ptr.Deref(route.OwnerReferences[0].Controller, false) {
+		t.Fatalf("route must be owned (controller=true) by the CR: %#v", route.OwnerReferences)
+	}
+	if route.Labels["publish.zone"] != "campus" || route.Labels[ComponentLabel] != "publish-http" {
+		t.Errorf("route labels must merge child + publish.labels: %v", route.Labels)
+	}
+	if route.Annotations["publish.example.com/note"] != "stamped" {
+		t.Errorf("route annotations must carry publish.annotations: %v", route.Annotations)
+	}
+	if len(route.Spec.ParentRefs) != 1 || string(route.Spec.ParentRefs[0].Name) != "nginx-gateway" {
+		t.Fatalf("parentRef wrong: %#v", route.Spec.ParentRefs)
+	}
+	if len(route.Spec.Hostnames) != 2 || route.Spec.Hostnames[0] != "mirrors.zjusct.io" || route.Spec.Hostnames[1] != "mirror.zju.edu.cn" {
+		t.Errorf("hostnames wrong: %v", route.Spec.Hostnames)
+	}
+	if len(route.Spec.Rules) != 1 {
+		t.Fatalf("want one rule covering every public path, got %#v", route.Spec.Rules)
+	}
+	rule := route.Spec.Rules[0]
+	if len(rule.Matches) != len(wantPaths) {
+		t.Fatalf("want %d matches, got %#v", len(wantPaths), rule.Matches)
+	}
+	for i, want := range wantPaths {
+		if match := rule.Matches[i]; match.Path == nil ||
+			ptr.Deref(match.Path.Type, "") != gatewayv1.PathMatchPathPrefix || ptr.Deref(match.Path.Value, "") != want {
+			t.Errorf("match %d must be PathPrefix %s, got %#v", i, want, match.Path)
+		}
+	}
+	if len(rule.BackendRefs) != 0 {
+		t.Errorf("redirect rule must carry no backendRefs: %#v", rule.BackendRefs)
+	}
+	if len(rule.Filters) != 1 || rule.Filters[0].Type != gatewayv1.HTTPRouteFilterRequestRedirect || rule.Filters[0].RequestRedirect == nil {
+		t.Fatalf("want exactly one RequestRedirect filter, got %#v", rule.Filters)
+	}
+	filter := rule.Filters[0].RequestRedirect
+	if string(ptr.Deref(filter.Hostname, "")) != wantHostname {
+		t.Errorf("redirect hostname = %v, want %s", filter.Hostname, wantHostname)
+	}
+	if ptr.Deref(filter.StatusCode, 0) != 302 {
+		t.Errorf("redirect status code = %v, want an explicit 302", filter.StatusCode)
+	}
+	if filter.Scheme != nil || filter.Path != nil || filter.Port != nil {
+		t.Errorf("scheme/path/port must stay unset (request scheme preserved, path reused as-is): %#v", filter)
+	}
+}
+
+// TestMirrorRedirectModeServesRouteWithoutWorkloads: a redirect-mode http key
+// (no podTemplate, a redirect hostname) runs no publication pipeline — no
+// clone PVC, no Deployment/Service — and its route covers the canonical path
+// plus aliases; gateway acceptance makes the mirror Ready, no snapshot
+// involved.
+func TestMirrorRedirectModeServesRouteWithoutWorkloads(t *testing.T) {
+	ctx := context.Background()
+	mirror := testMirror()
+	mirror.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
+	mirror.Spec.Publish.HTTP.Redirect = "mirrors.cernet.edu.cn"
+	mirror.Spec.Publish.HTTP.Aliases = []mirrorv1alpha1.MirrorHTTPAlias{"/debian-cd"}
+	mirror.Finalizers = []string{MirrorFinalizer}
+	// A terminal last attempt keeps the bootstrap sync from preempting the
+	// readiness assertions; a redirect mirror still synchronizes like any
+	// other, orthogonally to its route.
+	mirror.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: mirror.Generation,
+		WorkPVC:            "smoke-sync",
+		LastAttempt:        &mirrorv1alpha1.MirrorSyncStatus{JobName: "seed", Phase: mirrorv1alpha1.SyncPhaseCancelled},
+	}
+	scheme := testScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
+		WithObjects(mirror).
+		Build()
+	reconciler := &MirrorReconciler{
+		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
+		Now:    func() time.Time { return time.Now().UTC() },
+		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
+
+	reconcile(t, ctx, reconciler, request) // creates the redirect route
+	route := &gatewayv1.HTTPRoute{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
+	assertRedirectRouteShape(t, route, mirror, []string{"/smoke", "/debian-cd"}, "mirrors.cernet.edu.cn")
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &corev1.Service{})
+	pending := getMirror(t, ctx, fakeClient, request.NamespacedName)
+	if ready := findCondition(pending.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "HTTPRoutePending" {
+		t.Fatalf("a redirect mirror awaits route acceptance as Ready=False/HTTPRoutePending, got %#v", pending.Status.Conditions)
+	}
+
+	markRouteAccepted(t, ctx, fakeClient, mirror.Namespace, "smoke-publish")
+	reconcile(t, ctx, reconciler, request)
+	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
+	if ready := findCondition(current.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != "RedirectActive" {
+		t.Fatalf("an accepted redirect route must be Ready=True/RedirectActive, got %#v", current.Status.Conditions)
+	}
+
+	reconcile(t, ctx, reconciler, request) // idempotence: the shape survives
+	route = &gatewayv1.HTTPRoute{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
+	assertRedirectRouteShape(t, route, mirror, []string{"/smoke", "/debian-cd"}, "mirrors.cernet.edu.cn")
+}
+
+// TestMirrorServingModeIgnoresRedirect: a declared podTemplate wins over a
+// simultaneously declared redirect — the route forwards to the publish
+// Service and carries no redirect filter.
+func TestMirrorServingModeIgnoresRedirect(t *testing.T) {
+	ctx := context.Background()
+	mirror := testMirror()
+	mirror.Spec.Publish.HTTP.Redirect = "ignored.example.org"
+	mirror.Finalizers = []string{MirrorFinalizer}
+	mirror.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: mirror.Generation,
+		WorkPVC:            "smoke-sync",
+		ActivePVC:          "smoke-snap-1756147200",
+		ActiveSnapshot:     "smoke-snap-1756147200",
+	}
+	scheme := testScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
+		WithObjects(mirror).
+		Build()
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
+	reconciler := &MirrorReconciler{
+		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
+		Now:    func() time.Time { return time.Now().UTC() },
+		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
+
+	reconcile(t, ctx, reconciler, request)
+	markPublishDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace)
+	markRouteAccepted(t, ctx, fakeClient, mirror.Namespace, "smoke-publish")
+	reconcile(t, ctx, reconciler, request)
+
+	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
+	if ready := findCondition(current.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionTrue {
+		t.Fatalf("serving mode must stay Ready despite the parked redirect, got %#v", current.Status.Conditions)
+	}
+	route := &gatewayv1.HTTPRoute{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
+	assertPublishRouteShape(t, route, mirror, "/smoke", "smoke-publish-http")
+	if len(route.Spec.Rules[0].Filters) != 0 {
+		t.Fatalf("serving route must carry no filters: %#v", route.Spec.Rules[0].Filters)
+	}
+}
+
+// TestMirrorSwitchesServingAndRedirectModes: the publish route is ONE object
+// rewritten in place when the http service switches modes — no interval with
+// two routes competing for the same paths. Switching to redirect tears the
+// serving workloads down; switching back restores them next to the same
+// ActivePVC.
+func TestMirrorSwitchesServingAndRedirectModes(t *testing.T) {
+	ctx := context.Background()
+	mirror := testMirror()
+	mirror.Finalizers = []string{MirrorFinalizer}
+	mirror.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: mirror.Generation,
+		WorkPVC:            "smoke-sync",
+		ActivePVC:          "smoke-snap-1756147200",
+		ActiveSnapshot:     "smoke-snap-1756147200",
+	}
+	scheme := testScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
+		WithObjects(mirror).
+		Build()
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
+	reconciler := &MirrorReconciler{
+		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
+		Now:    func() time.Time { return time.Now().UTC() },
+		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
+
+	// Serving baseline.
+	reconcile(t, ctx, reconciler, request)
+	markPublishDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace)
+	markRouteAccepted(t, ctx, fakeClient, mirror.Namespace, "smoke-publish")
+	reconcile(t, ctx, reconciler, request)
+	route := &gatewayv1.HTTPRoute{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
+	assertPublishRouteShape(t, route, mirror, "/smoke", "smoke-publish-http")
+
+	// Switch to redirect: workloads go, the route is rewritten in place.
+	latest := getMirror(t, ctx, fakeClient, request.NamespacedName)
+	latest.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
+	latest.Spec.Publish.HTTP.Redirect = "mirrors.cernet.edu.cn"
+	if err := fakeClient.Update(ctx, latest); err != nil {
+		t.Fatalf("switch spec to redirect: %v", err)
+	}
+	reconcile(t, ctx, reconciler, request)
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &corev1.Service{})
+	route = &gatewayv1.HTTPRoute{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
+	assertRedirectRouteShape(t, route, mirror, []string{"/smoke"}, "mirrors.cernet.edu.cn")
+
+	// Switch back to serving: the parked redirect stays ignored, the
+	// workloads return against the retained ActivePVC.
+	latest = getMirror(t, ctx, fakeClient, request.NamespacedName)
+	latest.Spec.Publish.HTTP.PodTemplate = testMirror().Spec.Publish.HTTP.PodTemplate
+	if err := fakeClient.Update(ctx, latest); err != nil {
+		t.Fatalf("switch spec back to serving: %v", err)
+	}
+	reconcile(t, ctx, reconciler, request)
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &corev1.Service{})
+	route = &gatewayv1.HTTPRoute{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
+	assertPublishRouteShape(t, route, mirror, "/smoke", "smoke-publish-http")
+}
+
+// TestRedirectModeValidation: the controller-side mirror of the http key's
+// admission rules — the either-or between podTemplate and redirect, the
+// hostname syntax, and serving mode ignoring a parked redirect.
+func TestRedirectModeValidation(t *testing.T) {
+	// Neither a serving podTemplate nor a redirect: the key is invalid.
+	neither := testMirror()
+	neither.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
+	if errs := validateMirror(neither); len(errs) == 0 {
+		t.Fatal("an http key without podTemplate or redirect must be InvalidSpec")
+	}
+
+	// The redirect is a bare lowercase DNS hostname (IPv4 literals happen to
+	// match the shared PreciseHostname pattern and stay legal, like in the
+	// gateway API itself).
+	for _, hostname := range []string{
+		"https://mirrors.cernet.edu.cn", // scheme
+		"mirrors.cernet.edu.cn:8443",    // port
+		"mirrors.cernet.edu.cn/debian",  // path
+		"Mirrors.CERNET.Edu.CN",         // uppercase
+		"",                              // empty
+	} {
+		broken := testMirror()
+		broken.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
+		broken.Spec.Publish.HTTP.Redirect = hostname
+		if errs := validateMirror(broken); len(errs) == 0 {
+			t.Fatalf("redirect %q must be InvalidSpec", hostname)
+		}
+	}
+
+	// Serving mode ignores the redirect entirely — even a syntactically bad one.
+	serving := testMirror()
+	serving.Spec.Publish.HTTP.Redirect = "https://ignored.example.org"
+	if errs := validateMirror(serving); len(errs) != 0 {
+		t.Fatalf("serving mode must ignore the parked redirect, got %v", errs.ToAggregate())
+	}
+
+	// ProxyMirror shares the rules through MirrorHTTPServiceSpec.
+	proxy := testProxyMirror()
+	proxy.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
+	if errs := validateProxyMirror(proxy); len(errs) == 0 {
+		t.Fatal("a proxy http key without podTemplate or redirect must be InvalidSpec")
+	}
+	proxy.Spec.Publish.HTTP.Redirect = "mirrors.cernet.edu.cn"
+	if errs := validateProxyMirror(proxy); len(errs) != 0 {
+		t.Fatalf("a valid redirect hostname must pass proxy validation, got %v", errs.ToAggregate())
+	}
+}
+
+// TestMirrorRedirectWithRsyncServesBoth: an rsync service keeps publishing
+// next to a redirect-mode http key — the rsync workload runs against the
+// active PVC while the HTTP route redirects; the http workload is absent and
+// rsync availability alone drives readiness.
+func TestMirrorRedirectWithRsyncServesBoth(t *testing.T) {
+	ctx := context.Background()
+	mirror := testMirror()
+	mirror.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
+	mirror.Spec.Publish.HTTP.Redirect = "mirrors.cernet.edu.cn"
+	mirror.Spec.Publish.Rsync = &mirrorv1alpha1.MirrorServiceSpec{
+		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "rsyncd",
+				Image: "docker.io/library/busybox:1.37.0",
+				Ports: []corev1.ContainerPort{{Name: "rsync", ContainerPort: 8730, Protocol: corev1.ProtocolTCP}},
+			}},
+		}},
+	}
+	mirror.Finalizers = []string{MirrorFinalizer}
+	mirror.Status = mirrorv1alpha1.MirrorStatus{
+		ObservedGeneration: mirror.Generation,
+		WorkPVC:            "smoke-sync",
+		ActivePVC:          "smoke-snap-1756147200",
+		ActiveSnapshot:     "smoke-snap-1756147200",
+	}
+	scheme := testScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
+		WithObjects(mirror).
+		Build()
+	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
+	reconciler := &MirrorReconciler{
+		Client: fakeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(20),
+		Now:    func() time.Time { return time.Now().UTC() },
+		Config: testConfig(), SyncLimiter: NewSyncLimiter(0),
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
+
+	reconcile(t, ctx, reconciler, request)
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-rsync"}, &appsv1.Deployment{})
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-rsync"}, &corev1.Service{})
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
+	route := &gatewayv1.HTTPRoute{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
+	assertRedirectRouteShape(t, route, mirror, []string{"/smoke"}, "mirrors.cernet.edu.cn")
+
+	markDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace, "smoke-publish-rsync")
+	markRouteAccepted(t, ctx, fakeClient, mirror.Namespace, "smoke-publish")
+	reconcile(t, ctx, reconciler, request)
+	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
+	if ready := findCondition(current.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionTrue {
+		t.Fatalf("rsync availability plus an accepted redirect route must be Ready=True, got %#v", current.Status.Conditions)
+	}
+}

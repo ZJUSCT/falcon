@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -398,7 +399,7 @@ func (r *MirrorReconciler) reconcileSync(ctx context.Context, mirror *mirrorv1al
 		return ctrl.Result{}, err
 	}
 	if terminal {
-		if err := r.pruneFailedJobs(ctx, mirror); err != nil {
+		if err := r.pruneJobs(ctx, mirror); err != nil {
 			return ctrl.Result{}, err
 		}
 		if mirror.Status.CurrentSync != nil && mirror.Status.CurrentSync.Phase == mirrorv1alpha1.SyncPhaseSnapshotting {
@@ -673,7 +674,15 @@ type publicationHealth struct {
 func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirror *mirrorv1alpha1.Mirror) (publicationHealth, error) {
 	if !publishEnabled(mirror) {
 		drained, err := publishPodsDrained(ctx, r.Client, mirror)
-		return publicationHealth{progressing: !drained, reason: "HTTPDisabled", message: "no HTTP endpoint is configured; waiting for any removed workloads to drain"}, err
+		if err != nil {
+			return publicationHealth{}, err
+		}
+		// A redirect-mode http key routes without publishing: observe the
+		// redirect route instead of declaring the endpoint disabled.
+		if hostname, redirecting := mirror.Spec.Publish.HTTP.RedirectActive(); redirecting {
+			return r.redirectPublicationHealth(ctx, mirror, hostname, drained)
+		}
+		return publicationHealth{progressing: !drained, reason: "HTTPDisabled", message: "no HTTP endpoint is configured; waiting for any removed workloads to drain"}, nil
 	}
 
 	if mirror.Status.ActivePVC == "" && mirror.Status.Publication == nil {
@@ -697,7 +706,11 @@ func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirro
 		return publicationHealth{}, err
 	}
 	converged = converged && drained
-	if publishHTTPEnabled(mirror) {
+	// With http+rsync both serving, availability follows the user-facing http
+	// endpoint alone. In redirect mode there is no http workload; rsync's own
+	// availability stands, and the route is judged further down like any
+	// publish HTTPRoute.
+	if mirror.Spec.Publish.HTTP.Serving() {
 		httpOnly := mirror.DeepCopy()
 		httpOnly.Spec.Publish.Rsync = nil
 		available, _, err = observePublishChildren(ctx, r.Client, httpOnly)
@@ -735,6 +748,53 @@ func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirro
 		health.progressing = true
 		health.reason = "HTTPRouteDisabled"
 		health.message = "HTTP publishing is requested but route generation is disabled"
+		health.failure = &conditionFailure{reason: health.reason, message: health.message}
+		return health, nil
+	}
+	if err := ensurePublishedMirrorRoute(ctx, r, mirror); err != nil {
+		return publicationHealth{}, err
+	}
+	routeState, routeMessage, err := publishRouteHealth(ctx, r.Client, mirror)
+	if err != nil {
+		return publicationHealth{}, err
+	}
+	switch routeState {
+	case publishRouteRejected:
+		health.ready = false
+		health.progressing = true
+		health.reason = "HTTPRouteRejected"
+		health.message = routeMessage
+		health.failure = &conditionFailure{reason: health.reason, message: routeMessage}
+		if r.Recorder != nil {
+			r.Recorder.Event(mirror, corev1.EventTypeWarning, "HTTPRouteRejected", routeMessage)
+		}
+	case publishRoutePending:
+		health.ready = false
+		health.progressing = true
+		health.reason = "HTTPRoutePending"
+		health.message = routeMessage
+	}
+	return health, nil
+}
+
+// redirectPublicationHealth observes a redirect-mode http key of an otherwise
+// non-publishing Mirror (no serving http, no rsync): it maintains the redirect
+// publish HTTPRoute and reports the gateway's acceptance of it, mirroring the
+// serving tail of reconcileActivePublication. Readiness additionally requires
+// removed serving workloads to drain — a serving -> redirect switch tears the
+// http Deployment/Service down through cleanupDisabledPublishChildren.
+func (r *MirrorReconciler) redirectPublicationHealth(ctx context.Context, mirror *mirrorv1alpha1.Mirror, hostname string, drained bool) (publicationHealth, error) {
+	health := publicationHealth{
+		ready:       drained,
+		progressing: !drained,
+		reason:      "RedirectActive",
+		message:     fmt.Sprintf("every public path redirects to %s (302)", hostname),
+	}
+	if !r.Config.PublishEnabled() {
+		health.ready = false
+		health.progressing = true
+		health.reason = "HTTPRouteDisabled"
+		health.message = "redirect is requested but route generation is disabled"
 		health.failure = &conditionFailure{reason: health.reason, message: health.message}
 		return health, nil
 	}
@@ -849,22 +909,26 @@ func validateMirror(mirror *mirrorv1alpha1.Mirror) field.ErrorList {
 	}
 	services := mirror.Spec.Publish
 	servicesPath := path.Child("services")
-	for _, entry := range []struct {
-		key  string
-		spec *mirrorv1alpha1.MirrorServiceSpec
-	}{
-		{PublishProtocolHTTP, httpServiceSpec(services)},
-		{PublishProtocolRsync, services.Rsync},
-	} {
-		if entry.spec == nil {
-			continue
+	// The http key either serves (a containerful podTemplate; redirect ignored)
+	// or redirects (no serving podTemplate, a redirect hostname). The CRD
+	// enforces the either-or at admission (CEL on MirrorHTTPServiceSpec);
+	// these checks keep the InvalidSpec path complete for specs that bypassed it.
+	if http := services.HTTP; http != nil {
+		httpPath := servicesPath.Child("http")
+		switch {
+		case http.Serving():
+			errs = append(errs, validateMirrorService(&http.MirrorServiceSpec, httpPath)...)
+		case http.Redirect == "":
+			errs = append(errs, field.Required(httpPath, "must declare a serving podTemplate (spec.containers) or a redirect"))
+		default:
+			errs = append(errs, validateRedirectHostname(http.Redirect, httpPath.Child("redirect"))...)
 		}
-		errs = append(errs, validateMirrorService(entry.spec, servicesPath.Child(entry.key))...)
+		// Alias paths of a declared http service apply in BOTH modes; an
+		// absent key may park anything.
+		errs = append(errs, validateHTTPAliases(http, mirror.Name, httpPath.Child("aliases"))...)
 	}
-	// Alias paths of an ENABLED http service (an absent key may park
-	// anything).
-	if services.HTTP != nil {
-		errs = append(errs, validateHTTPAliases(services.HTTP, mirror.Name, servicesPath.Child("http", "aliases"))...)
+	if services.Rsync != nil {
+		errs = append(errs, validateMirrorService(services.Rsync, servicesPath.Child("rsync"))...)
 	}
 	// There is no placement validation: node locality is K8s-native on both
 	// sides (the bound PV's nodeAffinity, enforced by the scheduler). The
@@ -881,13 +945,21 @@ func publishEnabled(mirror *mirrorv1alpha1.Mirror) bool {
 	return mirror.Spec.Publish.AnyEnabled()
 }
 
-// httpServiceSpec returns the base service spec of the http key, or nil when
-// the key is absent (absent = disabled).
-func httpServiceSpec(services mirrorv1alpha1.MirrorServicesSpec) *mirrorv1alpha1.MirrorServiceSpec {
-	if services.HTTP == nil {
-		return nil
+// redirectHostnamePattern is the admission-time Pattern of the redirect field
+// — the gateway API's PreciseHostname shape (a lowercase DNS hostname; no
+// scheme, port, or path), so the value maps onto the generated
+// RequestRedirect filter hostname without further normalization.
+var redirectHostnamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
+
+// validateRedirectHostname checks the redirect target of a redirect-mode http
+// service. The schema Pattern is the admission-time gate; this mirror of it
+// keeps the InvalidSpec path complete for specs that bypassed admission.
+func validateRedirectHostname(hostname string, path *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	if len(hostname) > 253 || !redirectHostnamePattern.MatchString(hostname) {
+		errs = append(errs, field.Invalid(path, hostname, "must be a lowercase DNS hostname (no scheme, port, or path)"))
 	}
-	return &services.HTTP.MirrorServiceSpec
+	return errs
 }
 
 // validateMirrorService validates one ENABLED publish service of a Mirror

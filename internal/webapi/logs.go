@@ -3,6 +3,7 @@ package webapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +26,13 @@ type logFrame struct {
 	Error string `json:"error,omitempty"`
 }
 
+// errJobNotRetained marks an explicit ?job= selection that resolves to no
+// retained Job (pruned, foreign, or mistyped); it maps to a 404.
+var errJobNotRetained = errors.New("job not retained")
+
+// logStateRunning names the shared running state of containers and Jobs.
+const logStateRunning = "running"
+
 type LogContainer struct {
 	Name  string `json:"name"`
 	Init  bool   `json:"init"`
@@ -35,6 +43,18 @@ type LogPod struct {
 	UID        string         `json:"uid"`
 	Containers []LogContainer `json:"containers"`
 }
+
+// LogJob is one retained sync Job in the history list (newest first). The
+// selector's default is the current synchronization's Job, else the newest
+// retained one; ?job=<name> selects any other entry.
+type LogJob struct {
+	Name       string       `json:"name"`
+	UID        string       `json:"uid"`
+	StartedAt  *metav1.Time `json:"startedAt,omitempty"`
+	FinishedAt *metav1.Time `json:"finishedAt,omitempty"`
+	Result     string       `json:"result,omitempty"` // pending | running | succeeded | failed
+	Current    bool         `json:"current"`
+}
 type LogSource struct {
 	Job       string       `json:"job,omitempty"`
 	JobUID    string       `json:"jobUID,omitempty"`
@@ -42,17 +62,50 @@ type LogSource struct {
 	Current   bool         `json:"current"`
 	Phase     string       `json:"phase,omitempty"`
 	Message   string       `json:"message,omitempty"`
+	Jobs      []LogJob     `json:"jobs"`
 	Pods      []LogPod     `json:"pods"`
+}
+
+// logJobResult maps a Job's status to the selection vocabulary.
+func logJobResult(job *batchv1.Job) string {
+	for _, condition := range job.Status.Conditions {
+		switch {
+		case condition.Type == batchv1.JobComplete && condition.Status == corev1.ConditionTrue:
+			return "succeeded"
+		case condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue:
+			return "failed"
+		}
+	}
+	if job.Status.StartTime != nil {
+		return logStateRunning
+	}
+	return "pending"
+}
+
+// logJobFinished reports a terminal Job's finish time: completionTime when
+// succeeded, the JobFailed condition transition otherwise.
+func logJobFinished(job *batchv1.Job) *metav1.Time {
+	if job.Status.CompletionTime != nil {
+		return job.Status.CompletionTime
+	}
+	for _, condition := range job.Status.Conditions {
+		if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue && !condition.LastTransitionTime.IsZero() {
+			return &condition.LastTransitionTime
+		}
+	}
+	return nil
 }
 
 // Resolve from owned Jobs, not lastSync: cancelled Jobs may already be gone.
 // UID checks exclude stale children from a deleted/recreated Mirror or Job.
-func (s *Server) syncLogSource(ctx context.Context, name string) (*LogSource, error) {
+// selected names the requested Job ("" picks the current synchronization's
+// Job, else the newest retained one).
+func (s *Server) syncLogSource(ctx context.Context, name, selected string) (*LogSource, error) {
 	m := &mirrorv1alpha1.Mirror{}
 	if err := s.APIReader.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: name}, m); err != nil {
 		return nil, err
 	}
-	source := &LogSource{Pods: []LogPod{}}
+	source := &LogSource{Jobs: []LogJob{}, Pods: []LogPod{}}
 	currentName := ""
 	if c := m.Status.CurrentSync; c != nil {
 		source.Phase = c.Phase
@@ -64,22 +117,56 @@ func (s *Server) syncLogSource(ctx context.Context, name string) (*LogSource, er
 	if err := s.APIReader.List(ctx, jobs, client.InNamespace(s.Namespace), client.MatchingLabels{"mirrors.zjusct.io/mirror": m.Name, "app.kubernetes.io/component": "sync"}); err != nil {
 		return nil, err
 	}
-	var selected *batchv1.Job
+	// Newest first, so the history list and the default selection agree.
+	sort.Slice(jobs.Items, func(i, j int) bool {
+		return jobs.Items[i].CreationTimestamp.After(jobs.Items[j].CreationTimestamp.Time) ||
+			jobs.Items[i].CreationTimestamp.Equal(&jobs.Items[j].CreationTimestamp) && jobs.Items[i].Name > jobs.Items[j].Name
+	})
+	var owned []*batchv1.Job
 	for i := range jobs.Items {
 		j := &jobs.Items[i]
 		if !metav1.IsControlledBy(j, m) {
 			continue
 		}
-		if j.Name == currentName {
-			selected = j
-			source.Current = true
+		owned = append(owned, j)
+		source.Jobs = append(source.Jobs, LogJob{
+			Name:       j.Name,
+			UID:        string(j.UID),
+			StartedAt:  j.Status.StartTime,
+			FinishedAt: logJobFinished(j),
+			Result:     logJobResult(j),
+			Current:    j.Name == currentName,
+		})
+	}
+	var chosen *batchv1.Job
+	for _, j := range owned {
+		if selected != "" && j.Name == selected {
+			chosen = j
 			break
 		}
-		if selected == nil || j.CreationTimestamp.After(selected.CreationTimestamp.Time) || j.CreationTimestamp.Equal(&selected.CreationTimestamp) && j.Name > selected.Name {
-			selected = j
+	}
+	if chosen == nil && selected != "" {
+		// An explicit selection must resolve; silently falling back to the
+		// default would switch logs under the user.
+		return nil, fmt.Errorf("%w: %q is not retained for mirror %s", errJobNotRetained, selected, name)
+	}
+	if chosen == nil {
+		// Default selection: the current synchronization's Job, else the
+		// newest retained one (e.g. the current transaction has no Job yet).
+		for _, j := range owned {
+			if j.Name == currentName {
+				chosen = j
+				break
+			}
+		}
+		if chosen == nil && len(owned) > 0 {
+			chosen = owned[0]
 		}
 	}
-	if selected == nil {
+	if chosen != nil {
+		source.Current = chosen.Name == currentName && currentName != ""
+	}
+	if chosen == nil {
 		source.Message = "No retained synchronization Job is available."
 		if m.Status.CurrentSync != nil {
 			source.Message = "The current synchronization has no Job yet; no retained logs are available."
@@ -88,10 +175,10 @@ func (s *Server) syncLogSource(ctx context.Context, name string) (*LogSource, er
 		}
 		return source, nil
 	}
-	source.Job = selected.Name
-	source.JobUID = string(selected.UID)
-	source.StartedAt = selected.Status.StartTime
-	if !source.Current && m.Status.CurrentSync != nil {
+	source.Job = chosen.Name
+	source.JobUID = string(chosen.UID)
+	source.StartedAt = chosen.Status.StartTime
+	if selected == "" && !source.Current && m.Status.CurrentSync != nil {
 		source.Message = "The current synchronization has no Job; showing the latest retained Job."
 	}
 	pods := &corev1.PodList{}
@@ -103,7 +190,7 @@ func (s *Server) syncLogSource(ctx context.Context, name string) (*LogSource, er
 	})
 	for i := range pods.Items {
 		p := &pods.Items[i]
-		if !metav1.IsControlledBy(p, selected) {
+		if !metav1.IsControlledBy(p, chosen) {
 			continue
 		}
 		entry := LogPod{Name: p.Name, UID: string(p.UID), Containers: []LogContainer{}}
@@ -124,7 +211,7 @@ func logContainerState(name string, statuses []corev1.ContainerStatus) string {
 	for _, s := range statuses {
 		if s.Name == name {
 			if s.State.Running != nil {
-				return "running"
+				return logStateRunning
 			}
 			if s.State.Terminated != nil {
 				return "terminated"
@@ -151,8 +238,19 @@ func (s *Server) handleMirrorLogs(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 404, "not found")
 		return
 	}
-	source, err := s.syncLogSource(r.Context(), name)
+	// ?job= selects a retained Job by name on both endpoints (the stream
+	// re-resolves the selection so its jobUID guard matches the choice).
+	selected := r.URL.Query().Get("job")
+	if selected != "" && strings.Contains(selected, "/") {
+		writeJSONError(w, 400, "invalid job name")
+		return
+	}
+	source, err := s.syncLogSource(r.Context(), name, selected)
 	if err != nil {
+		if errors.Is(err, errJobNotRetained) {
+			writeJSONError(w, 404, err.Error())
+			return
+		}
 		writeActionError(w, err)
 		return
 	}
@@ -215,7 +313,7 @@ func (s *Server) handleMirrorLogs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
 	limit := int64(2 * 1024 * 1024)
-	stream, err := s.LogStream(ctx, s.Namespace, pod.Name, &corev1.PodLogOptions{Container: container.Name, TailLines: &lines, LimitBytes: &limit, Follow: follow && container.State == "running", Timestamps: timestamps})
+	stream, err := s.LogStream(ctx, s.Namespace, pod.Name, &corev1.PodLogOptions{Container: container.Name, TailLines: &lines, LimitBytes: &limit, Follow: follow && container.State == logStateRunning, Timestamps: timestamps})
 	if err != nil {
 		writeJSONError(w, 502, "unable to read container logs: "+err.Error())
 		return

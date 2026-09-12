@@ -1,56 +1,56 @@
-# Default values for the Falcon Helm chart.
-# All resources render into the release namespace; the controller watches
-# only that namespace (POD_NAMESPACE).
+# Default values for the Falcon chart.
+# Everything renders into the release namespace; the controller watches only
+# that namespace (POD_NAMESPACE).
+# Site identity and Gateway topology are deployment-specific and ship empty:
+# site.url is required, and every route needs a gatewayRef (or parentRefs).
 
 namespace:
-  # Create the release namespace if it does not exist.
   create: true
-  # Defaults to the release namespace (helm -n).
+  # Defaults to the release namespace.
   name: ""
 
 global:
-  # Prefix for all component image repositories; overridable per component.
   imageRegistry: ghcr.io/zjusct
   imagePullSecrets: []
-  # Gateway referenced by every generated HTTPRoute. Set namespace to ""
-  # when the Gateway lives in the release namespace.
+  # Default Gateway reference for every generated HTTPRoute; per-route
+  # gatewayRef values fall back to this one.
   gatewayRef:
-    name: nginx-gateway
-    namespace: nginx-gateway
-    sectionName: https
+    name: ""
+    namespace: ""
+    sectionName: ""
 
 nameOverride: ""
 fullnameOverride: ""
 
-# Controller (manager). Runtime configuration lives under config and is
-# rendered into the falcon-config ConfigMap; any config change rolls the Pod
-# through the checksum annotation.
-
+# Controller. Runtime configuration below is rendered into the falcon-config
+# ConfigMap; any change rolls the Deployment through a checksum annotation.
 controller:
   enabled: true
   image:
     repository: falcon
-    tag: ""            # empty = Chart.AppVersion
-    digest: ""         # optional; takes precedence over tag
+    # Empty tag defaults to Chart.AppVersion; a digest takes precedence.
+    tag: ""
+    digest: ""
     pullPolicy: IfNotPresent
   replicaCount: 1
   revisionHistoryLimit: 10
 
-  # Mirrors the internal/config Go structs; validated by the chart at render
-  # time and again at controller startup.
+  # Mirrors the internal/config Go structs; validated at render time and
+  # again at controller startup.
   config:
     log:
-      level: info                      # debug | info | warn | error
-    api:                               # probes and Services depend on these defaults
+      # debug | info | warn | error
+      level: info
+    api:
+      # Probes and Services follow the port of each address.
       metricsBindAddress: ":8080"
       healthProbeBindAddress: ":8081"
       webapiBindAddress: ":8082"
-    # Site identity: fallback values for the mirrorz site section; url must
-    # carry a scheme.
+    # MirrorZ site section; url is required and must carry a scheme.
     site:
-      url: https://mirrors.zjusct.io
-      abbr: ZJU
-      name: Zhejiang University Mirror
+      url: ""
+      abbr: ""
+      name: ""
       logo: ""
       logo_darkmode: ""
       homepage: ""
@@ -63,18 +63,16 @@ controller:
       big: ""
       disable: false
     catalog:
-      enabled: true                    # toggles GET /mirrorz.json
+      enabled: true
     sync:
-      maxConcurrent: 4                 # global sync concurrency cap; <= 0 = unlimited
-    # For every published http service the controller generates an HTTPRoute
-    # <name>-publish (PathPrefix /<name> -> Service <name>-publish-http:80);
-    # rsync services only get a Service.
+      # Global sync concurrency cap; <= 0 means unlimited.
+      maxConcurrent: 4
+    # An empty hostnames list disables publish HTTPRoute generation
+    # altogether; mirrorz reflects the request Host against the list.
     publish:
-      gatewayRef: {}                   # falls back to global.gatewayRef
-      hostnames:                       # served hostnames; mirrorz reflects the request Host
-        - mirrors.zjusct.io
-        - mirror.zju.edu.cn
-      labels: {}                       # stamped onto every publish HTTPRoute
+      gatewayRef: {}
+      hostnames: []
+      labels: {}
       annotations: {}
     auth:
       github:
@@ -83,11 +81,11 @@ controller:
         allowedUserIDs: []
 
   metrics:
-    enabled: true                      # exposes the metrics Service (:8080)
+    enabled: true
     serviceMonitor:
       enabled: true
       interval: 30s
-      labels: {}                       # extra labels for ServiceMonitor selection
+      labels: {}
 
   resources:
     requests:
@@ -97,9 +95,8 @@ controller:
 
   rbac:
     create: true
-    # Proxy-read access to kubelet stats summaries (nodes/proxy get) backing
-    # Mirror status.sizeBytes. Cluster-scoped, hence rendered as a dedicated
-    # <fullname>-node-stats ClusterRole. Disabling leaves sizeBytes empty.
+    # Cluster-scoped nodes/proxy read backing status.sizeBytes; disabling it
+    # leaves sizeBytes empty.
     nodeStats: true
 
   podAnnotations: {}
@@ -111,19 +108,22 @@ controller:
   extraVolumes: []
   extraVolumeMounts: []
 
-# ZFS usage agent: one read-only Pod per storage node feeding GET /api/usage.
-# Enabling it injects the ZFS_AGENT_SERVICE env var and endpointslices read
-# permissions into the controller.
+# ZFS usage agent: one read-only DaemonSet pod per storage node feeding
+# GET /api/usage.
 zfsAgent:
   enabled: false
   image:
     repository: zfs-agent
-    tag: ""            # empty = Chart.AppVersion
-    digest: ""         # optional; takes precedence over tag
+    # Empty tag defaults to Chart.AppVersion; a digest takes precedence.
+    tag: ""
+    digest: ""
     pullPolicy: IfNotPresent
-  extraArgs: []        # agent flags, e.g. --pools=tank, --zfs-bin=...
-  otelEndpoint: ""     # OTLP HTTP endpoint of the central collector (e.g. http://aggregator-collector.monitoring.svc:4318); empty disables metric push
-  nodeSelector: {}     # must match the zfs-localpv nodes (pools are read locally)
+  # Agent flags, e.g. --pools=tank.
+  extraArgs: []
+  # OTLP HTTP endpoint of a central collector; empty disables metric push.
+  otelEndpoint: ""
+  # Must match the zfs-localpv nodes (pools are read locally).
+  nodeSelector: {}
   tolerations: []
   resources:
     requests:
@@ -131,13 +131,14 @@ zfsAgent:
       memory: 32Mi
     limits: {}
 
-# Admin web UI: static Next.js export served by nginx on 8080.
+# Admin web UI: static Next.js export served by nginx.
 webui:
   enabled: false
   image:
     repository: falcon-ui
-    tag: ""            # empty = Chart.AppVersion
-    digest: ""         # optional; takes precedence over tag
+    # Empty tag defaults to Chart.AppVersion; a digest takes precedence.
+    tag: ""
+    digest: ""
     pullPolicy: IfNotPresent
   replicaCount: 1
   resources:
@@ -149,25 +150,22 @@ webui:
 # Admin domain route: OAuth-gated UI and read-only API.
 admin:
   enabled: false
-  host: ""             # required bare hostname when enabled=true
+  # Required bare hostname when enabled.
+  host: ""
   route:
-    gatewayRef: {}     # falls back to global.gatewayRef
-    parentRefs: []     # rendered verbatim when set; overrides gatewayRef
+    gatewayRef: {}
+    # Rendered verbatim when set; overrides gatewayRef.
+    parentRefs: []
     labels: {}
     annotations: {}
 
 # Catalog hosts publishing /mirrorz.json; by convention mirrors
 # controller.config.publish.hostnames.
 catalog:
-  enabled: true
-  hosts:
-    - mirrors.zjusct.io
-    - mirror.zju.edu.cn
+  enabled: false
+  hosts: []
   route:
     gatewayRef: {}
     parentRefs: []
     labels: {}
     annotations: {}
-
-# Mirror/ProxyMirror CRs are not part of this chart. CRDs ship in crds/ and
-# are not upgraded by helm — apply them manually on CRD changes.

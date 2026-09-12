@@ -5,7 +5,6 @@ import (
 	"sort"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -18,6 +17,8 @@ const volumeSnapshotKind = "VolumeSnapshot"
 // Retention counts ready snapshots, including generations never cloned for
 // publication. Live inputs and mounted clones are protected outside that window.
 // Delete clones first; their source snapshots survive until all clones are gone.
+// Jobs are NOT touched here: they are synchronization history, pruned by their
+// own count policy (pruneJobs, spec.sync.keepJobs).
 func (r *MirrorReconciler) pruneOldSnapshots(ctx context.Context, m *mirrorv1alpha1.Mirror) error {
 	labels := client.MatchingLabels{MirrorLabel: childBase(m.Name)}
 	snapshots := &snapshotv1.VolumeSnapshotList{}
@@ -73,14 +74,11 @@ func (r *MirrorReconciler) pruneOldSnapshots(ctx context.Context, m *mirrorv1alp
 		}
 	}
 	var ready []*snapshotv1.VolumeSnapshot
-	existing := map[int64]bool{}
 	for i := range snapshots.Items {
 		snapshot := &snapshots.Items[i]
-		ts, ok := objectTimestamp(snapshot.Labels)
-		if !ok || !metav1.IsControlledBy(snapshot, m) {
+		if _, ok := objectTimestamp(snapshot.Labels); !ok || !metav1.IsControlledBy(snapshot, m) {
 			continue
 		}
-		existing[ts] = true
 		if snapshot.DeletionTimestamp.IsZero() && snapshot.Status != nil && snapshot.Status.ReadyToUse != nil && *snapshot.Status.ReadyToUse {
 			ready = append(ready, snapshot)
 		}
@@ -94,26 +92,8 @@ func (r *MirrorReconciler) pruneOldSnapshots(ctx context.Context, m *mirrorv1alp
 	if len(ready) == 0 {
 		return nil
 	}
-	floor, _ := objectTimestamp(ready[min(keep, len(ready))-1].Labels)
 	for _, snapshot := range ready[:min(keep, len(ready))] {
 		protected[snapshot.Name] = true
-	}
-	protectedTimes := map[int64]bool{}
-	for _, snapshot := range snapshots.Items {
-		if protected[snapshot.Name] {
-			if ts, ok := objectTimestamp(snapshot.Labels); ok {
-				protectedTimes[ts] = true
-			}
-		}
-	}
-	if m.Status.CurrentSync != nil {
-		protectedTimes[currentSyncTimestamp(m)] = true
-	}
-	if m.Status.LastSnapshot != nil && m.Status.LastSnapshot.QueuedAt != nil {
-		protectedTimes[m.Status.LastSnapshot.QueuedAt.Unix()] = true
-	}
-	if p := m.Status.Publication; p != nil && p.QueuedAt != nil {
-		protectedTimes[p.QueuedAt.Unix()] = true
 	}
 	for _, snapshot := range ready {
 		if protected[snapshot.Name] {
@@ -130,23 +110,6 @@ func (r *MirrorReconciler) pruneOldSnapshots(ctx context.Context, m *mirrorv1alp
 			continue
 		}
 		if err := client.IgnoreNotFound(r.Delete(ctx, snapshot)); err != nil {
-			return err
-		}
-	}
-	jobs := &batchv1.JobList{}
-	if err := r.List(ctx, jobs, client.InNamespace(m.Namespace), labels); err != nil {
-		return err
-	}
-	for i := range jobs.Items {
-		job := &jobs.Items[i]
-		ts, ok := objectTimestamp(job.Labels)
-		// Failed Jobs retain their independent keepFailedJobs policy. Keep the
-		// successful Job until its old snapshot has actually disappeared.
-		if !ok || ts >= floor || protectedTimes[ts] || existing[ts] || !metav1.IsControlledBy(job, m) || !jobSucceeded(job) {
-			continue
-		}
-		policy := metav1.DeletePropagationBackground
-		if err := client.IgnoreNotFound(r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &policy})); err != nil {
 			return err
 		}
 	}

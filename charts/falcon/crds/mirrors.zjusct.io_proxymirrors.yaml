@@ -281,13 +281,26 @@ spec:
                   Publish declares the publish workload through the fixed "http" key
                   (see ProxyMirrorServicesSpec). With the key absent (including an
                   entirely absent services object) nothing is deployed: the proxy is not
-                  published. An enabled http service gets Deployment/Service
-                  `<name>-publish-http` plus the publish HTTPRoute (once Ready).
+                  published. A serving http key gets Deployment/Service
+                  `<name>-publish-http` plus the publish HTTPRoute (once Ready); an http
+                  key in redirect mode (no podTemplate, a redirect hostname) deploys no
+                  workload and 302-redirects the public paths through the route instead.
+                  The optional cache PVC keeps being maintained across a temporary
+                  redirect, so switching back to serving reuses the cached data.
                 properties:
                   http:
                     description: |-
                       MirrorHTTPServiceSpec is the http publish service of a Mirror: the base
-                      MirrorServiceSpec plus additional public path prefixes (Aliases).
+                      MirrorServiceSpec plus additional public path prefixes (Aliases) and the
+                      redirect target (Redirect). The key is in SERVING mode when podTemplate.spec
+                      declares containers: the canonical path and aliases are forwarded to the
+                      publish Deployment through the publish HTTPRoute, and Redirect is ignored.
+                      When no serving podTemplate is declared, a set Redirect puts the key in
+                      REDIRECT mode: no workload is deployed, and the publish HTTPRoute 302-
+                      redirects every public path (canonical and aliases) to the redirect
+                      hostname, preserving the request scheme and reusing the request path
+                      as-is. The temporary-ops intent (e.g. migrating data across nodes) is why
+                      the status code is 302 and Rsync may keep serving alongside.
                     properties:
                       aliases:
                         description: |-
@@ -8948,6 +8961,19 @@ spec:
                             - containers
                             type: object
                         type: object
+                      redirect:
+                        description: |-
+                          Redirect is the bare hostname every public path of the http service is
+                          302-redirected to in redirect mode (no serving podTemplate declared;
+                          a declared podTemplate ignores it). It is a lowercase DNS hostname
+                          like the gateway API's PreciseHostname — no scheme, port, or path:
+                          the redirect preserves the request scheme (http stays http,
+                          https stays https) and reuses the request path unchanged, so every
+                          public path maps to the same path on this host.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
                       replicas:
                         default: 1
                         format: int32
@@ -8956,9 +8982,9 @@ spec:
                         type: integer
                     type: object
                     x-kubernetes-validations:
-                    - message: podTemplate.spec is required when the service key is
-                        declared
-                      rule: has(self.podTemplate.spec)
+                    - message: podTemplate.spec or redirect is required when the http
+                        service key is declared
+                      rule: has(self.podTemplate.spec) || has(self.redirect)
                 type: object
             required:
             - info

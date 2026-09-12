@@ -59,7 +59,8 @@ type MirrorInfo struct {
 // Job, symmetric to the publish services' podTemplate. There are no placement
 // fields: sync pods reference the sync PVC, so the scheduler handles locality
 // natively (WaitForFirstConsumer decides the volume's node on first supply;
-// the bound PV's nodeAffinity pins every later sync pod) — see docs/spec/k8s.md.
+// the bound PV's nodeAffinity pins every later sync pod) — see the
+// "存储的局部性" (storage locality) section of the documentation.
 type MirrorSyncSpec struct {
 	// Paused disables automatic synchronization; explicit requests still run.
 	// Published content and its serving workloads remain available.
@@ -79,14 +80,18 @@ type MirrorSyncSpec struct {
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=0
 	FailureRetryLimit int32 `json:"failureRetryLimit"`
-	// KeepFailedJobs is the number of newest failed sync Jobs (by creation
-	// time) the controller retains for debugging. After every sync run
-	// reaches a terminal state, older failed Jobs are deleted (background
-	// propagation removes their pods). Succeeded Jobs are untouched: they are
-	// pruned with their snapshot generation. 0 keeps no failed Jobs.
-	// +kubebuilder:default=1
+	// KeepJobs is the number of newest sync Jobs (by creation time, any
+	// outcome) the controller retains as synchronization history — status
+	// inspection and log browsing. After every sync run reaches a terminal
+	// state, older Jobs are deleted (background propagation removes their
+	// pods, and with them the logs). Jobs are pruned by this count alone:
+	// snapshot retention never deletes Jobs, so a Job may outlive its
+	// snapshot generation (logs are cheap) or be pruned while its snapshot
+	// is still retained (a small count trims history faster than storage).
+	// 0 keeps no Jobs.
+	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=0
-	KeepFailedJobs int32 `json:"keepFailedJobs"`
+	KeepJobs int32 `json:"keepJobs"`
 	// PodTemplate is the FULL pod template of the sync Job (Job
 	// .spec.template): the user declares every container, image, command,
 	// args, env, probe, volume and so on — ConfigMap/Secret inputs included,
@@ -149,12 +154,13 @@ type MirrorStorageSpec struct {
 // key under spec.publish ("http" or "rsync"). There is no third "git" key on
 // purpose: git publishing uses HTTP (a fastcgi-style container behind
 // the web server), so it is expressed through the "http" key. A key that
-// appears under spec.publish is ENABLED — a valid enable requires podTemplate.spec (CEL-enforced, an empty block is rejected at admission); an absent
-// key is disabled. Each enabled service gets a Deployment and a Service named
-// `<mirror>-publish-<key>`; only an enabled "http" service additionally gets
-// the publish HTTPRoute (rsync is Service-only; a future RsyncRoute is out of
-// scope).
-// +kubebuilder:validation:XValidation:rule="has(self.podTemplate.spec)",message="podTemplate.spec is required when the service key is declared"
+// appears under spec.publish is ENABLED and gets a Deployment and a Service
+// named `<mirror>-publish-<key>`; an absent key is disabled. An enabled
+// service must carry a serving podTemplate.spec — CEL-enforced for the "rsync"
+// key on MirrorServicesSpec; the "http" key (MirrorHTTPServiceSpec)
+// additionally admits a redirect in its place. Only the "http" service
+// additionally gets the publish HTTPRoute (rsync is Service-only; a future
+// RsyncRoute is out of scope).
 type MirrorServiceSpec struct {
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
@@ -180,7 +186,17 @@ type MirrorServiceSpec struct {
 type MirrorHTTPAlias string
 
 // MirrorHTTPServiceSpec is the http publish service of a Mirror: the base
-// MirrorServiceSpec plus additional public path prefixes (Aliases).
+// MirrorServiceSpec plus additional public path prefixes (Aliases) and the
+// redirect target (Redirect). The key is in SERVING mode when podTemplate.spec
+// declares containers: the canonical path and aliases are forwarded to the
+// publish Deployment through the publish HTTPRoute, and Redirect is ignored.
+// When no serving podTemplate is declared, a set Redirect puts the key in
+// REDIRECT mode: no workload is deployed, and the publish HTTPRoute 302-
+// redirects every public path (canonical and aliases) to the redirect
+// hostname, preserving the request scheme and reusing the request path
+// as-is. The temporary-ops intent (e.g. migrating data across nodes) is why
+// the status code is 302 and Rsync may keep serving alongside.
+// +kubebuilder:validation:XValidation:rule="has(self.podTemplate.spec) || has(self.redirect)",message="podTemplate.spec or redirect is required when the http service key is declared"
 type MirrorHTTPServiceSpec struct {
 	MirrorServiceSpec `json:",inline"`
 	// Aliases are ADDITIONAL public path prefixes served by the http service
@@ -200,15 +216,51 @@ type MirrorHTTPServiceSpec struct {
 	// +kubebuilder:validation:MaxItems=8
 	// +optional
 	Aliases []MirrorHTTPAlias `json:"aliases,omitempty"`
+	// Redirect is the bare hostname every public path of the http service is
+	// 302-redirected to in redirect mode (no serving podTemplate declared;
+	// a declared podTemplate ignores it). It is a lowercase DNS hostname
+	// like the gateway API's PreciseHostname — no scheme, port, or path:
+	// the redirect preserves the request scheme (http stays http,
+	// https stays https) and reuses the request path unchanged, so every
+	// public path maps to the same path on this host.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +optional
+	Redirect string `json:"redirect,omitempty"`
+}
+
+// Serving reports whether the http service is in serving mode: a podTemplate
+// declaring at least one container. Nil-safe (an absent key does not serve).
+// A spec that bypassed admission may carry a containerless podTemplate.spec
+// with no redirect; validateMirror rejects it, and callers treat it as
+// non-serving.
+func (s *MirrorHTTPServiceSpec) Serving() bool {
+	return s != nil && len(s.PodTemplate.Spec.Containers) > 0
+}
+
+// RedirectActive reports the redirect target hostname and whether the http
+// service is in redirect mode (no serving podTemplate, a non-empty redirect).
+// Nil-safe like Serving.
+func (s *MirrorHTTPServiceSpec) RedirectActive() (string, bool) {
+	if s == nil || s.Serving() || s.Redirect == "" {
+		return "", false
+	}
+	return s.Redirect, true
 }
 
 // MirrorServicesSpec holds the fixed publish service keys of a Mirror. An
-// absent key is disabled; a present key — which must carry a valid podTemplate (CEL-enforced); every
-// value at its default — is enabled.
+// absent key is disabled; a present key is enabled — the "rsync" key must
+// carry a podTemplate.spec (CEL-enforced), the "http" key must carry either a
+// serving podTemplate.spec or a redirect (CEL-enforced on
+// MirrorHTTPServiceSpec, shared with ProxyMirror).
+// +kubebuilder:validation:XValidation:rule="!has(self.rsync) || has(self.rsync.podTemplate.spec)",message="podTemplate.spec is required when the rsync service key is declared"
 type MirrorServicesSpec struct {
 	// HTTP is the HTTP publish service (web server, git http-backend via
 	// fastcgi, ...). It owns the publish HTTPRoute when enabled, publishing the
-	// canonical /<mirror name> path plus any declared aliases.
+	// canonical /<mirror name> path plus any declared aliases — either by
+	// forwarding to the publish Deployment (serving mode) or by 302-redirecting
+	// every public path to the configured hostname (redirect mode).
 	HTTP *MirrorHTTPServiceSpec `json:"http,omitempty"`
 	// Rsync is the rsync publish service. It only gets a Deployment and a
 	// ClusterIP Service — no Gateway API route (a future RsyncRoute is out
@@ -216,10 +268,13 @@ type MirrorServicesSpec struct {
 	Rsync *MirrorServiceSpec `json:"rsync,omitempty"`
 }
 
-// AnyEnabled reports whether at least one publish service key is enabled (a
-// mirror with everything disabled syncs but publishes nothing).
+// AnyEnabled reports whether at least one publish service requests a
+// publication workload — a serving http service or rsync. A redirect-mode
+// http service routes without publishing content (no clone PVC, no
+// Deployment), so it does not count: the mirror is sync-only next to its
+// redirect route.
 func (s MirrorServicesSpec) AnyEnabled() bool {
-	return s.HTTP != nil || s.Rsync != nil
+	return s.HTTP.Serving() || s.Rsync != nil
 }
 
 type MirrorSpec struct {
@@ -230,7 +285,10 @@ type MirrorSpec struct {
 	// the fixed keys "http" and "rsync" (see MirrorServicesSpec). With every
 	// key absent (including an entirely absent services object) the mirror
 	// is sync-only: synchronization produces a ready snapshot, without a clone
-	// PVC or publish Deployment/Service/HTTPRoute.
+	// PVC or publish Deployment/Service/HTTPRoute. An http key in redirect
+	// mode (no podTemplate, a redirect hostname) deploys nothing either: the
+	// publish HTTPRoute 302-redirects the public paths away while
+	// synchronization (and any rsync service) continues.
 	// +optional
 	Publish MirrorServicesSpec `json:"publish,omitempty"`
 }

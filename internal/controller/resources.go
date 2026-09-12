@@ -355,8 +355,9 @@ func (r *MirrorReconciler) createSyncJob(ctx context.Context, mirror *mirrorv1al
 }
 
 // ensurePublish maintains the Deployment and Service of every ENABLED
-// spec.publish key (a present key) for the given claim. It reports readiness
-// across all enabled services.
+// spec.publish key (a present key) for the given claim. A redirect-mode http
+// key deploys nothing (the route redirects; there is no workload to feed),
+// so it is skipped. It reports readiness across all enabled services.
 //
 // No placement is derived or injected: the bound PV's nodeAffinity is
 // enforced by the scheduler natively. Workload creation is gated on that
@@ -367,11 +368,15 @@ func (r *MirrorReconciler) createSyncJob(ctx context.Context, mirror *mirrorv1al
 func (r *MirrorReconciler) ensurePublish(ctx context.Context, mirror *mirrorv1alpha1.Mirror, claimName string) (bool, error) {
 	ready := true
 	services := mirror.Spec.Publish
+	var httpSpec *mirrorv1alpha1.MirrorServiceSpec
+	if services.HTTP.Serving() {
+		httpSpec = &services.HTTP.MirrorServiceSpec
+	}
 	for _, entry := range []struct {
 		key  string
 		spec *mirrorv1alpha1.MirrorServiceSpec
 	}{
-		{PublishProtocolHTTP, httpServiceSpec(services)},
+		{PublishProtocolHTTP, httpSpec},
 		{PublishProtocolRsync, services.Rsync},
 	} {
 		if entry.spec == nil {
@@ -390,9 +395,10 @@ func (r *MirrorReconciler) ensurePublish(ctx context.Context, mirror *mirrorv1al
 
 // observePublishChildren reports whether every requested service has a
 // currently available pod and whether every Deployment has converged to its
-// current generation. It never mutates children, which is essential while a
-// newer PVC is rolling out: reconciling the old ActivePVC at that point would
-// undo the in-flight publication.
+// current generation. A redirect-mode http key expects no workload and is
+// skipped like an absent one. It never mutates children, which is essential
+// while a newer PVC is rolling out: reconciling the old ActivePVC at that
+// point would undo the in-flight publication.
 func observePublishChildren(ctx context.Context, c client.Client, mirror *mirrorv1alpha1.Mirror) (available, converged bool, err error) {
 	available = true
 	converged = true
@@ -401,7 +407,7 @@ func observePublishChildren(ctx context.Context, c client.Client, mirror *mirror
 		key      string
 		replicas int32
 	}, 0, 2)
-	if mirror.Spec.Publish.HTTP != nil {
+	if mirror.Spec.Publish.HTTP.Serving() {
 		entries = append(entries, struct {
 			key      string
 			replicas int32
@@ -470,7 +476,11 @@ func deletePublishEntry(ctx context.Context, c client.Client, owner client.Objec
 }
 
 func (r *MirrorReconciler) cleanupDisabledPublishChildren(ctx context.Context, mirror *mirrorv1alpha1.Mirror) error {
-	if mirror.Spec.Publish.HTTP == nil {
+	// An http key that is absent OR in redirect mode has no serving workload:
+	// tear the Deployment/Service down. The route is separate — it stays for a
+	// redirect-mode key (it IS the endpoint) and is only removed when the http
+	// key itself is gone.
+	if !mirror.Spec.Publish.HTTP.Serving() {
 		if err := deletePublishEntry(ctx, r.Client, mirror, PublishProtocolHTTP); err != nil {
 			return err
 		}
@@ -581,14 +591,16 @@ func ensurePublishServiceAndDeployment(ctx context.Context, c client.Client, sch
 	return deployment.Status.AvailableReplicas >= replicas && deployment.Status.UpdatedReplicas == replicas && deployment.Status.Replicas == replicas, nil
 }
 
-// pruneFailedJobs deletes failed sync Jobs of this Mirror beyond
-// spec.sync.keepFailedJobs, keeping the newest N by creation time. It runs
-// after every sync terminal state (success and failure). Succeeded Jobs are
-// untouched: they carry a sync-timestamp label and are pruned with their
-// snapshot generation by pruneOldSnapshots.
-func (r *MirrorReconciler) pruneFailedJobs(ctx context.Context, mirror *mirrorv1alpha1.Mirror) error {
+// pruneJobs deletes sync Jobs of this Mirror beyond spec.sync.keepJobs,
+// keeping the newest N by creation time regardless of outcome — succeeded
+// Jobs are synchronization history too (status inspection, log browsing).
+// It runs after every sync run reaches a terminal state (success and
+// failure); the one-transaction invariant means the newest Job is terminal
+// by then, so a running Job is never caught by the count. Jobs are pruned
+// by this policy alone: snapshot retention never deletes Jobs.
+func (r *MirrorReconciler) pruneJobs(ctx context.Context, mirror *mirrorv1alpha1.Mirror) error {
 	base := childBase(mirror.Name)
-	keep := int(mirror.Spec.Sync.KeepFailedJobs)
+	keep := int(mirror.Spec.Sync.KeepJobs)
 	if keep < 0 {
 		keep = 0
 	}
@@ -596,19 +608,18 @@ func (r *MirrorReconciler) pruneFailedJobs(ctx context.Context, mirror *mirrorv1
 	if err := r.List(ctx, jobs, client.InNamespace(mirror.Namespace), client.MatchingLabels{MirrorLabel: base}); err != nil {
 		return err
 	}
-	var failed []*batchv1.Job
+	var retained []*batchv1.Job
 	for i := range jobs.Items {
-		job := &jobs.Items[i]
-		if jobFailed(job) && metav1.IsControlledBy(job, mirror) {
-			failed = append(failed, job)
+		if job := &jobs.Items[i]; metav1.IsControlledBy(job, mirror) {
+			retained = append(retained, job)
 		}
 	}
 	// Newest first; equal creation timestamps are arbitrary among themselves,
-	// which only affects which same-instant failures are kept.
-	sort.Slice(failed, func(i, j int) bool {
-		return failed[i].CreationTimestamp.After(failed[j].CreationTimestamp.Time)
+	// which only affects which same-instant Jobs are kept.
+	sort.Slice(retained, func(i, j int) bool {
+		return retained[i].CreationTimestamp.After(retained[j].CreationTimestamp.Time)
 	})
-	for _, job := range failed[min(keep, len(failed)):] {
+	for _, job := range retained[min(keep, len(retained)):] {
 		propagation := metav1.DeletePropagationBackground
 		if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
 			return err

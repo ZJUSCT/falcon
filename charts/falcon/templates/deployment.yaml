@@ -2,24 +2,14 @@
 {{- if .Values.controller.enabled }}
 
 {{- /*
-The liveness/readiness probes target the health-probe listener
-(config api.healthProbeBindAddress). Probe ports must be static in the Pod
-spec, so they are hardcoded to 8081 here and rendering fails if the config
-moves the listener elsewhere. The same applies to the metrics (:8080) and
-webapi (:8082) listeners, which the Services target by number.
+The liveness/readiness probes and the metrics/webapi Services address the
+listeners by NAMED ports, so the containerPort numbers below carry the actual
+port. They are derived from the configured bind addresses (falcon.port), so
+moving a listener here moves its probe and Service targets with it.
 */ -}}
-{{- $probeAddr := .Values.controller.config.api.healthProbeBindAddress | default ":8081" -}}
-{{- $metricsAddr := .Values.controller.config.api.metricsBindAddress | default ":8080" -}}
-{{- $webapiAddr := .Values.controller.config.api.webapiBindAddress | default ":8082" -}}
-{{- if ne $probeAddr ":8081" -}}
-{{- fail (printf "controller.config.api.healthProbeBindAddress must stay ':8081' (probes are hardcoded to port 8081); got %q" $probeAddr) -}}
-{{- end -}}
-{{- if ne $metricsAddr ":8080" -}}
-{{- fail (printf "controller.config.api.metricsBindAddress must stay ':8080' (the metrics Service targets port 8080); got %q" $metricsAddr) -}}
-{{- end -}}
-{{- if ne $webapiAddr ":8082" -}}
-{{- fail (printf "controller.config.api.webapiBindAddress must stay ':8082' (the webapi Service targets port 8082); got %q" $webapiAddr) -}}
-{{- end -}}
+{{- $probePort := include "falcon.port" (.Values.controller.config.api.healthProbeBindAddress | default ":8081") -}}
+{{- $metricsPort := include "falcon.port" (.Values.controller.config.api.metricsBindAddress | default ":8080") -}}
+{{- $webapiPort := include "falcon.port" (.Values.controller.config.api.webapiBindAddress | default ":8082") -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -110,13 +100,13 @@ spec:
             {{- end }}
           ports:
             - name: metrics
-              containerPort: 8080
+              containerPort: {{ $metricsPort | int }}
               protocol: TCP
             - name: health
-              containerPort: 8081
+              containerPort: {{ $probePort | int }}
               protocol: TCP
             - name: webapi
-              containerPort: 8082
+              containerPort: {{ $webapiPort | int }}
               protocol: TCP
           livenessProbe:
             httpGet:

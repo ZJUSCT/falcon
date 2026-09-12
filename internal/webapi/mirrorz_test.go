@@ -213,7 +213,7 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 				Description: "PyPI 缓存代理",
 				Upstream:    "https://pypi.org/simple/",
 			},
-			Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: &mirrorv1alpha1.ProxyMirrorServiceSpec{}},
+			Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: httpService().HTTP},
 		},
 		Status: mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
 	}
@@ -471,7 +471,7 @@ func TestMirrorZCanonicalNamesKeepCRPaths(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "aur", Namespace: "mirrors"},
 		Spec: mirrorv1alpha1.ProxyMirrorSpec{
 			Info:    mirrorv1alpha1.ProxyMirrorInfo{CName: "AUR"},
-			Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: &mirrorv1alpha1.ProxyMirrorServiceSpec{}},
+			Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: httpService().HTTP},
 		},
 		Status: mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
 	}
@@ -549,7 +549,7 @@ func TestHandleMirrorZTimestampInvariants(t *testing.T) {
 func TestMirrorZRejectsProxyWithoutCreationTime(t *testing.T) {
 	p := &mirrorv1alpha1.ProxyMirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "pypi", Namespace: "mirrors"},
-		Spec:       mirrorv1alpha1.ProxyMirrorSpec{Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: &mirrorv1alpha1.ProxyMirrorServiceSpec{}}},
+		Spec:       mirrorv1alpha1.ProxyMirrorSpec{Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: httpService().HTTP}},
 		Status:     mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
 	}
 	s := &Server{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(p).Build(), CatalogEnabled: true}
@@ -601,5 +601,40 @@ func TestMirrorZManualModeAndCancellation(t *testing.T) {
 	m.Status.PausedAt = &stopped
 	if got, err := mirrorzStatusForMirror(m); err != nil || got != "P1788380200N1788000000" {
 		t.Fatalf("paused after cancellation: %q, %v", got, err)
+	}
+}
+
+// TestMirrorZExcludesRedirectMode: a redirect-mode endpoint is not this site
+// serving the mirror — a 302 away is no catalog entry, even with Ready=True.
+func TestMirrorZExcludesRedirectMode(t *testing.T) {
+	mirror := &mirrorv1alpha1.Mirror{
+		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors", CreationTimestamp: metav1.Unix(1788000000, 0)},
+		Spec: mirrorv1alpha1.MirrorSpec{
+			Info:    mirrorv1alpha1.MirrorInfo{Upstream: "rsync://ftp.debian.org/debian/"},
+			Publish: httpService(),
+		},
+		Status: mirrorv1alpha1.MirrorStatus{
+			LastSync:   &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded},
+			Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)},
+		},
+	}
+	mirror.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
+	mirror.Spec.Publish.HTTP.Redirect = "mirrors.cernet.edu.cn"
+	proxy := &mirrorv1alpha1.ProxyMirror{
+		ObjectMeta: metav1.ObjectMeta{Name: "pypi", Namespace: "mirrors", CreationTimestamp: metav1.Unix(1788000000, 0)},
+		Spec: mirrorv1alpha1.ProxyMirrorSpec{
+			Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: httpService().HTTP},
+		},
+		Status: mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
+	}
+	proxy.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
+	proxy.Spec.Publish.HTTP.Redirect = "mirrors.cernet.edu.cn"
+	s := &Server{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(mirror, proxy).Build(), Site: SiteConfig{URL: "https://example.org"}}
+	doc, err := s.buildMirrorZ(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Mirrors) != 0 {
+		t.Fatalf("redirect-mode entries must stay out of the catalog: %+v", doc.Mirrors)
 	}
 }

@@ -3,6 +3,7 @@ package webapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -70,14 +71,17 @@ func TestSyncLogSourceOwnershipAndFallback(t *testing.T) {
 	if err := c.Create(t.Context(), wrongPod); err != nil {
 		t.Fatal(err)
 	}
-	source, err := s.syncLogSource(t.Context(), m.Name)
+	source, err := s.syncLogSource(t.Context(), m.Name, "")
 	if err != nil || source.JobUID != "job" || !source.Current || len(source.Pods) != 1 || len(source.Pods[0].Containers) != 2 || !source.Pods[0].Containers[1].Init {
 		t.Fatalf("current source: %#v %v", source, err)
+	}
+	if len(source.Jobs) != 2 || source.Jobs[0].Name != "debian-sync-200" || source.Jobs[1].Name != "debian-sync-100" || !source.Jobs[1].Current || source.Jobs[0].Current {
+		t.Fatalf("history must list owned Jobs newest-first with the current flag: %#v", source.Jobs)
 	}
 	if err := c.Delete(t.Context(), job); err != nil {
 		t.Fatal(err)
 	}
-	source, err = s.syncLogSource(t.Context(), m.Name)
+	source, err = s.syncLogSource(t.Context(), m.Name, "")
 	if err != nil || source.JobUID != "new-job" || source.Current || len(source.Pods) != 0 {
 		t.Fatalf("fallback source: %#v %v", source, err)
 	}
@@ -88,9 +92,63 @@ func TestSyncLogSourceOwnershipAndFallback(t *testing.T) {
 	if err := c.Delete(t.Context(), newer); err != nil {
 		t.Fatal(err)
 	}
-	source, err = s.syncLogSource(t.Context(), m.Name)
+	source, err = s.syncLogSource(t.Context(), m.Name, "")
 	if err != nil || source.Job != "" {
 		t.Fatalf("foreign Job exposed: %#v %v", source, err)
+	}
+}
+
+// TestSyncLogSourceJobSelection: ?job= selects any retained Job explicitly;
+// a selection that resolves to nothing is an error instead of a silent
+// fallback, and the stream endpoint resolves the same selection for its
+// jobUID guard.
+func TestSyncLogSourceJobSelection(t *testing.T) {
+	s, c, m, job, pod := logsFixture(t)
+	s.LogStream = func(context.Context, string, string, *corev1.PodLogOptions) (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader("history\n")), nil
+	}
+	history := job.DeepCopy()
+	history.Name = "debian-sync-50"
+	history.UID = "old-job"
+	history.ResourceVersion = ""
+	history.CreationTimestamp = metav1.NewTime(time.Unix(50, 0))
+	history.Status = batchv1.JobStatus{StartTime: &metav1.Time{Time: time.Unix(50, 0)}, CompletionTime: &metav1.Time{Time: time.Unix(60, 0)}, Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(time.Unix(60, 0))}}}
+	if err := c.Create(t.Context(), history); err != nil {
+		t.Fatal(err)
+	}
+	historyPod := pod.DeepCopy()
+	historyPod.Name = "writer-old"
+	historyPod.UID = "old-pod"
+	historyPod.ResourceVersion = ""
+	historyPod.OwnerReferences[0].UID = history.UID
+	historyPod.OwnerReferences[0].Name = history.Name
+	if err := c.Create(t.Context(), historyPod); err != nil {
+		t.Fatal(err)
+	}
+
+	source, err := s.syncLogSource(t.Context(), m.Name, "debian-sync-50")
+	if err != nil || source.JobUID != "old-job" || source.Current || len(source.Pods) != 1 || source.Pods[0].Name != "writer-old" {
+		t.Fatalf("explicit selection: %#v %v", source, err)
+	}
+	if source.Jobs[1].Result != "succeeded" || source.Jobs[1].FinishedAt == nil {
+		t.Fatalf("history entries must carry outcome and finish time: %#v", source.Jobs)
+	}
+	if _, err = s.syncLogSource(t.Context(), m.Name, "debian-sync-999"); !errors.Is(err, errJobNotRetained) {
+		t.Fatalf("unresolved selection must fail explicitly, got %v", err)
+	}
+
+	// The stream endpoint re-resolves the selection, so a pod of the DEFAULT
+	// job is rejected while the selected job's pod streams.
+	defaultPodQuery := url.Values{"job": {"debian-sync-100"}, "jobUID": {"job"}, "pod": {"writer"}, "podUID": {"pod"}, "container": {"sync"}, "lines": {"100"}, "follow": {"false"}, "timestamps": {"true"}}
+	if w := logRequest(s, "/api/mirrors/debian/logs/stream?"+defaultPodQuery.Encode(), true, "admin.example.org"); w.Code != 200 {
+		t.Fatalf("selected job's pod must stream: %d %s", w.Code, w.Body)
+	}
+	foreignQuery := url.Values{"job": {"debian-sync-50"}, "jobUID": {"old-job"}, "pod": {"writer"}, "podUID": {"pod"}, "container": {"sync"}, "lines": {"100"}, "follow": {"false"}, "timestamps": {"true"}}
+	if w := logRequest(s, "/api/mirrors/debian/logs/stream?"+foreignQuery.Encode(), true, "admin.example.org"); w.Code != 404 {
+		t.Fatalf("a pod of the unselected job must be rejected: %d %s", w.Code, w.Body)
+	}
+	if w := logRequest(s, "/api/mirrors/debian/logs?job=debian-sync-999", true, "admin.example.org"); w.Code != 404 {
+		t.Fatalf("unresolved HTTP selection must 404: %d %s", w.Code, w.Body)
 	}
 }
 func TestSyncLogStreamValidationAndFrames(t *testing.T) {

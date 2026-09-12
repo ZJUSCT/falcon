@@ -120,6 +120,20 @@ Usage: include "falcon.parentRefs" (dict "ctx" $ "section" .Values.admin.route.g
 {{- end -}}
 
 {{/*
+Extract the numeric port of a ":<port>" listen address. Probes and Services
+reach the listener on every interface, so an address bound to a specific IP
+is rejected here.
+Usage: include "falcon.port" .Values.controller.config.api.metricsBindAddress
+*/}}
+{{- define "falcon.port" -}}
+{{- $addr := . | default "" -}}
+{{- if not (regexMatch "^:[0-9]+$" $addr) -}}
+{{- fail (printf "listen address %q must be a bare \":<port>\" (all-interfaces) address" $addr) -}}
+{{- end -}}
+{{- trimPrefix ":" $addr -}}
+{{- end -}}
+
+{{/*
 Build the container image reference: [registry/]repository[:tag|@digest].
 An empty image.tag falls back to the given defaultTag (callers pass
 Chart.AppVersion for the controller). image.digest, when set, wins over the tag.

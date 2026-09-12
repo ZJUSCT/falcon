@@ -17,8 +17,8 @@
 
 {{- if .Values.admin.enabled }}
 
-  Admin UI/API (Gateway: {{ .Values.global.gatewayRef.name }}):
-    https://{{ .Values.admin.hosts | join "," }}/
+  Admin UI/API:
+    https://{{ .Values.admin.host }}/
       UI at /, read-only API at /api/jobs, /api/usage and /api/repos/<name>.
 {{- end }}
 
