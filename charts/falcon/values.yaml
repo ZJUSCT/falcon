@@ -85,7 +85,9 @@ controller:
   rbac:
     create: true
     # Cluster-scoped nodes/proxy read backing status.sizeBytes; disabling it
-    # leaves sizeBytes empty.
+    # leaves sizeBytes empty. The rendered ClusterRole/ClusterRoleBinding are
+    # suffixed with the release namespace so multi-instance deployments with a
+    # reused release name each own their objects.
     nodeStats: true
 
   podAnnotations: {}

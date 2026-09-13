@@ -1,18 +1,21 @@
 {{- /* The binding of the cluster-scoped node-stats ClusterRole (see
 clusterrole.yaml) to the controller ServiceAccount, rendered under the same
-conditions as the ClusterRole. */ -}}
+conditions as the ClusterRole. The subjects differ per release namespace, so
+— like the ClusterRole — the release namespace is part of the name to keep
+multi-instance deployments (same release name, different namespaces) from
+fighting over one binding. */ -}}
 {{- if and .Values.controller.enabled .Values.controller.rbac.create .Values.controller.rbac.nodeStats }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "falcon.fullname" . }}-node-stats
+  name: {{ include "falcon.fullname" . }}-node-stats-{{ .Release.Namespace }}
   labels:
     {{- include "falcon.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "falcon.fullname" . }}-node-stats
+  name: {{ include "falcon.fullname" . }}-node-stats-{{ .Release.Namespace }}
 subjects:
   - kind: ServiceAccount
     name: {{ include "falcon.serviceAccountName" . }}
