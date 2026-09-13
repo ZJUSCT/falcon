@@ -26,12 +26,12 @@ import (
 // testConfig returns a config with publishing enabled and an unlimited sync cap.
 func testConfig() *config.Config {
 	cfg := config.Default()
-	cfg.Site.URL = "https://mirrors.zjusct.io"
-	cfg.Catalog.Enabled = true
-	cfg.Publish.GatewayRef = config.GatewayRef{Name: "nginx-gateway", SectionName: "https"}
-	cfg.Publish.Hostnames = []string{"mirrors.zjusct.io", "mirror.zju.edu.cn"}
-	cfg.Publish.Labels = map[string]string{"publish.zone": "campus"}
-	cfg.Publish.Annotations = map[string]string{"publish.example.com/note": "stamped"}
+	cfg.Mirrorz.Site.URL = "https://mirrors.zjusct.io"
+	cfg.Mirrorz.Enabled = true
+	cfg.Publish.HTTP.GatewayRef = config.GatewayRef{Name: "nginx-gateway", SectionName: "https"}
+	cfg.Publish.HTTP.Hostnames = []string{"mirrors.zjusct.io", "mirror.zju.edu.cn"}
+	cfg.Publish.HTTP.Labels = map[string]string{"publish.zone": "campus"}
+	cfg.Publish.HTTP.Annotations = map[string]string{"publish.example.com/note": "stamped"}
 	if err := cfg.Validate(); err != nil {
 		panic(err)
 	}
@@ -88,7 +88,7 @@ func assertPublishRouteShape(t *testing.T, route *gatewayv1.HTTPRoute, owner cli
 func TestMirrorPausedKeepsPublishRoute(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Sync.Paused = true
+	mirror.SetSyncPaused(true)
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
@@ -130,7 +130,7 @@ func TestMirrorPausedKeepsPublishRoute(t *testing.T) {
 	if !current.Status.PausedAt.Equal(pausedAt) {
 		t.Fatal("reconciliation must not refresh pause time")
 	}
-	current.Spec.Sync.Paused = false
+	current.SetSyncPaused(false)
 	if err := fakeClient.Update(ctx, current); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestMirrorPausedKeepsPublishRoute(t *testing.T) {
 	if current.Status.PausedAt != nil {
 		t.Fatal("resuming must clear pause time")
 	}
-	current.Spec.Sync.Paused = true
+	current.SetSyncPaused(true)
 	if err := fakeClient.Update(ctx, current); err != nil {
 		t.Fatal(err)
 	}
@@ -155,8 +155,8 @@ func TestMirrorPausedKeepsPublishRoute(t *testing.T) {
 func TestPublishDisabledSkipsRouteGeneration(t *testing.T) {
 	ctx := context.Background()
 	cfg := testConfig()
-	cfg.Publish.Hostnames = nil
-	cfg.Publish.GatewayRef = config.GatewayRef{}
+	cfg.Publish.HTTP.Hostnames = nil
+	cfg.Publish.HTTP.GatewayRef = config.GatewayRef{}
 	mirror := testMirror()
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{

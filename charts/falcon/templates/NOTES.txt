@@ -5,7 +5,7 @@
   Controller: {{ include "falcon.fullname" . }} (image {{ include "falcon.image" (dict "image" .Values.controller.image "defaultTag" .Chart.AppVersion "ctx" $) }})
     - Full runtime config lives in ConfigMap "falcon-config" (config.yaml);
       any config change rolls the pods via the checksum/config annotation.
-    - Publishes {{ .Values.controller.config.publish.hostnames | default list | join ", " | default "(publish routes disabled: no hostnames)" | quote }} —
+    - Publishes {{ .Values.controller.config.publish.http.hostnames | default list | join ", " | default "(publish routes disabled: no hostnames)" | quote }} —
       for each published Mirror/ProxyMirror the controller creates an HTTPRoute
       "<name>-publish" -> Service "<name>-publish-http:80" in this namespace.
 {{- if and .Values.controller.metrics.enabled .Values.controller.metrics.serviceMonitor.enabled }}
@@ -15,17 +15,19 @@
 {{- end }}
 {{- end }}
 
-{{- if .Values.admin.enabled }}
+{{- if .Values.ui.enabled }}
 
   Admin UI/API:
-    https://{{ .Values.admin.host }}/
+    {{- range .Values.ui.route.hostnames }}
+    https://{{ . }}/
+    {{- end }}
       UI at /, read-only API at /api/jobs, /api/usage and /api/repos/<name>.
 {{- end }}
 
-{{- if .Values.catalog.enabled }}
+{{- if .Values.mirrorz.route.enabled }}
 
-  MirrorZ catalog ({{ .Values.controller.config.catalog.enabled | ternary "endpoint enabled" "WARNING: controller.config.catalog.enabled=false, the endpoint answers 404" }}):
-    {{- range .Values.catalog.hosts }}
+  MirrorZ catalog ({{ .Values.controller.config.mirrorz.enabled | ternary "endpoint enabled" "WARNING: controller.config.mirrorz.enabled=false, the endpoint answers 404" }}):
+    {{- range .Values.controller.config.publish.http.hostnames | default list }}
     https://{{ . }}/mirrorz.json
     {{- end }}
 {{- end }}

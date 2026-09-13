@@ -37,21 +37,21 @@ func actionRequest(s *Server, host, origin, body string, authenticated bool) *ht
 		req.AddCookie(&http.Cookie{Name: "falcon_session", Value: s.Auth.cookieValue(1)})
 	}
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, req)
+	s.AdminHandler().ServeHTTP(w, req)
 	return w
 }
 
-func TestMirrorActionsRequireAdminAndSameOrigin(t *testing.T) {
+func TestMirrorActionsRequireSessionAndSameOrigin(t *testing.T) {
 	cases := []struct {
 		name, host, origin string
 		auth               bool
 		want               int
 	}{
-		{"public host", "mirrors.example.org", "https://mirrors.example.org", true, 403},
 		{"anonymous", "admin.example.org", "https://admin.example.org", false, 401},
 		{"cross site", "admin.example.org", "https://evil.example.org", true, 403},
 		{"missing origin", "admin.example.org", "", true, 403},
 		{"valid", "admin.example.org", "https://admin.example.org", true, 202},
+		{"valid on arbitrary host", "somewhere-else.example.org", "https://somewhere-else.example.org", true, 202},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -64,7 +64,7 @@ func TestMirrorActionsRequireAdminAndSameOrigin(t *testing.T) {
 			if err := c.Get(t.Context(), client.ObjectKey{Namespace: "mirrors", Name: "debian"}, m); err != nil {
 				t.Fatal(err)
 			}
-			if m.Spec.Sync.Paused != (tc.want == 202) {
+			if m.SyncPaused() != (tc.want == 202) {
 				t.Fatal("unauthorized request changed pause")
 			}
 		})

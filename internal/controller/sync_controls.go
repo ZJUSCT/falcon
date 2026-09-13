@@ -82,7 +82,7 @@ func (r *MirrorReconciler) reconcileCancellation(ctx context.Context, mirror *mi
 		queueRequestCleanup(mirror, current.Manual, true)
 		mirror.Status.CurrentSync = nil
 		mirror.Status.NextSyncAt = timePtr(now.Add(mirror.Spec.Sync.Interval.Duration))
-		if mirror.Spec.Sync.Paused && (current.StartedAt != nil || mirror.Status.PausedAt == nil) {
+		if mirror.SyncPaused() && (current.StartedAt != nil || mirror.Status.PausedAt == nil) {
 			mirror.Status.PausedAt = timePtr(now)
 		}
 		mirror.Status.ObservedGeneration = mirror.Generation
@@ -146,18 +146,16 @@ func (r *MirrorReconciler) checkSyncAdmission(ctx context.Context, mirror *mirro
 	if latest.AbortRequested() || latest.Status.Publication != nil || latest.Status.CurrentSync == nil || latest.Status.CurrentSync.Phase == mirrorv1alpha1.SyncPhaseCancelling || !latest.DeletionTimestamp.IsZero() {
 		return apierrors.NewConflict(mirrorv1alpha1.GroupVersion.WithResource("mirrors").GroupResource(), mirror.Name, errors.New("synchronization attempt is no longer eligible for admission"))
 	}
-	if latest.Spec.Sync.Paused && !latest.Status.CurrentSync.Manual {
+	if latest.SyncPaused() && !latest.Status.CurrentSync.Manual {
 		return errSyncPaused
 	}
 	return nil
 }
 
 // syncSpecHash keeps configuration-triggered synchronization independent from
-// publication, metadata, storage and automatic/manual mode changes.
+// publication, metadata and storage changes.
 func syncSpecHash(mirror *mirrorv1alpha1.Mirror) (string, error) {
-	spec := mirror.Spec.Sync
-	spec.Paused = false
-	encoded, err := json.Marshal(spec)
+	encoded, err := json.Marshal(mirror.Spec.Sync)
 	if err != nil {
 		return "", err
 	}

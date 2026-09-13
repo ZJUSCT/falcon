@@ -1,0 +1,15 @@
+# EG does not provision a GatewayClass itself (neither its chart nor the
+# release install.yaml ships one) — mirror the production declaration from
+# mirrors.zju.edu.cn, with parametersRef pointing at the e2e EnvoyProxy
+# (NodePort data-plane Service) instead of the production tuning.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy-gateway
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: envoy-gateway
+    namespace: envoy-gateway-system

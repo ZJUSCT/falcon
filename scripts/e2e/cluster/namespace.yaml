@@ -1,0 +1,7 @@
+# The namespace falcon and its fixtures live in. Also created by the chart
+# (namespace.create) — applying it here first lets the kustomization be
+# applied in one shot before the chart install.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mirror

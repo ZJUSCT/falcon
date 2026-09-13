@@ -148,7 +148,7 @@ rules:
       - patch
       - update
   {{- if .Values.zfsAgent.enabled }}
-  # EndpointSlices of the zfs-agent headless Service: the webapi /api/usage
+  # EndpointSlices of the zfs-agent headless Service: the /api/usage aggregator
   # aggregation discovers the ready agents through them. Rendered only when
   # the zfs-agent is enabled to keep the Role minimal.
   - apiGroups:

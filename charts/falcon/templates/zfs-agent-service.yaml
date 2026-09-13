@@ -1,5 +1,5 @@
 {{- /* Headless Service selecting the zfs-agent DaemonSet pods: the
-controller's webapi discovers the agents through the Service's
+controller's usage aggregation discovers the agents through the Service's
 EndpointSlices (ZFS_AGENT_SERVICE) and fetches every agent's report on
 its fixed port. */ -}}
 {{- if .Values.zfsAgent.enabled }}

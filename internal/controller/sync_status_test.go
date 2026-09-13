@@ -79,9 +79,9 @@ func TestSyncJobResultSurvivesTransactionFailure(t *testing.T) {
 
 func assertMirrorZLifecycleStatus(t *testing.T, c client.Client, want string) {
 	t.Helper()
-	s := &webapi.Server{Client: c, CatalogEnabled: true, Site: webapi.SiteConfig{URL: "https://example.org", Abbr: "TEST"}}
+	s := &webapi.Server{Client: c, MirrorzEnabled: true, Site: webapi.SiteConfig{URL: "https://example.org", Abbr: "TEST"}}
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/mirrorz.json", nil))
+	s.MirrorzHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/mirrorz.json", nil))
 	var doc struct {
 		Mirrors []struct {
 			Status string `json:"status"`

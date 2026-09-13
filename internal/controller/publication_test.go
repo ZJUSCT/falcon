@@ -23,7 +23,7 @@ func TestPublicationFailureRecoveryAndDrainBlockNextSyncAcrossRestart(t *testing
 	m := testMirror()
 	m.Finalizers = []string{MirrorFinalizer}
 	m.Annotations = map[string]string{SyncRequestAnnotation: "true"}
-	m.Spec.Sync.Paused = true
+	m.SetSyncPaused(true)
 	m.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: m.Generation, WorkPVC: "smoke-sync", ActivePVC: "smoke-snap-old", ActiveSnapshot: "smoke-snap-old",
 		LastSync:             &mirrorv1alpha1.MirrorSyncStatus{JobName: "smoke-sync-completed", Phase: "Succeeded", FinishedAt: timePtr(now.Add(-time.Hour))},

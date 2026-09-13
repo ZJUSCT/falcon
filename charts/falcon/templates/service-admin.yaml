@@ -1,0 +1,25 @@
+{{- /*
+Admin listener of the controller: /api endpoints, OAuth and the UI reverse
+proxy. Exposed on port 80 for the ui HTTPRoute; wiring this Service into a
+public route would surface 404s for /mirrorz.json, not the other way around.
+*/ -}}
+{{- if .Values.controller.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "falcon.fullname" . }}-admin
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "falcon.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "falcon.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+  ports:
+    - name: admin
+      port: 80
+      targetPort: admin
+      protocol: TCP
+{{- end }}

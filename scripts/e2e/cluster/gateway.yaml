@@ -1,0 +1,13 @@
+# Gateway implemented by Envoy Gateway. Listener without hostname: the demo
+# HTTPRoutes bring the mirrors.example.org hostname matching.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: mirror-gateway
+  namespace: mirror
+spec:
+  gatewayClassName: envoy-gateway
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP

@@ -39,7 +39,7 @@ func TestSyncOnlySnapshotCanBePublishedLaterWithoutAnotherJob(t *testing.T) {
 			m := testMirror()
 			publish := m.Spec.Publish
 			m.Spec.Publish = mirrorv1alpha1.MirrorServicesSpec{}
-			m.Spec.Sync.Paused = paused
+			m.SetSyncPaused(paused)
 			m.Finalizers = []string{MirrorFinalizer}
 			scheme := testScheme(t)
 			c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &batchv1.Job{}, &snapshotv1.VolumeSnapshot{}, &appsv1.Deployment{}).WithObjects(m).Build()
@@ -128,7 +128,7 @@ func TestSyncConfigurationHashScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, mutate := range map[string]func(*mirrorv1alpha1.Mirror){
-		"pause":   func(m *mirrorv1alpha1.Mirror) { m.Spec.Sync.Paused = !m.Spec.Sync.Paused },
+		"pause":   func(m *mirrorv1alpha1.Mirror) { m.SetSyncPaused(!m.SyncPaused()) },
 		"info":    func(m *mirrorv1alpha1.Mirror) { m.Spec.Info.CName = "another-name" },
 		"publish": func(m *mirrorv1alpha1.Mirror) { m.Spec.Publish = mirrorv1alpha1.MirrorServicesSpec{} },
 		"storage": func(m *mirrorv1alpha1.Mirror) { m.Spec.Storage.Retention++ },

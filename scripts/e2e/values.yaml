@@ -1,0 +1,33 @@
+# E2E chart overrides: the locally loaded falcon:e2e image (no registry),
+# the site hostname on the e2e Gateway, and no ServiceMonitor because the
+# cluster has no Prometheus Operator CRDs. Everything else stays at chart
+# defaults (ui/zfsAgent disabled).
+namespace:
+  # Created by the bootstrap kustomization (scripts/e2e/cluster) so the
+  # Gateway fixture can be applied before the chart install; helm refuses
+  # to adopt a namespace it did not create.
+  create: false
+global:
+  imageRegistry: ""
+controller:
+  image:
+    tag: e2e
+  config:
+    mirrorz:
+      enabled: true
+      site:
+        url: https://mirrors.example.org
+        abbr: EXAMPLE
+        name: Falcon E2E
+    publish:
+      http:
+        gatewayRef:
+          name: mirror-gateway
+        hostnames:
+          - mirrors.example.org
+  metrics:
+    serviceMonitor:
+      enabled: false
+mirrorz:
+  route:
+    enabled: true

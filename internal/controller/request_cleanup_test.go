@@ -22,7 +22,7 @@ func TestCompletedRequestCleanupRecoversAcrossRestart(t *testing.T) {
 	for _, afterRemoval := range []bool{false, true} {
 		t.Run(map[bool]string{false: "before metadata removal", true: "after metadata removal"}[afterRemoval], func(t *testing.T) {
 			m := abortRequestMirror()
-			m.Spec.Sync.Paused = true
+			m.SetSyncPaused(true)
 			m.Spec.Publish = mirrorv1alpha1.MirrorServicesSpec{}
 			m.Annotations[SyncRequestAnnotation] = "true"
 			m.Status.CurrentSync.Manual = true
@@ -103,9 +103,9 @@ func TestRequestCleanupConflictsWithConcurrentMetadataEdit(t *testing.T) {
 func TestBooleanRequestsCoalesceAndAbortIsProcessedFirst(t *testing.T) {
 	m := testMirror()
 	m.Finalizers = []string{MirrorFinalizer}
-	m.Spec.Sync.Paused = true
 	m.Spec.Publish = mirrorv1alpha1.MirrorServicesSpec{}
 	m.Annotations = map[string]string{SyncRequestAnnotation: "true", mirrorv1alpha1.AbortRequestAnnotation: "true"}
+	m.SetSyncPaused(true)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &batchv1.Job{}).WithObjects(m).Build()
 	now := time.Unix(1789000000, 0)
 	r := &MirrorReconciler{Client: c, Scheme: testScheme(t), Config: testConfig(), SyncLimiter: NewSyncLimiter(1), Now: func() time.Time { return now }}

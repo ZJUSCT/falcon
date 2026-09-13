@@ -437,7 +437,7 @@ func TestJoinUsageFallsBackToOpenEBSStorageNames(t *testing.T) {
 // (and still GET-only).
 func TestUsageDisabledIs404(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	srv := httptest.NewServer((&Server{Client: c}).Handler())
+	srv := httptest.NewServer((&Server{Client: c}).AdminHandler())
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/usage")
@@ -478,7 +478,7 @@ func TestUsageEnabledPinsWireShape(t *testing.T) {
 		Status:     mirrorv1alpha1.MirrorStatus{WorkPVC: "ubuntu-sync"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(mirror).Build()
-	srv := httptest.NewServer((&Server{Client: c, Usage: a}).Handler())
+	srv := httptest.NewServer((&Server{Client: c, Usage: a}).AdminHandler())
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/usage")

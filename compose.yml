@@ -67,6 +67,28 @@ services:
   hygiene:
     <<: *manifests
     command: [hygiene]
+  # E2E talks to the host Docker daemon through the socket and shares the
+  # host network stack: the kubeconfig kind writes (127.0.0.1:<port> bound
+  # to the host loopback) is valid as-is, and the kind node addresses are
+  # directly reachable — no endpoint rewriting or network plumbing. Asserts
+  # with chainsaw (tests/e2e); the cluster bootstrap is `kubectl apply -k`
+  # over scripts/e2e/cluster. Runs as the image default user (root) for
+  # socket access; diagnostics land in .e2e-dump/.
+  e2e:
+    <<: *check
+    build:
+      context: .
+      dockerfile: scripts/checks/Dockerfile
+      target: e2e-tools
+    command: [e2e]
+    network_mode: "host"
+    volumes:
+      - .:/source:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./.e2e-dump:/tmp/e2e-dump
+    environment:
+      HOME: /tmp
+      E2E_DUMP_DIR: /tmp/e2e-dump
   generate:
     <<: *go
     profiles: [write]

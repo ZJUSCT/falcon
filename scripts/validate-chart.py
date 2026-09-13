@@ -20,28 +20,40 @@ import yaml
 
 CHART = Path(__file__).resolve().parent.parent / "charts" / "falcon"
 
-# The chart ships no site identity (site.url is required but empty by
-# default), so even the "defaults" render needs this minimal overlay.
+# The chart ships no site identity (mirrorz.site.url is required while the
+# endpoint is on and empty by default), so even the "defaults" render needs
+# this minimal overlay.
 REQUIRED = """
 controller:
   config:
-    site:
-      url: https://mirrors.example.org
+    mirrorz:
+      site:
+        url: https://mirrors.example.org
 """
 
 # Overlay that turns on every conditional template block.
-ALL_ON = REQUIRED + """
-global:
-  gatewayRef:
-    name: mirror-gateway
-    namespace: gateway-system
-    sectionName: https
-webui: {enabled: true}
-admin: {enabled: true, host: admin.example.org}
+ALL_ON = """
+controller:
+  config:
+    mirrorz:
+      site:
+        url: https://mirrors.example.org
+    publish:
+      http:
+        gatewayRef: {name: mirror-gateway}
+        hostnames: [mirrors.example.org]
 zfsAgent: {enabled: true}
-catalog:
+mirrorz:
+  route: {enabled: true}
+ui:
   enabled: true
-  hosts: [mirrors.example.org]
+  oauth:
+    clientID: test-client
+    clientSecret: test-secret
+  route:
+    hostnames: [admin.example.org]
+    parentRefs:
+      - {name: admin-gateway}
 """
 
 
@@ -121,8 +133,11 @@ def main() -> None:
     expected = [
         ("ClusterRole", "falcon-node-stats"),
         ("Deployment", "falcon"),
-        ("HTTPRoute", "falcon-admin"),
-        ("HTTPRoute", "falcon-catalog"),
+        ("Service", "falcon-mirrorz"),
+        ("Service", "falcon-admin"),
+        ("HTTPRoute", "falcon-mirrorz"),
+        ("HTTPRoute", "falcon-ui"),
+        ("Secret", "falcon-auth"),
     ]
     failures += [
         f"expected resource absent: {r}"

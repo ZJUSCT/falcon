@@ -1,0 +1,55 @@
+# The demo Mirror from the README quickstart, wired to the e2e storage
+# fixtures. busybox generates a timestamped page so the full
+# sync -> snapshot -> publish chain needs no real upstream.
+apiVersion: mirrors.zjusct.io/v1alpha1
+kind: Mirror
+metadata:
+  name: demo
+  namespace: mirror
+spec:
+  info:
+    cname: demo
+    description: e2e verification of the sync-snapshot-publish flow
+    upstream: locally generated demo content
+  storage:
+    syncStorageClassName: falcon-e2e-sync
+    publishStorageClassName: falcon-e2e-publish
+    volumeSnapshotClassName: falcon-e2e-snapshot
+    pvcTemplate:
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 1Gi
+      volumeMode: Filesystem
+  sync:
+    interval: 6h
+    timeout: 5m
+    podTemplate:
+      spec:
+        containers:
+          - name: sync
+            image: busybox:1.37
+            command: [sh, -ec]
+            args:
+              - 'date -u > /data/index.html'
+            volumeMounts:
+              - name: sync-data
+                mountPath: /data
+  publish:
+    http:
+      podTemplate:
+        spec:
+          containers:
+            - name: nginx
+              image: nginx:stable-alpine
+              ports:
+                - containerPort: 80
+              volumeMounts:
+                - name: mirror-data
+                  mountPath: /usr/share/nginx/html/demo
+                  readOnly: true
+              readinessProbe:
+                httpGet:
+                  path: /demo/index.html
+                  port: 80

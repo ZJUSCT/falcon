@@ -52,7 +52,7 @@ case "${1:?check name required}" in
         helm package charts/falcon --destination /tmp
         ;;
     hygiene)
-        pre-commit run --config .pre-commit-hygiene.yaml --all-files
+        pre-commit run --all-files
         ;;
     verify-generated)
         generate
@@ -69,12 +69,15 @@ case "${1:?check name required}" in
         ;;
     format-hygiene)
         result=0
-        pre-commit run --config .pre-commit-hygiene.yaml --all-files || result=$?
+        pre-commit run --all-files || result=$?
         export_changes
         if [[ $result != 0 ]]; then
             # Recheck after auto-fixes; unresolved errors still fail formatting.
-            pre-commit run --config .pre-commit-hygiene.yaml --all-files
+            pre-commit run --all-files
         fi
+        ;;
+    e2e)
+        exec bash scripts/e2e/run.sh
         ;;
     *) echo "Unknown check: $1" >&2; exit 2 ;;
 esac

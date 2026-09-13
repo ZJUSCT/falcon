@@ -64,66 +64,12 @@ default
 {{- end -}}
 {{- end -}}
 
-{{/*
-Merge a section-local gatewayRef over global.gatewayRef and emit it as YAML.
-Keys of the section that are present with an empty string value unset the
-global value (so `namespace: ""` deliberately means "same namespace as the
-release"); keys that are absent inherit the global value. The returned YAML
-contains only non-empty values, which keeps the controller's config schema
-(json omitempty) clean.
-Usage: include "falcon.mergeGatewayRef" (dict "ctx" $ "section" .Values.foo.gatewayRef)
-*/}}
-{{- define "falcon.mergeGatewayRef" -}}
-{{- $section := .section | default dict -}}
-{{- $ref := deepCopy (.ctx.Values.global.gatewayRef | default dict) -}}
-{{- range $key, $value := $section -}}
-{{- if or (kindIs "invalid" $value) (eq (toString $value) "") -}}
-{{- $_ := unset $ref $key -}}
-{{- else -}}
-{{- $_ := set $ref $key $value -}}
-{{- end -}}
-{{- end -}}
-{{- $out := dict -}}
-{{- range $key := list "name" "namespace" "sectionName" -}}
-{{- if index $ref $key -}}{{- $_ := set $out $key (index $ref $key) -}}{{- end -}}
-{{- end -}}
-{{- toYaml $out -}}
-{{- end -}}
-
-{{/*
-Render the `parentRefs` list of an HTTPRoute. When `.parentRefs` is non-empty
-it is emitted verbatim (advanced escape hatch); otherwise a single parentRef
-is derived from the section's gatewayRef merged over global.gatewayRef.
-The namespace key is omitted from the derived parentRef when it is empty
-(same-namespace reference in the Gateway API).
-Usage: include "falcon.parentRefs" (dict "ctx" $ "section" .Values.admin.route.gatewayRef "parentRefs" .Values.admin.route.parentRefs)
-*/}}
-{{- define "falcon.parentRefs" -}}
-{{- $custom := .parentRefs | default list -}}
-{{- if gt (len $custom) 0 -}}
-{{- toYaml $custom -}}
-{{- else -}}
-{{- $ref := fromYaml (include "falcon.mergeGatewayRef" (dict "ctx" .ctx "section" .section)) -}}
-{{- if not $ref.name -}}
-{{- fail (printf "gatewayRef.name is empty: set global.gatewayRef.name, the section gatewayRef, or route.parentRefs") -}}
-{{- end -}}
-- group: gateway.networking.k8s.io
-  kind: Gateway
-  name: {{ $ref.name | quote }}
-  {{- with $ref.namespace }}
-  namespace: {{ . | quote }}
-  {{- end }}
-  {{- with $ref.sectionName }}
-  sectionName: {{ . | quote }}
-  {{- end }}
-{{- end -}}
-{{- end -}}
 
 {{/*
 Extract the numeric port of a ":<port>" listen address. Probes and Services
 reach the listener on every interface, so an address bound to a specific IP
 is rejected here.
-Usage: include "falcon.port" .Values.controller.config.api.metricsBindAddress
+Usage: include "falcon.port" ":8080"
 */}}
 {{- define "falcon.port" -}}
 {{- $addr := . | default "" -}}
@@ -160,80 +106,112 @@ falcon-config ConfigMap and (hashed) into the controller pod's
 checksum/config annotation, so any config change rolls the Deployment.
 
 Mirrors internal/config Config.Validate():
-  - site.url is required and must carry a scheme;
   - log.level must be one of debug|info|warn|error;
-  - publish.hostnames entries must be bare, non-empty hostnames;
-  - publish.gatewayRef.name is required when publish.hostnames is set.
+  - mirrorz.site.url is required (with a scheme) while mirrorz.enabled;
+  - publish.http.hostnames entries must be bare, non-empty hostnames;
+  - publish.http.gatewayRef.name is required when publish.http.hostnames is set.
+
+The OAuth clientSecret never appears here: when configured it is injected
+through the FALCON_ADMIN_OAUTH_CLIENT_SECRET environment variable and
+referenced via ${...} expansion.
 */}}
 {{- define "falcon.config" -}}
 {{- $cfg := .Values.controller.config -}}
+{{- $http := $cfg.publish.http | default dict -}}
 {{- $logLevel := $cfg.log.level | default "info" -}}
 {{- if not (has $logLevel (list "debug" "info" "warn" "error")) -}}
 {{- fail (printf "controller.config.log.level %q is not one of debug, info, warn, error" $logLevel) -}}
 {{- end -}}
-{{- $siteURL := required "controller.config.site.url must not be empty" $cfg.site.url -}}
-{{- if not (contains "://" $siteURL) -}}
-{{- fail (printf "controller.config.site.url %q must carry a scheme (e.g. https://...)" $siteURL) -}}
+{{- $site := $cfg.mirrorz.site | default dict -}}
+{{- $mirrorzEnabled := $cfg.mirrorz.enabled | default false -}}
+{{- $siteURL := $site.url | default "" -}}
+{{- if $mirrorzEnabled -}}
+{{- if eq (trim $siteURL) "" -}}
+{{- fail "controller.config.mirrorz.site.url must not be empty while mirrorz.enabled is set" -}}
 {{- end -}}
-{{- range $host := $cfg.publish.hostnames | default list -}}
+{{- if not (contains "://" $siteURL) -}}
+{{- fail (printf "controller.config.mirrorz.site.url %q must carry a scheme (e.g. https://...)" $siteURL) -}}
+{{- end -}}
+{{- end -}}
+{{- $hostnames := $http.hostnames | default list -}}
+{{- range $host := $hostnames -}}
 {{- if eq (trim $host) "" -}}
-{{- fail "controller.config.publish.hostnames must not contain empty entries" -}}
+{{- fail "controller.config.publish.http.hostnames must not contain empty entries" -}}
 {{- end -}}
 {{- if contains "/" $host -}}
-{{- fail (printf "controller.config.publish.hostnames entry %q must be a bare hostname" $host) -}}
+{{- fail (printf "controller.config.publish.http.hostnames entry %q must be a bare hostname" $host) -}}
 {{- end -}}
 {{- end -}}
-{{- $gw := fromYaml (include "falcon.mergeGatewayRef" (dict "ctx" $ "section" $cfg.publish.gatewayRef)) -}}
-{{- if and (gt (len ($cfg.publish.hostnames | default list)) 0) (not $gw.name) -}}
-{{- fail "controller.config.publish.gatewayRef.name is required when publish.hostnames is set" -}}
+{{- $gw := $http.gatewayRef | default dict -}}
+{{- if and (gt (len $hostnames) 0) (not (index $gw "name" | default "")) -}}
+{{- fail "controller.config.publish.http.gatewayRef.name is required when publish.http.hostnames is set" -}}
+{{- end -}}
+{{- $secretConfigured := or .Values.ui.oauth.clientSecret .Values.ui.oauth.existingSecret -}}
+{{- if and .Values.ui.oauth.clientSecret .Values.ui.oauth.existingSecret -}}
+{{- fail "ui.oauth.clientSecret and ui.oauth.existingSecret are mutually exclusive" -}}
+{{- end -}}
+{{- if and .Values.ui.enabled (not $secretConfigured) -}}
+{{- fail "ui.enabled requires ui.oauth.clientSecret or ui.oauth.existingSecret" -}}
+{{- end -}}
+{{- if and $secretConfigured (not .Values.ui.oauth.clientID) -}}
+{{- fail "ui.oauth.clientSecret/existingSecret require ui.oauth.clientID" -}}
+{{- end -}}
+{{- $uiHostnames := .Values.ui.route.hostnames | default list -}}
+{{- if and .Values.ui.enabled (eq (len $uiHostnames) 0) -}}
+{{- fail "ui.enabled requires ui.route.hostnames" -}}
+{{- end -}}
+{{- if and .Values.ui.enabled (eq (len (.Values.ui.route.parentRefs | default list)) 0) -}}
+{{- fail "ui.enabled requires ui.route.parentRefs" -}}
 {{- end -}}
 log:
   level: {{ $logLevel | quote }}
 api:
-  metricsBindAddress: {{ $cfg.api.metricsBindAddress | default ":8080" | quote }}
-  healthProbeBindAddress: {{ $cfg.api.healthProbeBindAddress | default ":8081" | quote }}
-  webapiBindAddress: {{ $cfg.api.webapiBindAddress | default ":8082" | quote }}
-site:
-  url: {{ $siteURL | quote }}
-  {{- with $cfg.site.abbr }}
-  abbr: {{ . | quote }}
-  {{- end }}
-  {{- with $cfg.site.name }}
-  name: {{ . | quote }}
-  {{- end }}
-  {{- range $k := list "logo" "logo_darkmode" "homepage" "issue" "request" "email" "group" "disk" "note" "big" }}
-  {{- with index $cfg.site $k }}
-  {{ $k }}: {{ . | quote }}
-  {{- end }}
-  {{- end }}
-  disable: {{ $cfg.site.disable | default false }}
-catalog:
-  enabled: {{ $cfg.catalog.enabled }}
+  metricsBindAddress: ":8080"
+  healthProbeBindAddress: ":8081"
+  mirrorzBindAddress: ":8082"
+  adminBindAddress: ":8083"
+mirrorz:
+  enabled: {{ $mirrorzEnabled }}
+  site:
+    url: {{ $siteURL | quote }}
+    {{- with $site.abbr }}
+    abbr: {{ . | quote }}
+    {{- end }}
+    {{- with $site.name }}
+    name: {{ . | quote }}
+    {{- end }}
+    {{- range $k := list "logo" "logo_darkmode" "homepage" "issue" "request" "email" "group" "disk" "note" "big" }}
+    {{- with index $site $k }}
+    {{ $k }}: {{ . | quote }}
+    {{- end }}
+    {{- end }}
+    disable: {{ $site.disable | default false }}
 sync:
   maxConcurrent: {{ $cfg.sync.maxConcurrent | default 0 }}
 admin:
-  {{- $cfgAdmin := $cfg.admin | default dict }}
-  {{- $adminHost := .Values.admin.host | default $cfgAdmin.host }}
-  {{- with $adminHost }}
-  host: {{ . | quote }}
-  {{- end }}
-auth:
-  github:
-    clientID: {{ $cfg.auth.github.clientID | default "" | quote }}
-    clientSecret: {{ $cfg.auth.github.clientSecret | default "" | quote }}
+  enabled: {{ .Values.ui.enabled }}
+  {{- with .Values.ui.oauth }}
+  {{- if .clientID }}
+  host: {{ index $uiHostnames 0 | quote }}
+  oauth:
+    clientID: {{ .clientID | quote }}
+    clientSecret: {{ if $secretConfigured }}"${FALCON_ADMIN_OAUTH_CLIENT_SECRET}"{{ else }}""{{ end }}
     allowedUserIDs:
-      {{- range ($cfg.auth.github.allowedUserIDs | default list) }}
+      {{- range (.allowedUserIDs | default list) }}
       - {{ . }}
       {{- end }}
+  {{- end }}
+  {{- end }}
 publish:
-  {{- if $gw }}
-  gatewayRef:
-{{ toYaml $gw | indent 4 }}
-  {{- end }}
-  {{- with $cfg.publish.hostnames | default list }}
-  hostnames:
-{{ toYaml . | indent 4 }}
-  {{- end }}
-  labels: {{ toYaml ($cfg.publish.labels | default dict) | trim }}
-  annotations: {{ toYaml ($cfg.publish.annotations | default dict) | trim }}
+  http:
+    {{- with $gw }}
+    gatewayRef:
+{{ toYaml . | indent 6 }}
+    {{- end }}
+    {{- with $hostnames }}
+    hostnames:
+{{ toYaml . | indent 6 }}
+    {{- end }}
+    labels: {{ toYaml ($http.labels | default dict) | trim }}
+    annotations: {{ toYaml ($http.annotations | default dict) | trim }}
 {{- end -}}

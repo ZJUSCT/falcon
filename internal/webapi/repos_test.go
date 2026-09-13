@@ -31,7 +31,6 @@ func TestHandleRepoSpecOnlyYAML(t *testing.T) {
 	m := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors"},
 		Spec: mirrorv1alpha1.MirrorSpec{
-			Sync: mirrorv1alpha1.MirrorSyncSpec{Paused: false},
 			Info: mirrorv1alpha1.MirrorInfo{
 				Description: "Debian 镜像",
 				Upstream:    "rsync://ftp.debian.org/debian/",
@@ -42,7 +41,7 @@ func TestHandleRepoSpecOnlyYAML(t *testing.T) {
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()
-	srv := httptest.NewServer((&Server{Client: c}).Handler())
+	srv := httptest.NewServer((&Server{Client: c}).AdminHandler())
 	defer srv.Close()
 
 	for _, path := range []string{"/api/repos/debian", "/api/repos/debian.yaml", "/api/repos/debian.yml"} {
@@ -71,7 +70,7 @@ func TestHandleRepoJSONExtension(t *testing.T) {
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()
-	srv := httptest.NewServer((&Server{Client: c}).Handler())
+	srv := httptest.NewServer((&Server{Client: c}).AdminHandler())
 	defer srv.Close()
 
 	resp, body := get(t, srv.URL+"/api/repos/debian.json")
@@ -89,7 +88,7 @@ func TestHandleRepoJSONExtension(t *testing.T) {
 func TestHandleRepoUnknown(t *testing.T) {
 	m := &mirrorv1alpha1.Mirror{ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors"}}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()
-	srv := httptest.NewServer((&Server{Client: c}).Handler())
+	srv := httptest.NewServer((&Server{Client: c}).AdminHandler())
 	defer srv.Close()
 
 	resp, _ := get(t, srv.URL+"/api/repos/nonexistent")
@@ -118,7 +117,7 @@ func TestHandleRepoAmbiguous(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "pypi", Namespace: "mirrors"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(mirror, proxy).Build()
-	srv := httptest.NewServer((&Server{Client: c}).Handler())
+	srv := httptest.NewServer((&Server{Client: c}).AdminHandler())
 	defer srv.Close()
 
 	resp, _ := get(t, srv.URL+"/api/repos/pypi")
@@ -133,7 +132,7 @@ func TestHandleRepoAmbiguous(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors"},
 	}
 	c2 := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(otherNS, oneNS).Build()
-	srv2 := httptest.NewServer((&Server{Client: c2}).Handler())
+	srv2 := httptest.NewServer((&Server{Client: c2}).AdminHandler())
 	defer srv2.Close()
 
 	resp, _ = get(t, srv2.URL+"/api/repos/debian")
@@ -152,7 +151,7 @@ func TestHandleRepoProxyMirrorSpec(t *testing.T) {
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(p).Build()
-	srv := httptest.NewServer((&Server{Client: c}).Handler())
+	srv := httptest.NewServer((&Server{Client: c}).AdminHandler())
 	defer srv.Close()
 
 	resp, body := get(t, srv.URL+"/api/repos/pypi-proxy")

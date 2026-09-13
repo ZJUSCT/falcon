@@ -141,23 +141,23 @@ func ensureRouteWithRules(ctx context.Context, c client.Client, recorder record.
 	route := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: routeKey.Namespace, Name: routeKey.Name}}
 
 	labels := objectLabels(base, publishRole(PublishProtocolHTTP))
-	maps.Copy(labels, cfg.Publish.Labels)
+	maps.Copy(labels, cfg.Publish.HTTP.Labels)
 
 	op, err := controllerutil.CreateOrUpdate(ctx, c, route, func() error {
 		route.Labels = labels
 		// Keep an absent annotations field absent. Assigning a non-nil empty map
 		// makes the API server persist `{}`, after which every reconcile compares
 		// it with the desired empty map and writes the HTTPRoute again.
-		if len(cfg.Publish.Annotations) == 0 {
+		if len(cfg.Publish.HTTP.Annotations) == 0 {
 			route.Annotations = nil
 		} else {
-			route.Annotations = maps.Clone(cfg.Publish.Annotations)
+			route.Annotations = maps.Clone(cfg.Publish.HTTP.Annotations)
 		}
 		route.Spec = gatewayv1.HTTPRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{publishGatewayParentRef(cfg, owner.GetNamespace())},
 			},
-			Hostnames: hostnamesAsGatewayHostnames(cfg.Publish.Hostnames),
+			Hostnames: hostnamesAsGatewayHostnames(cfg.Publish.HTTP.Hostnames),
 			Rules:     rules,
 		}
 		return controllerutil.SetControllerReference(owner, route, scheme)
@@ -233,12 +233,12 @@ func publishGatewayParentRef(cfg *config.Config, ownerNamespace string) gatewayv
 	ref := gatewayv1.ParentReference{
 		Group: ptr.To(gatewayv1.Group("gateway.networking.k8s.io")),
 		Kind:  ptr.To(gatewayv1.Kind("Gateway")),
-		Name:  gatewayv1.ObjectName(cfg.Publish.GatewayRef.Name),
+		Name:  gatewayv1.ObjectName(cfg.Publish.HTTP.GatewayRef.Name),
 	}
-	if ns := cfg.Publish.GatewayRef.Namespace; ns != "" && ns != ownerNamespace {
+	if ns := cfg.Publish.HTTP.GatewayRef.Namespace; ns != "" && ns != ownerNamespace {
 		ref.Namespace = ptr.To(gatewayv1.Namespace(ns))
 	}
-	if section := cfg.Publish.GatewayRef.SectionName; section != "" {
+	if section := cfg.Publish.HTTP.GatewayRef.SectionName; section != "" {
 		ref.SectionName = ptr.To(gatewayv1.SectionName(section))
 	}
 	return ref

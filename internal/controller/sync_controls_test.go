@@ -21,11 +21,11 @@ func TestManualModeAndQueuedAutomaticWork(t *testing.T) {
 	for _, manual := range []bool{false, true} {
 		t.Run(map[bool]string{false: "automatic queue held", true: "manual request runs"}[manual], func(t *testing.T) {
 			m := testMirror()
-			m.Spec.Sync.Paused = true
 			m.Finalizers = []string{MirrorFinalizer}
 			if manual {
 				m.Annotations = map[string]string{SyncRequestAnnotation: "true"}
 			}
+			m.SetSyncPaused(true)
 			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&mirrorv1alpha1.Mirror{}).WithObjects(m).Build()
 			r := &MirrorReconciler{Client: c, Scheme: testScheme(t), Config: testConfig(), SyncLimiter: NewSyncLimiter(1)}
 			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(m)}
@@ -83,7 +83,7 @@ func TestManualModeAndQueuedAutomaticWork(t *testing.T) {
 				if m.Status.CurrentSync == nil || m.Status.PausedAt == nil {
 					t.Fatal("queued work was discarded")
 				}
-				m.Spec.Sync.Paused = false
+				m.SetSyncPaused(false)
 				if err := c.Update(t.Context(), m); err != nil {
 					t.Fatal(err)
 				}
@@ -105,7 +105,6 @@ func TestCancellationDrainsWritersAndRetainsPublication(t *testing.T) {
 			m := testMirror()
 			previous := metav1.Unix(1788000000, 0)
 			now := previous.Add(time.Hour)
-			m.Spec.Sync.Paused = true
 			if !started {
 				m.Status.PausedAt = previous.DeepCopy()
 			}
@@ -113,6 +112,7 @@ func TestCancellationDrainsWritersAndRetainsPublication(t *testing.T) {
 			m.Status.LastSuccessfulSyncAt = &previous
 			m.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded, FinishedAt: &previous}
 			m.Annotations = map[string]string{SyncRequestAnnotation: "true", mirrorv1alpha1.AbortRequestAnnotation: "true"}
+			m.SetSyncPaused(true)
 			m.Status.ConsecutiveFailures = 2
 			m.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{QueuedAt: timePtr(now), Phase: mirrorv1alpha1.SyncPhaseCancelling, Manual: true}
 			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &corev1.Pod{}).WithObjects(m).Build()
@@ -215,11 +215,11 @@ func TestAdmissionRestoresExistingJobsBeforeQueuedMirrors(t *testing.T) {
 
 func TestManualCompletionReturnsToPausedAndConsumesRequest(t *testing.T) {
 	m := testMirror()
-	m.Spec.Sync.Paused = true
 	m.Spec.Publish = mirrorv1alpha1.MirrorServicesSpec{}
 	now := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
 	m.Status.WorkPVC = m.Name + "-sync"
 	m.Annotations = map[string]string{SyncRequestAnnotation: "true"}
+	m.SetSyncPaused(true)
 	m.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{QueuedAt: timePtr(now.Add(-time.Hour)), Manual: true, Phase: mirrorv1alpha1.SyncPhaseSucceeded}
 	m.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded, FinishedAt: timePtr(now.Add(-time.Minute))}
 	m.Status.LastSuccessfulSyncAt = m.Status.LastSync.FinishedAt.DeepCopy()
@@ -233,7 +233,7 @@ func TestManualCompletionReturnsToPausedAndConsumesRequest(t *testing.T) {
 	}
 	completeTestSyncSnapshot(t, r, m)
 	m = getMirror(t, t.Context(), c, client.ObjectKeyFromObject(m))
-	if m.SyncRequested() || m.Status.RequestCleanup != nil || m.Status.CurrentSync != nil || !m.Status.PausedAt.Equal(timePtr(now)) || !m.Spec.Sync.Paused {
+	if m.SyncRequested() || m.Status.RequestCleanup != nil || m.Status.CurrentSync != nil || !m.Status.PausedAt.Equal(timePtr(now)) || !m.SyncPaused() {
 		t.Fatalf("manual completion must return to paused: %#v", m.Status)
 	}
 }
@@ -252,7 +252,7 @@ func TestInvalidRequestDoesNotTurnScheduledWorkIntoManualWork(t *testing.T) {
 	if m.Status.CurrentSync == nil || m.Status.CurrentSync.Manual {
 		t.Fatal("invalid annotation incorrectly made bootstrap manual")
 	}
-	m.Spec.Sync.Paused = true
+	m.SetSyncPaused(true)
 	if err := c.Update(t.Context(), m); err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestAdmissionRejectsStalePauseOrCancellation(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				latest.Spec.Sync.Paused = true
+				latest.SetSyncPaused(true)
 				if err := c.Update(t.Context(), latest); err != nil {
 					t.Fatal(err)
 				}
@@ -469,7 +469,7 @@ func TestResumeHonorsScheduleAndRetainsPausedSpecEdits(t *testing.T) {
 			if initialHash == "" || m.Status.CurrentSync != nil {
 				t.Fatal("observed spec must establish a baseline without starting a run")
 			}
-			m.Spec.Sync.Paused = true
+			m.SetSyncPaused(true)
 			m.Generation++
 			if err := c.Update(t.Context(), m); err != nil {
 				t.Fatal(err)
@@ -492,7 +492,7 @@ func TestResumeHonorsScheduleAndRetainsPausedSpecEdits(t *testing.T) {
 			if err := c.Status().Update(t.Context(), m); err != nil {
 				t.Fatal(err)
 			}
-			m.Spec.Sync.Paused = false
+			m.SetSyncPaused(false)
 			m.Generation++
 			if err := c.Update(t.Context(), m); err != nil {
 				t.Fatal(err)
@@ -525,12 +525,12 @@ func TestModeChangesDuringTransactionDoNotQueueAnotherRun(t *testing.T) {
 	if _, err := r.startSync(t.Context(), m, true, publicationHealth{}); err != nil {
 		t.Fatal(err)
 	}
-	m.Spec.Sync.Paused = true
+	m.SetSyncPaused(true)
 	m.Generation++
 	if err := c.Update(t.Context(), m); err != nil {
 		t.Fatal(err)
 	}
-	m.Spec.Sync.Paused = false
+	m.SetSyncPaused(false)
 	m.Generation++
 	if err := c.Update(t.Context(), m); err != nil {
 		t.Fatal(err)

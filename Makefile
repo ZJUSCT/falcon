@@ -19,3 +19,14 @@ format: format-go format-hygiene
 $(CHECKS) $(WRITE_TASKS):
 	$(COMPOSE) build $@
 	$(COMPOSE) run --rm --no-deps -T $@
+
+# End-to-end scenario on a kind cluster: not part of `check`. Builds the
+# controller image on the host, brings up the cluster through the e2e-tools
+# container (Docker socket), asserts the demo Mirror flow, tears everything
+# down. Diagnostics land in .e2e-dump/.
+e2e:
+	$(COMPOSE) build e2e
+	docker build -t falcon:e2e -f Dockerfile .
+	mkdir -p .e2e-dump
+	$(COMPOSE) run --rm --no-deps -T e2e
+.PHONY: e2e

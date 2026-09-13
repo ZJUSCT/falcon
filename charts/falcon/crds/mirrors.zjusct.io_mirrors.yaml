@@ -17716,11 +17716,6 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
-                  paused:
-                    description: |-
-                      Paused disables automatic synchronization; explicit requests still run.
-                      Published content and its serving workloads remain available.
-                    type: boolean
                   podTemplate:
                     description: |-
                       PodTemplate is the FULL pod template of the sync Job (Job
@@ -26391,8 +26386,8 @@ spec:
                 type: object
               lastAcceptedSpecHash:
                 description: |-
-                  LastAcceptedSpecHash identifies spec.sync accepted for the last
-                  synchronization, excluding paused.
+                  LastAcceptedSpecHash identifies the spec.sync accepted for the last
+                  synchronization.
                 type: string
               lastAcceptedSyncAt:
                 description: LastAcceptedSyncAt reserves a generation second even
@@ -26484,8 +26479,9 @@ spec:
                 type: integer
               pausedAt:
                 description: |-
-                  PausedAt is when the controller observed syncing stop under paused=true.
-                  Running Jobs drain first; publication proceeds independently.
+                  PausedAt is when the controller observed syncing stop under the
+                  sync-paused annotation. Running Jobs drain first; publication proceeds
+                  independently.
                 format: date-time
                 type: string
               publication:

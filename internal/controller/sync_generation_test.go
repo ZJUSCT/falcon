@@ -17,8 +17,8 @@ func TestCancelledGenerationDefersSameSecondFollowupAcrossRestart(t *testing.T) 
 	m := testMirror()
 	m.Finalizers = []string{MirrorFinalizer}
 	m.Spec.Publish = mirrorv1alpha1.MirrorServicesSpec{}
-	m.Spec.Sync.Paused = true
 	m.Annotations = map[string]string{SyncRequestAnnotation: "true"}
+	m.SetSyncPaused(true)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&mirrorv1alpha1.Mirror{}).WithObjects(m).Build()
 	restart := func() *MirrorReconciler {
 		return &MirrorReconciler{Client: c, Scheme: testScheme(t), Config: testConfig(), SyncLimiter: NewSyncLimiter(1), Now: func() time.Time { return now }}

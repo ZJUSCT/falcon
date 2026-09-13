@@ -32,138 +32,14 @@ Falcon 使用 [规范驱动开发（SDD）](https://en.wikipedia.org/wiki/Specif
 
 ## 目录
 
-- [快速开始](#快速开始)
 - [K8s 基础](#k8s-基础)
 - [设计](#设计)
-  - [CRD](#crd)
-  - [镜像的生命周期](#镜像的生命周期)
-  - [映射到 MirrorZ](#映射到-mirrorz)
-  - [WebUI](#webui)
-  - [Helm Chart](#helm-chart)
+    - [CRD](#crd)
+    - [镜像的生命周期](#镜像的生命周期)
+    - [映射到 MirrorZ](#映射到-mirrorz)
+    - [WebUI](#webui)
+    - [Helm Chart](#helm-chart)
 - [开发](#开发)
-
-## 快速开始
-
-### 准备环境
-
-集群需要具备以下能力：
-
-- Kubernetes 和 Helm，以及创建 Falcon 所需资源的权限。
-- 支持 VolumeSnapshot 和从它克隆 PVC 的 CSI 驱动、VolumeSnapshot CRD 与快照控制器，以及对应的 StorageClass 和 VolumeSnapshotClass。
-- Gateway API CRD。通过特定协议（HTTP 或 Rsync）对外发布时，还需要可用的 Gateway 实现、Gateway 和域名解析；Gateway 的监听器应允许 Falcon 所在 namespace 的路由挂载。
-
-以 ZJU Mirror 的基础设施为例：
-
-| 组件 | 版本 |
-| --- | --- |
-| [K3s](https://github.com/k3s-io/k3s) | v1.36.3+k3s1 |
-| [openebs/zfs-localpv](https://github.com/openebs/zfs-localpv) | v2.11.0 |
-| [envoyproxy/gateway](https://github.com/envoyproxy/gateway) | v1.9.0 |
-
-### 安装 Falcon
-
-先按实际环境编写 `values.yaml`。以下域名和 Gateway 名称均为示例：
-
-```yaml
-global:
-  gatewayRef:
-    name: mirror-gateway
-    namespace: gateway-system
-    sectionName: https
-controller:
-  config:
-    site:
-      url: https://mirrors.example.org
-      abbr: EXAMPLE
-      name: 示例镜像站
-    publish:
-      hostnames:
-        - mirrors.example.org
-  metrics:
-    serviceMonitor:
-      enabled: false # 集群已安装 Prometheus Operator 时可启用
-catalog:
-  enabled: true
-  hosts:
-    - mirrors.example.org
-```
-
-```sh
-helm install falcon oci://ghcr.io/zjusct/charts/falcon \
-  -n mirror --create-namespace -f values.yaml
-```
-
-Chart 安装控制器和 Mirror、ProxyMirror CRD。具体镜像由运维人员另行创建。
-
-### 创建第一个 Mirror
-
-以下例子生成一个带时间戳的页面，用于验证“同步 → 快照 → 发布”的完整流程，不从真实软件源下载内容：
-
-```yaml
-apiVersion: mirrors.zjusct.io/v1alpha1
-kind: Mirror
-metadata:
-  name: demo
-  namespace: mirror
-spec:
-  info:
-    cname: demo
-    description: 验证同步与快照发布流程
-    upstream: 本地生成的演示内容
-  storage:
-    syncStorageClassName: <存储类名称>
-    publishStorageClassName: <存储类名称>
-    volumeSnapshotClassName: <快照类名称>
-    pvcTemplate:
-      accessModes: [ReadWriteOnce]
-      resources:
-        requests:
-          storage: 1Gi
-      volumeMode: Filesystem
-  sync:
-    interval: 6h
-    timeout: 5m
-    podTemplate:
-      spec:
-        containers:
-          - name: sync
-            image: busybox:1.37
-            command: [sh, -ec]
-            args:
-              - 'date -u > /data/index.html'
-            volumeMounts:
-              - name: sync-data
-                mountPath: /data
-  publish:
-    http:
-      podTemplate:
-        spec:
-          containers:
-            - name: nginx
-              image: nginx:stable-alpine
-              ports:
-                - containerPort: 80
-              volumeMounts:
-                - name: mirror-data
-                  mountPath: /usr/share/nginx/html/demo
-                  readOnly: true
-              readinessProbe:
-                httpGet:
-                  path: /demo/index.html
-                  port: 80
-```
-
-`sync-data` 和 `mirror-data` 的卷源由 Falcon 注入，用户只声明挂载位置。发布容器需要处理完整的 `/demo` 路径，Falcon 不自动移除路由前缀。
-
-```sh
-kubectl apply -f demo.yaml
-kubectl -n mirror get mirrors
-kubectl -n mirror describe mirror demo
-```
-
-首次同步、快照恢复及路由就绪后，可以访问 `https://mirrors.example.org/demo/index.html` 和 `https://mirrors.example.org/mirrorz.json`。
-
-该示例只用于验证流程。接入真实软件源时，应配置对应同步工具、服务配置、资源需求和退出行为。
 
 ## K8s 基础
 
@@ -248,7 +124,7 @@ Workload 需要善用 K8s 这套机制，合理设计 readiness probe、graceful
 - **单命名空间部署**：集群上可能同时存在生产和测试实例。在配置妥当（例如指定的域名不冲突）的情况下，多个实例应该互不干扰、各自独立运行。K8s 一般使用 namespace 来隔离不同实例的资源，Falcon 总是将本实例的资源放在同一个 namespace 内。
 - **以 K8s API 为基准**：Falcon 主要遵守 K8s API 标准进行设计，不关心具体实现。例如在存储方面，Falcon 依赖 K8s 标准存储 API 定义的 VolumeSnapshot 等，而不关心其具体实现是 OpenEBS、Longhorn 还是 Ceph。
 - **状态持久化于 K8s**：编排进度保存在 CR 的 status、请求注解和子资源中；控制器重启后据此继续协调，已有同步 Job 和发布负载继续运行，仅调度和状态更新可能短暂延迟。
-- **适配具体实现**：为了实现 K8s 尚未或无法标准化的功能，Falcon 可能会依赖具体实现的特性。例如使用 OpenEBS ZFS LocalPV 作为存储后端时，Falcon 会使用 zfs-agent 获取 ZFS 的详细数据用于 UI 展示。
+- **适配具体实现**：为了实现 K8s 尚未或无法标准化的功能，Falcon 可能会依赖具体实现的特性。例如使用 OpenEBS ZFS LocalPV 作为存储后端时，Falcon UI 会使用 zfs-agent 获取 ZFS 的详细数据用于展示。
 - **暂不考虑支持多副本**：多副本一般是出于 Scaling 或 HA 需求。Falcon 目前的主要功能是 Reconcile，并不需要极高的可用性保障，也暂未观察到存在压力的场景，因此暂不考虑支持多副本。
 - **Fail Fast 而非隐式纠错**：在发现配置异常或不合法状态时，应立即显式报错并中断执行，而不是通过复杂的逻辑试图自动修正或忽略错误。这能防止错误扩散，显著降低排查成本。
 
@@ -270,27 +146,69 @@ Falcon 只有一个 flag `--config` 用于指定配置文件，默认 `/etc/falc
 
 ```yaml
 log:
-  level: info                      # debug | info | warn | error（zap）；空补 info
+  # debug | info | warn | error（zap）
+  # 可选：默认 info
+  level: info
 api:
   metricsBindAddress: ":8080"
   healthProbeBindAddress: ":8081"
-  webapiBindAddress: ":8082"       # "0" 关闭 webapi
-site:
-  url: https://mirrors.example.org # 必填，必须带 scheme；mirrorz site 段与回落 baseURL
-  abbr: ""                         # 可选
-  name: ""                         # 可选
-catalog:
-  enabled: false                   # /mirrorz.json 开关（chart 默认 true）
-sync:
-  maxConcurrent: 0                 # 全局同步并发上限；<= 0 = 不限
-publish:
-  gatewayRef:                      # hostnames 非空时 name 必填
+  mirrorzBindAddress: ":8082"
+  adminBindAddress: ":8083"
+  # 以上为 chart 内部管道端口，固定值
+  # mirrorz 端口只服务 /mirrorz.json；admin 端口服务 /api、OAuth 与 UI 反代
+  # 任一地址为 "0" 时关闭对应监听（独立开关：可无 UI 部署、可纯同步部署）
+mirrorz:
+  # GET /mirrorz.json 端点开关
+  # 可选：默认 false（chart 默认 true）
+  enabled: false
+  site:
+    # 站点 URL；mirrorz 回落 baseURL（请求 Host 不在 publish.http.hostnames 中时使用）
+    # enabled 时必填，必须带 scheme
+    url: https://mirrors.example.org
+    # 其余字段渲染进 mirrorz 文档的 site 段，全部可选
+    abbr: ""
     name: ""
-    namespace: ""
-    sectionName: ""
-  hostnames: []                    # 空 ⇒ HTTPRoute 生成整体关闭
-  labels: {}                       # 盖到每条发布 HTTPRoute
-  annotations: {}
+    logo: ""
+    logo_darkmode: ""
+    homepage: ""
+    issue: ""
+    request: ""
+    email: ""
+    group: ""
+    disk: ""
+    note: ""
+    big: ""
+    disable: false
+sync:
+  # 全局同步并发上限
+  # 可选：默认 0 = 不限
+  maxConcurrent: 0
+admin:
+  # 管理面总开关：false 时不启动 admin 监听（纯同步/仅 mirrorz 部署）
+  # 可选：默认 false（chart 由 ui.enabled 派生）
+  enabled: false
+  # 管理域名：OAuth 重定向锚点与 UI 服务域名
+  # oauth 配置时必填；chart 从 ui.route.hostnames[0] 派生
+  host: ""
+  # GitHub OAuth：配置后整个 admin 面（含只读 /api）都要求登录会话；
+  # 未配置时 admin 面完全开放（调试/本地模式）
+  # clientSecret 建议经 ${NAME} 环境变量注入，不落在配置文件里
+  oauth:
+    clientID: ""
+    clientSecret: ""
+    # 允许访问的 GitHub 用户 ID 列表
+    allowedUserIDs: []
+publish:
+  http:
+    # HTTP 发布网关；hostnames 非空时 name 必填
+    gatewayRef:
+      name: ""
+      namespace: ""
+      sectionName: ""
+    # 发布域名列表；空表示不生成任何发布 HTTPRoute
+    hostnames: []
+    labels: {}
+    annotations: {}
 ```
 
 配置支持 `${NAME}` 环境变量代换，`$${NAME}` 保持原样，不支持 `${NAME:-default}` 等 shell 表达式。
@@ -304,7 +222,7 @@ publish:
 - 怎么服务
 - 其他信息
 
-自然产生了 `spec` 中的 `storage`、`sync`、`publish`、`info` 四个 map。并且这些内容 K8s 已经有了对应的抽象：Job、PVC、VolumeSnapshot、Deployment、Service 等，只需要把这些内容组合起来，再加上一些镜像编排的内容，就形成了可以描述镜像的 CRD。
+自然产生了 `spec` 中的 `storage`、`sync`、`publish`、`info` 四个 map。并且这些内容 K8s 已经有了对应的抽象：PVC、VolumeSnapshot、Job、Deployment、Service、Route 等，只需要把这些内容组合起来，再加上控制镜像同步周期的字段，就形成了可以描述镜像的 CRD。
 
 API 组 `mirrors.zjusct.io`，版本 `v1alpha1`，kind `Mirror`（复数 `mirrors`，无短名）和 `ProxyMirror`（复数 `proxymirrors`，无短名），均为 namespaced。
 
@@ -341,9 +259,6 @@ spec:
     # string：上游来源描述
     # 必填
   sync:
-    paused: false
-    # bool：暂停自动同步
-    # 可选
     interval: 6h
     # duration：同步周期
     # 必填
@@ -482,7 +397,7 @@ status:
   observedGeneration: 1
   # int64：控制器已观察的 generation，不代表该配置已成功完成
   lastAcceptedSpecHash: ...
-  # string：最近接受的同步事务对应的 spec.sync 哈希，不包含 paused
+  # string：最近接受的同步事务对应的 spec.sync 哈希
   lastAcceptedSyncAt: ...
   # Time：最近接受的同步代次时间（秒精度）；取消后仍保留，避免同秒重复分配
   workPVC: <base>-sync
@@ -698,7 +613,7 @@ ProxyMirror 不存在同步和发布流程。Falcon 按照其配置创建好相�
         - 首次同步：镜像尚无已完成的同步记录。
         - 周期同步：到达下一次计划同步时间。
         - 失败重试：Job 失败后到达快速重试时间；达到重试上限后恢复普通周期。快照错误保留当前同步流程并报告 `Degraded`，不触发新的 Job。
-        - 同步配置变更：`spec.sync` 中除 `paused` 外的配置与上次接受的配置不同；信息、存储、发布配置不参与。
+        - 同步配置变更：`spec.sync` 的配置与上次接受的配置不同；信息、存储、发布配置不参与。
         - 手动请求：存在 `mirrors.zjusct.io/sync-request: "true"`；WebUI 的 Sync Now 写入该注解。
         - 暂停仅限制上述自动触发，手动请求仍可执行；所有同步均需等待上一轮同步和发布（含旧 Pod 清理）完成。
         - 同一镜像同一秒只接受一个同步代次，多次触发不产生多个同秒代次。例如，一轮同步在等待配额时被取消，同秒又收到新请求，则保留新请求，等到下一秒再接受，避免复用已取消代次的时间戳和资源名。时间戳从同步延续到快照和发布，Job 的实际开始、结束时间另行记录。
@@ -739,7 +654,7 @@ ProxyMirror 不存在同步和发布流程。Falcon 按照其配置创建好相�
 
 举例：镜像的 HTTP 服务正常（`Ready`），同时出现了其他错误（`Degraded`）
 
-`status.sync.phase` 描述同步调度与执行，暂停模式由 `spec.sync.paused` 独立表示。ProxyMirror 没有同步状态。
+`status.sync.phase` 描述同步调度与执行的阶段。ProxyMirror 没有同步状态。
 
 | Phase | 含义 |
 | --- | --- |
@@ -750,17 +665,17 @@ ProxyMirror 不存在同步和发布流程。Falcon 按照其配置创建好相�
 | `Retrying` | 上次 Job 失败，等待快速重试；暂停模式下不会自动开始。 |
 | `Cancelling` | 已请求取消，等待同步工作负载停止。 |
 
-#### 同步暂停、其他触发条件和强制终止
+#### 同步的暂停、其他触发条件和强制终止
 
-暂停自动同步：设置`spec.sync.paused: true`。暂停不影响服务和手动同步。
+暂停/恢复自动同步：点击 WebUI 上的 Pause/Resume 按钮或设置 `mirrors.zjusct.io/sync-paused: "true"` 注解，不影响服务和手动同步。
 
 手动请求同步：点击 WebUI 上的按钮或设置 `mirrors.zjusct.io/sync-request: "true"`。Annotation 在同步流程结束后移除。快照错误时保留请求并报告 `Degraded`。注解存在期间重复写入 `"true"` 合并为一次请求。
 
-配置变更：仅 `spec.sync` 中除 `paused` 外的变更触发自动同步，通过 `lastAcceptedSpecHash` 记录已接受的配置。信息、存储和发布配置的变更不触发同步；自动同步仍受暂停模式和发布完成的约束。
+配置变更触发同步：`spec.sync` 的变更触发自动同步，通过 `lastAcceptedSpecHash` 记录已接受的配置。信息、存储和发布配置的变更不触发同步；自动同步仍受暂停模式和发布完成的约束。
 
-强制终止：
+强制终止运行中的同步：
 
-- 设置 `mirrors.zjusct.io/abort-request: "true"`，目标为控制器处理时的当前同步流程。
+- 点击 WebUI 上的按钮或设置 `mirrors.zjusct.io/abort-request: "true"`，目标为控制器处理时的当前同步流程。
 - 仅 `status.currentSync.phase` 为 `Pending` 或 `Running` 的同步流程可请求 Abort，进入 `Cancelling` 后，由控制器以 foreground propagation 删除当前 Job。不符合条件的请求被忽略并移除。
 - 注解保留至工作负载停止且取消结果已记录，期间重复请求合并；取消手动同步时一并移除其 `sync-request`，不会再次启动该请求。
 
@@ -849,7 +764,7 @@ MirrorZ 字段与 Falcon 字段的映射：
 
 | 情况 | 条件 | 完整 status |
 | --- | --- | --- |
-| 手动模式，暂停已生效 | `sync.paused && pausedAt != nil && (currentSync == nil || currentSync.phase == "Pending")` | `P<pausedAt>N<creationTimestamp>` |
+| 手动模式，暂停已生效 | `sync-paused 注解存在 && pausedAt != nil && (currentSync == nil | | currentSync.phase == "Pending")` | `P<pausedAt>N<creationTimestamp>` |
 | 正在排队／取消尚未开始的同步 | `currentSync.phase == "Pending"`，或 `currentSync.phase == "Cancelling" && currentSync.startedAt == nil` | `D<currentSync.queuedAt>N<creationTimestamp>` |
 | 正在同步／等待运行中的同步终止 | `currentSync.phase == "Running"`，或 `currentSync.phase == "Cancelling" && currentSync.startedAt != nil` | `Y<currentSync.startedAt>O<lastSuccessfulSyncAt>N<creationTimestamp>` |
 | 最近同步成功 | `lastSync.phase == "Succeeded"` | `S<lastSync.finishedAt>[X<nextSyncAt>]N<creationTimestamp>` |
@@ -905,7 +820,29 @@ Helm Chart 在命名空间中安装一个 Falcon 实例，包括 WebUI、zfs-age
 
 ## 开发
 
-### 测试规范
+### SDD 流程
+
+AI 在本项目工作时，应当遵循本节所描述的 SDD 流程：
+
+> 任何一次迭代——无论新特性、重构还是修复——都遵循同一个循环：**理解意图 → 调查现状 → 澄清分歧 → 确定方案与验收 → 实现 → 回顾**。前四步未完成之前，不写实现代码。
+>
+> 1. **理解意图，先行为后实现。** 动手前先用一两句话说明：这次迭代完成后，系统在外部可观察的行为变化是什么（API、CRD 字段、镜像状态、日志、告警……）。说不出可观察的变化，说明还没理解需求。
+>
+> 2. **先调查，后提问。** 提问之前先在仓库内找答案：本文档是设计规范，代码和测试是规范在当前状态下的体现。区分两种「不知道」——「没查过所以不知道」应当自己去查，「查了也没有答案」才留给人类。「没查就问」与「该问不问」同样是错误。
+>
+> 3. **有界澄清。** 只问同时满足两个条件的问题：一是不存在合理的默认选择（能从本文档原则、既有代码模式或行业惯例推出默认值的，不算）；二是猜错代价显著（会改变行为语义、公开 API/CRD 形态、数据形态或破坏既有约定）。每个问题必须附推荐答案和一句理由，让人可以只回复「同意」。一次迭代的关键问题原则上不超过 3 个，其余按默认值执行。
+>
+> 4. **假设必须落盘。** 所有自行做出的决定——采纳的默认值、做的权衡、主动放弃不问的问题——写入 CHANGELOG.md，供人事后否决。留在对话里的决定等于没有决定。CHANGELOG.md 仅用于本地记录用，不提交。
+>
+> 5. **方案与验收前置。** 实现前确定三件事：改动落在哪些组件、遵循哪个既有模式（现状即规范，除非它与本文档矛盾）、完成后如何验证（对应 `make check` 的哪一层、需要哪些手工验证）。验证方式定不出来，等于方案没有定。不为假想的未来需求增加抽象和间接层。
+>
+> 6. **最小可验证增量。** 按依赖顺序推进，每一步结束时仓库都处于可构建、可检查的状态；优先交付一个端到端可验证的最小版本，再逐步补全。
+>
+> 7. **偏离即上报。** 实现中发现方案与事实不符（规范过时、方案有洞、验收无法达成）时，停下来报告分歧并提议修正，而不是悄悄吸收偏差。发现本文档与代码行为矛盾时，指出矛盾并说明应以哪边为准，由人类更新规范。
+>
+> 流程强度与改动规模成比例：笔误修复、依赖升级这类改动可以压缩前四步，但第 4、7 条永远适用。
+
+### 测试
 
 审慎编写单元测试，过度设计的测试只会增加维护负担，不要以测试数量或覆盖率作为目标。
 
@@ -919,9 +856,7 @@ Helm Chart 在命名空间中安装一个 Falcon 实例，包括 WebUI、zfs-age
 | `ui-checks` | Falcon UI：`npm ci`、`npm run build`（含 TypeScript 与 ESLint） |
 | `chart-checks` | Helm lint、默认配置及全组件配置的渲染校验、Chart 打包 |
 
-### 执行检查
-
-宿主机只需 Git、GNU Make、Docker（含 Compose v2 和 BuildKit），无需安装 Go、Node、Helm 或 controller-gen。工具版本及基础镜像 digest 固定在 `scripts/checks/Dockerfile` 和 `.pre-commit-hygiene.yaml` 中，本地与 CI 使用相同入口：
+宿主机只需 Git、GNU Make、Docker（含 Compose v2 和 BuildKit），无需安装 Go、Node、Helm 或 controller-gen。工具版本及基础镜像固定在 `scripts/checks/Dockerfile` 和 `.pre-commit-config.yaml` 中，本地与 CI 使用相同入口：
 
 ```sh
 make check                   # 全部提交检查，任一失败则退出非零；直接 make 也相同
@@ -931,9 +866,15 @@ make ui-checks chart-checks  # 选择多个检查组
 
 也可使用 `docker compose run --rm go-checks` 等直接运行单组检查；首次使用自动构建镜像，工具定义变更后应先 `docker compose build`。各组均检查当前工作区（含未暂存修改及未被 Git 忽略的新文件），在临时副本中运行，不修改源码或 Git index；构建产物随容器移除，依赖及编译缓存保存在 Docker volumes 中。首次运行需要联网下载镜像和依赖。
 
-pre-commit 为可选的提交入口：安装后运行 `pre-commit install` 即可在提交时调用 `make check`，也可手动 `pre-commit run --all-files`；CI 始终执行完整检查。
+pre-commit 为可选的提交入口：安装后运行 `pre-commit install`，提交时只做文件格式等轻量校验与修复（即 hygiene 检查组的内容，配置见 `.pre-commit-config.yaml`）；完整检查（`make check`）由开发者自行运行，CI 始终执行完整检查。
 
-### 生成与格式化
+```sh
+make e2e
+```
+
+`make e2e` 在本地 Docker 上创建一个单节点 [kind](https://kind.sigs.k8s.io/) 集群：Envoy Gateway（v1.9.0，helm chart——其 release `install.yaml` 不含 GatewayClass）与 volume snapshot（v8.6.0）、hostpath CSI（v1.18.0，上游 URL 由 `scripts/e2e/cluster` kustomization 引用并钉版本）一键装齐后，用本地构建的 `falcon:e2e` 镜像部署 Chart，然后以 demo Mirror 断言完整链路：同步 → 快照 → 发布 → 路由就绪（`Ready`）→ 网关取回内容 → `mirrorz.json` 收录。装配由 `scripts/e2e/run.sh` 负责，断言用 [chainsaw](https://kyverno.github.io/chainsaw/) 声明式编写（`tests/e2e/`：apply → 断言资源状态 → 校验命令输出），经 NodePort 直连 Envoy 数据面；测试结束的清理会删除 demo Mirror，顺带验证删除流程。宿主机需求与检查相同（Git、Make、Docker；kind、kubectl、chainsaw 等钉在 `scripts/checks/Dockerfile` 的 `e2e-tools` target 中，经 Docker socket 操作宿主 daemon）。镜像不推送 registry，直接 `kind load` 进节点。首次运行需拉取基础镜像，约需数分钟。
+
+e2e 是独立入口，不并入 `make check`；CI 中亦为独立 job，失败时诊断（集群对象、控制器与同步 Job 日志、kind 节点日志）导出到 `.e2e-dump/` 并作为 artifact 上传。
 
 检查只报告问题，写回源码需显式执行：
 
@@ -952,7 +893,6 @@ Action 有检查和发版两个 workflow。在检查的 workflow 通过之前，
 
 - [ ] 在生命周期中实现 reloader 的功能
 - [ ] zfs-agent：在 Grafana 中对采集的信息进行校验，并制作 Dashboard。
-- [ ] 设计 e2e 测试并在 CI 中运行
 
 未排期：
 

@@ -217,7 +217,7 @@ func TestHandleJobsLegacyFieldNames(t *testing.T) {
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()
-	srv := httptest.NewServer((&Server{Client: c}).Handler())
+	srv := httptest.NewServer((&Server{Client: c}).AdminHandler())
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/jobs")

@@ -94,7 +94,7 @@ func TestAdminGatewayAuthenticationAndProxy(t *testing.T) {
 	defer upstream.Close()
 	a := &Authenticator{Config: GitHubAuthConfig{ClientID: "id", ClientSecret: "secret", AllowedUserIDs: []int64{42}}, AdminHost: "admin.example"}
 	s := &Server{Auth: a, UIUpstream: upstream.URL}
-	h := s.Handler()
+	h := s.AdminHandler()
 	unauth := httptest.NewRecorder()
 	h.ServeHTTP(unauth, httptest.NewRequest(http.MethodGet, "https://admin.example/", nil))
 	if unauth.Code != http.StatusFound {

@@ -67,7 +67,7 @@ func (s *Server) handleMirrorAction(w http.ResponseWriter, r *http.Request) {
 	patch := client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})
 	switch action.Action {
 	case "pause", "resume":
-		m.Spec.Sync.Paused = action.Action == "pause"
+		m.SetSyncPaused(action.Action == "pause")
 		err = s.Writer.Patch(r.Context(), m, patch)
 	case "sync", "abort":
 		key := mirrorv1alpha1.SyncRequestAnnotation

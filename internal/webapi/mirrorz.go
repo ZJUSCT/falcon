@@ -123,7 +123,7 @@ func mirrorzStatusForMirror(m *mirrorv1alpha1.Mirror) (string, error) {
 	if st.LastSync == nil || (st.LastSync.Phase != mirrorv1alpha1.SyncPhaseSucceeded && st.LastSync.Phase != mirrorv1alpha1.SyncPhaseFailed && st.LastSync.Phase != mirrorv1alpha1.SyncPhaseCancelled) {
 		return "", fmt.Errorf("mirrorz state invariant: eligible publication requires a valid lastSync")
 	}
-	if m.Spec.Sync.Paused && st.PausedAt != nil && (st.CurrentSync == nil || st.CurrentSync.Phase == mirrorv1alpha1.SyncPhasePending) {
+	if m.SyncPaused() && st.PausedAt != nil && (st.CurrentSync == nil || st.CurrentSync.Phase == mirrorv1alpha1.SyncPhasePending) {
 		b.timestamp(mirrorzPaused, "status.pausedAt", st.PausedAt)
 		return b.result(m.CreationTimestamp)
 	}
@@ -148,7 +148,7 @@ func mirrorzStatusForMirror(m *mirrorv1alpha1.Mirror) (string, error) {
 			return "", fmt.Errorf("mirrorz state invariant: invalid currentSync.phase %q", current.Phase)
 		}
 	}
-	if m.Spec.Sync.Paused && st.CurrentSync == nil {
+	if m.SyncPaused() && st.CurrentSync == nil {
 		b.timestamp(mirrorzPaused, "status.pausedAt", st.PausedAt)
 		return b.result(m.CreationTimestamp)
 	}
@@ -161,7 +161,7 @@ func mirrorzStatusForMirror(m *mirrorv1alpha1.Mirror) (string, error) {
 	default:
 		return "", fmt.Errorf("mirrorz state invariant: eligible publication requires a valid lastSync")
 	}
-	if !m.Spec.Sync.Paused {
+	if !m.SyncPaused() {
 		b.next(st.NextSyncAt)
 	}
 	return b.result(m.CreationTimestamp)
@@ -254,8 +254,8 @@ func mirrorzSize(sizeBytes int64) string {
 }
 
 func (s *Server) handleMirrorZ(w http.ResponseWriter, r *http.Request) {
-	if !s.CatalogEnabled {
-		writeJSONError(w, http.StatusNotFound, "mirrorz catalog is disabled")
+	if !s.MirrorzEnabled {
+		writeJSONError(w, http.StatusNotFound, "mirrorz endpoint is disabled")
 		return
 	}
 	doc, err := s.buildMirrorZ(r.Context(), r.Host)

@@ -59,7 +59,7 @@ spec:
               value: {{ . | quote }}
             {{- end }}
           # The listen port is part of the aggregation contract (the
-          # controller's webapi and this chart hardcode 9474) — not a value.
+          # controller and this chart hardcode 9474) — not a value.
           ports:
             - name: zfs-agent
               containerPort: 9474

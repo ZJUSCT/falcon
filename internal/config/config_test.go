@@ -23,27 +23,36 @@ log:
 api:
   metricsBindAddress: ":9080"
   healthProbeBindAddress: ":9081"
-  webapiBindAddress: ":9082"
-site:
-  url: https://mirrors.zjusct.io/
-  abbr: ZJU
-  name: Zhejiang University Mirror
-catalog:
+  mirrorzBindAddress: ":9082"
+  adminBindAddress: ":9083"
+mirrorz:
   enabled: true
+  site:
+    url: https://mirrors.zjusct.io/
+    abbr: ZJU
+    name: Zhejiang University Mirror
 sync:
   maxConcurrent: 4
+admin:
+  enabled: true
+  host: mirrors-admin.zjusct.io
+  oauth:
+    clientID: client-id
+    clientSecret: secret
+    allowedUserIDs: [1, 2]
 publish:
-  gatewayRef:
-    name: nginx-gateway
-    namespace: ""
-    sectionName: https
-  hostnames:
-    - mirrors.zjusct.io
-    - mirror.zju.edu.cn
-  labels:
-    app: mirrors
-  annotations:
-    cert: managed
+  http:
+    gatewayRef:
+      name: nginx-gateway
+      namespace: ""
+      sectionName: https
+    hostnames:
+      - mirrors.zjusct.io
+      - mirror.zju.edu.cn
+    labels:
+      app: mirrors
+    annotations:
+      cert: managed
 `)
 	cfg, err := Load(path)
 	if err != nil {
@@ -52,37 +61,43 @@ publish:
 	if cfg.Log.Level != "debug" {
 		t.Errorf("log.level = %q, want debug", cfg.Log.Level)
 	}
-	if cfg.API.MetricsBindAddress != ":9080" || cfg.API.HealthProbeBindAddress != ":9081" || cfg.API.WebapiBindAddress != ":9082" {
+	if cfg.API.MetricsBindAddress != ":9080" || cfg.API.HealthProbeBindAddress != ":9081" || cfg.API.MirrorzBindAddress != ":9082" || cfg.API.AdminBindAddress != ":9083" {
 		t.Errorf("api addresses wrong: %+v", cfg.API)
 	}
-	if cfg.Site.URL != "https://mirrors.zjusct.io" { // trailing slash trimmed
-		t.Errorf("site.url = %q, want trailing slash trimmed", cfg.Site.URL)
+	if cfg.Mirrorz.Site.URL != "https://mirrors.zjusct.io" { // trailing slash trimmed
+		t.Errorf("mirrorz.site.url = %q, want trailing slash trimmed", cfg.Mirrorz.Site.URL)
 	}
-	if cfg.Site.Abbr != "ZJU" || cfg.Site.Name != "Zhejiang University Mirror" {
-		t.Errorf("site identity wrong: %+v", cfg.Site)
+	if cfg.Mirrorz.Site.Abbr != "ZJU" || cfg.Mirrorz.Site.Name != "Zhejiang University Mirror" {
+		t.Errorf("mirrorz.site identity wrong: %+v", cfg.Mirrorz.Site)
 	}
-	if !cfg.Catalog.Enabled {
-		t.Errorf("catalog.enabled = false, want true")
+	if !cfg.Mirrorz.Enabled {
+		t.Errorf("mirrorz.enabled = false, want true")
 	}
 	if cfg.Sync.MaxConcurrent != 4 {
 		t.Errorf("sync.maxConcurrent = %d, want 4", cfg.Sync.MaxConcurrent)
 	}
+	if !cfg.Admin.Enabled || cfg.Admin.Host != "mirrors-admin.zjusct.io" {
+		t.Errorf("admin wrong: %+v", cfg.Admin)
+	}
+	if cfg.Admin.OAuth.ClientID != "client-id" || len(cfg.Admin.OAuth.AllowedUserIDs) != 2 {
+		t.Errorf("admin.oauth wrong: %+v", cfg.Admin.OAuth)
+	}
 	if !cfg.PublishEnabled() {
 		t.Errorf("PublishEnabled() = false, want true")
 	}
-	if cfg.Publish.GatewayRef.Name != "nginx-gateway" || cfg.Publish.GatewayRef.Namespace != "" || cfg.Publish.GatewayRef.SectionName != "https" {
-		t.Errorf("gatewayRef wrong: %+v", cfg.Publish.GatewayRef)
+	if cfg.Publish.HTTP.GatewayRef.Name != "nginx-gateway" || cfg.Publish.HTTP.GatewayRef.Namespace != "" || cfg.Publish.HTTP.GatewayRef.SectionName != "https" {
+		t.Errorf("gatewayRef wrong: %+v", cfg.Publish.HTTP.GatewayRef)
 	}
-	if len(cfg.Publish.Hostnames) != 2 || cfg.Publish.Hostnames[1] != "mirror.zju.edu.cn" {
-		t.Errorf("hostnames wrong: %v", cfg.Publish.Hostnames)
+	if len(cfg.Publish.HTTP.Hostnames) != 2 || cfg.Publish.HTTP.Hostnames[1] != "mirror.zju.edu.cn" {
+		t.Errorf("hostnames wrong: %v", cfg.Publish.HTTP.Hostnames)
 	}
-	if cfg.Publish.Labels["app"] != "mirrors" || cfg.Publish.Annotations["cert"] != "managed" {
-		t.Errorf("labels/annotations wrong: %v %v", cfg.Publish.Labels, cfg.Publish.Annotations)
+	if cfg.Publish.HTTP.Labels["app"] != "mirrors" || cfg.Publish.HTTP.Annotations["cert"] != "managed" {
+		t.Errorf("labels/annotations wrong: %v %v", cfg.Publish.HTTP.Labels, cfg.Publish.HTTP.Annotations)
 	}
 }
 
 func TestLoadDefaultsForSparseConfig(t *testing.T) {
-	path := writeTemp(t, "site:\n  url: https://mirrors.example.com\n")
+	path := writeTemp(t, "mirrorz:\n  site:\n    url: https://mirrors.example.com\n")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -90,11 +105,11 @@ func TestLoadDefaultsForSparseConfig(t *testing.T) {
 	if cfg.Log.Level != "info" {
 		t.Errorf("log.level default = %q, want info", cfg.Log.Level)
 	}
-	if cfg.API.MetricsBindAddress != ":8080" || cfg.API.HealthProbeBindAddress != ":8081" || cfg.API.WebapiBindAddress != ":8082" {
+	if cfg.API.MetricsBindAddress != ":8080" || cfg.API.HealthProbeBindAddress != ":8081" || cfg.API.MirrorzBindAddress != ":8082" || cfg.API.AdminBindAddress != ":8083" {
 		t.Errorf("api address defaults wrong: %+v", cfg.API)
 	}
-	if cfg.Catalog.Enabled {
-		t.Errorf("catalog default = enabled, want disabled")
+	if cfg.Mirrorz.Enabled {
+		t.Errorf("mirrorz.enabled default = true, want false")
 	}
 	if cfg.Sync.MaxConcurrent != 0 {
 		t.Errorf("sync.maxConcurrent default = %d, want 0 (unlimited)", cfg.Sync.MaxConcurrent)
@@ -106,12 +121,12 @@ func TestLoadDefaultsForSparseConfig(t *testing.T) {
 
 func TestLoadInvalidConfigs(t *testing.T) {
 	cases := map[string]string{
-		"missing site.url":        "catalog:\n  enabled: true\n",
-		"site.url without scheme": "site:\n  url: mirrors.example.com\n",
-		"bad log level":           "site:\n  url: https://a\nlog:\n  level: verbose\n",
-		"gatewayRef without name": "site:\n  url: https://a\npublish:\n  hostnames: [mirrors.example.com]\n",
-		"empty hostname entry":    "site:\n  url: https://a\npublish:\n  gatewayRef:\n    name: gw\n  hostnames: [\" \"]\n",
-		"hostname with path":      "site:\n  url: https://a\npublish:\n  gatewayRef:\n    name: gw\n  hostnames: [mirrors.example.com/foo]\n",
+		"missing site.url":        "mirrorz:\n  enabled: true\n",
+		"site.url without scheme": "mirrorz:\n  enabled: true\n  site:\n    url: mirrors.example.com\n",
+		"bad log level":           "log:\n  level: verbose\n",
+		"gatewayRef without name": "publish:\n  http:\n    hostnames: [mirrors.example.com]\n",
+		"empty hostname entry":    "publish:\n  http:\n    gatewayRef:\n      name: gw\n    hostnames: [\" \"]\n",
+		"hostname with path":      "publish:\n  http:\n    gatewayRef:\n      name: gw\n    hostnames: [mirrors.example.com/foo]\n",
 		"not YAML":                "\t\tbroken: [",
 	}
 	for name, content := range cases {
@@ -135,37 +150,41 @@ func TestLoadEnvironment(t *testing.T) {
 	t.Setenv("FALCON_TEST_HOST", "mirrors.example.org")
 	t.Setenv("FALCON_TEST_CLIENT", "client-id")
 	path := writeTemp(t, `
-site:
-  url: https://${FALCON_TEST_HOST}/
-auth:
-  github:
+mirrorz:
+  site:
+    url: https://${FALCON_TEST_HOST}/
+admin:
+  enabled: true
+  host: ${FALCON_TEST_HOST}
+  oauth:
     clientID: ${FALCON_TEST_CLIENT}
     clientSecret: ${FALCON_TEST_SECRET}
     allowedUserIDs: [9007199254740993]
 publish:
-  gatewayRef:
-    name: gateway
-  hostnames: ["${FALCON_TEST_HOST}"]
-  annotations:
-    '${UNCHANGED_KEY}': '${FALCON_TEST_CLIENT}/${FALCON_TEST_HOST}'
+  http:
+    gatewayRef:
+      name: gateway
+    hostnames: ["${FALCON_TEST_HOST}"]
+    annotations:
+      '${UNCHANGED_KEY}': '${FALCON_TEST_CLIENT}/${FALCON_TEST_HOST}'
 `)
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Auth.GitHub.ClientSecret != secret {
+	if cfg.Admin.OAuth.ClientSecret != secret {
 		t.Fatal("clientSecret was not preserved exactly")
 	}
-	if cfg.Auth.GitHub.ClientID != "client-id" || cfg.Site.URL != "https://mirrors.example.org" {
+	if cfg.Admin.OAuth.ClientID != "client-id" || cfg.Mirrorz.Site.URL != "https://mirrors.example.org" {
 		t.Fatal("nested string expansion or subsequent normalization failed")
 	}
-	if len(cfg.Publish.Hostnames) != 1 || cfg.Publish.Hostnames[0] != "mirrors.example.org" {
+	if len(cfg.Publish.HTTP.Hostnames) != 1 || cfg.Publish.HTTP.Hostnames[0] != "mirrors.example.org" {
 		t.Fatal("string list expansion failed")
 	}
-	if cfg.Publish.Annotations["${UNCHANGED_KEY}"] != "client-id/mirrors.example.org" {
+	if cfg.Publish.HTTP.Annotations["${UNCHANGED_KEY}"] != "client-id/mirrors.example.org" {
 		t.Fatal("map value expansion changed the key or failed to expand the value")
 	}
-	if len(cfg.Auth.GitHub.AllowedUserIDs) != 1 || cfg.Auth.GitHub.AllowedUserIDs[0] != 9007199254740993 {
+	if len(cfg.Admin.OAuth.AllowedUserIDs) != 1 || cfg.Admin.OAuth.AllowedUserIDs[0] != 9007199254740993 {
 		t.Fatal("integer configuration lost precision")
 	}
 }
@@ -173,17 +192,18 @@ publish:
 func TestLoadEnvironmentLiterals(t *testing.T) {
 	t.Setenv("FALCON_TEST_VALUE", "expanded")
 	path := writeTemp(t, `
-site:
-  url: https://mirrors.example.org
-  note: '$HOME $request_uri $1 $$ $ $${FALCON_TEST_VALUE} $${UNSET:-default} ${FALCON_TEST_VALUE}'
+mirrorz:
+  site:
+    url: https://mirrors.example.org
+    note: '$HOME $request_uri $1 $$ $ $${FALCON_TEST_VALUE} $${UNSET:-default} ${FALCON_TEST_VALUE}'
 `)
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	want := "$HOME $request_uri $1 $$ $ ${FALCON_TEST_VALUE} ${UNSET:-default} expanded"
-	if cfg.Site.Note != want {
-		t.Errorf("site.note = %q, want %q", cfg.Site.Note, want)
+	if cfg.Mirrorz.Site.Note != want {
+		t.Errorf("mirrorz.site.note = %q, want %q", cfg.Mirrorz.Site.Note, want)
 	}
 }
 
@@ -208,9 +228,9 @@ func TestLoadEnvironmentErrors(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			path := writeTemp(t, "site:\n  url: https://mirrors.example.org\nauth:\n  github:\n    clientSecret: '"+tc.input+"'\n")
+			path := writeTemp(t, "mirrorz:\n  site:\n    url: https://mirrors.example.org\nadmin:\n  enabled: true\n  host: mirrors.example.org\n  oauth:\n    clientSecret: '"+tc.input+"'\n")
 			_, err := Load(path)
-			if err == nil || !strings.Contains(err.Error(), "auth.github.clientSecret: "+tc.want) {
+			if err == nil || !strings.Contains(err.Error(), "admin.oauth.clientSecret: "+tc.want) {
 				t.Fatalf("Load error = %v, want field path and %q", err, tc.want)
 			}
 		})
@@ -220,9 +240,9 @@ func TestLoadEnvironmentErrors(t *testing.T) {
 func TestLoadEnvironmentValidationDoesNotExposeValues(t *testing.T) {
 	t.Setenv("FALCON_TEST_SENSITIVE", "sensitive/invalid-value")
 	cases := map[string]string{
-		"log level": "site:\n  url: https://mirrors.example.org\nlog:\n  level: ${FALCON_TEST_SENSITIVE}\n",
-		"site URL":  "site:\n  url: ${FALCON_TEST_SENSITIVE}\n",
-		"hostname":  "site:\n  url: https://mirrors.example.org\npublish:\n  gatewayRef:\n    name: gw\n  hostnames: ['${FALCON_TEST_SENSITIVE}']\n",
+		"log level": "log:\n  level: ${FALCON_TEST_SENSITIVE}\n",
+		"site URL":  "mirrorz:\n  enabled: true\n  site:\n    url: ${FALCON_TEST_SENSITIVE}\n",
+		"hostname":  "publish:\n  http:\n    gatewayRef:\n      name: gw\n    hostnames: ['${FALCON_TEST_SENSITIVE}']\n",
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {

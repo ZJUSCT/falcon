@@ -2,7 +2,8 @@
 # Everything renders into the release namespace; the controller watches only
 # that namespace (POD_NAMESPACE).
 # Site identity and Gateway topology are deployment-specific and ship empty:
-# site.url is required, and every route needs a gatewayRef (or parentRefs).
+# mirrorz.site.url is required when the endpoint is on, and publishing needs
+# a publish.http gatewayRef plus hostnames.
 
 namespace:
   create: true
@@ -12,18 +13,13 @@ namespace:
 global:
   imageRegistry: ghcr.io/zjusct
   imagePullSecrets: []
-  # Default Gateway reference for every generated HTTPRoute; per-route
-  # gatewayRef values fall back to this one.
-  gatewayRef:
-    name: ""
-    namespace: ""
-    sectionName: ""
 
 nameOverride: ""
 fullnameOverride: ""
 
 # Controller. Runtime configuration below is rendered into the falcon-config
 # ConfigMap; any change rolls the Deployment through a checksum annotation.
+# Single instance by design: no replica knob.
 controller:
   enabled: true
   image:
@@ -32,53 +28,46 @@ controller:
     tag: ""
     digest: ""
     pullPolicy: IfNotPresent
-  replicaCount: 1
   revisionHistoryLimit: 10
 
-  # Mirrors the internal/config Go structs; validated at render time and
-  # again at controller startup.
+  # Mirrors the internal/config Go structs (see README「配置文件」); validated
+  # at render time and again at controller startup. The api listen addresses
+  # are chart-internal plumbing and stay fixed.
   config:
     log:
       # debug | info | warn | error
       level: info
-    api:
-      # Probes and Services follow the port of each address.
-      metricsBindAddress: ":8080"
-      healthProbeBindAddress: ":8081"
-      webapiBindAddress: ":8082"
-    # MirrorZ site section; url is required and must carry a scheme.
-    site:
-      url: ""
-      abbr: ""
-      name: ""
-      logo: ""
-      logo_darkmode: ""
-      homepage: ""
-      issue: ""
-      request: ""
-      email: ""
-      group: ""
-      disk: ""
-      note: ""
-      big: ""
-      disable: false
-    catalog:
+    # /mirrorz.json output (MirrorZ data format). site.url is required and
+    # must carry a scheme while enabled.
+    mirrorz:
       enabled: true
+      site:
+        url: ""
+        abbr: ""
+        name: ""
+        logo: ""
+        logo_darkmode: ""
+        homepage: ""
+        issue: ""
+        request: ""
+        email: ""
+        group: ""
+        disk: ""
+        note: ""
+        big: ""
+        disable: false
     sync:
       # Global sync concurrency cap; <= 0 means unlimited.
       maxConcurrent: 4
-    # An empty hostnames list disables publish HTTPRoute generation
-    # altogether; mirrorz reflects the request Host against the list.
+    # Per-protocol publishing topology. An empty http.hostnames list
+    # disables publish HTTPRoute generation altogether; mirrorz reflects
+    # the request Host against the list.
     publish:
-      gatewayRef: {}
-      hostnames: []
-      labels: {}
-      annotations: {}
-    auth:
-      github:
-        clientID: ""
-        clientSecret: ""
-        allowedUserIDs: []
+      http:
+        gatewayRef: {}
+        hostnames: []
+        labels: {}
+        annotations: {}
 
   metrics:
     enabled: true
@@ -108,6 +97,49 @@ controller:
   extraVolumes: []
   extraVolumeMounts: []
 
+# /mirrorz.json HTTPRoute. Fully derived from controller.config.publish.http
+# (same hostnames, same Gateway): every publish domain serves the catalog.
+mirrorz:
+  route:
+    enabled: false
+
+# Admin web UI: static Next.js export served by nginx, exposed through an
+# OAuth-gated route. The first hostname doubles as the admin host the
+# webapi gates admin operations on. parentRefs is a standard Gateway API
+# ParentReference list.
+ui:
+  enabled: false
+  image:
+    repository: falcon-ui
+    # Empty tag defaults to Chart.AppVersion; a digest takes precedence.
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  # GitHub OAuth guarding the whole admin surface (API + UI): with it
+  # configured every admin endpoint requires a session; without it the
+  # admin endpoints answer unauthenticated (debug/local mode). The chart
+  # renders this into the controller's admin config section.
+  oauth:
+    clientID: ""
+    # Either a plaintext value rendered into the chart-managed Secret, or
+    # the name of an existing Secret carrying key "client-secret" — the
+    # controller receives it as FALCON_ADMIN_OAUTH_CLIENT_SECRET and the
+    # rendered config references it via ${...} expansion only.
+    clientSecret: ""
+    existingSecret: ""
+    allowedUserIDs: []
+  route:
+    hostnames: []
+    parentRefs: []
+    labels: {}
+    annotations: {}
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits: {}
+
 # ZFS usage agent: one read-only DaemonSet pod per storage node feeding
 # GET /api/usage.
 zfsAgent:
@@ -130,42 +162,3 @@ zfsAgent:
       cpu: 10m
       memory: 32Mi
     limits: {}
-
-# Admin web UI: static Next.js export served by nginx.
-webui:
-  enabled: false
-  image:
-    repository: falcon-ui
-    # Empty tag defaults to Chart.AppVersion; a digest takes precedence.
-    tag: ""
-    digest: ""
-    pullPolicy: IfNotPresent
-  replicaCount: 1
-  resources:
-    requests:
-      cpu: 10m
-      memory: 32Mi
-    limits: {}
-
-# Admin domain route: OAuth-gated UI and read-only API.
-admin:
-  enabled: false
-  # Required bare hostname when enabled.
-  host: ""
-  route:
-    gatewayRef: {}
-    # Rendered verbatim when set; overrides gatewayRef.
-    parentRefs: []
-    labels: {}
-    annotations: {}
-
-# Catalog hosts publishing /mirrorz.json; by convention mirrors
-# controller.config.publish.hostnames.
-catalog:
-  enabled: false
-  hosts: []
-  route:
-    gatewayRef: {}
-    parentRefs: []
-    labels: {}
-    annotations: {}

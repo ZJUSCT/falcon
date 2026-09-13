@@ -123,35 +123,54 @@ func main() {
 	}
 
 	// Public catalog reads and authenticated administrator operations.
-	if cfg.API.WebapiBindAddress != "0" {
-		apiServer := &webapi.Server{
-			Client:    mgr.GetClient(),
-			Writer:    mgr.GetClient(),
-			APIReader: mgr.GetAPIReader(),
-			Namespace: podNamespace,
-			LogStream: func(ctx context.Context, namespace, pod string, options *corev1.PodLogOptions) (io.ReadCloser, error) {
-				return clientset.CoreV1().Pods(namespace).GetLogs(pod, options).Stream(ctx)
-			},
-			Site:             webapi.SiteConfig{URL: cfg.Site.URL, Abbr: cfg.Site.Abbr, Name: cfg.Site.Name, Logo: cfg.Site.Logo, LogoDarkmode: cfg.Site.LogoDarkmode, Homepage: cfg.Site.Homepage, Issue: cfg.Site.Issue, Request: cfg.Site.Request, Email: cfg.Site.Email, Group: cfg.Site.Group, Disk: cfg.Site.Disk, Note: cfg.Site.Note, Big: cfg.Site.Big, Disable: cfg.Site.Disable},
-			PublishHostnames: cfg.Publish.Hostnames,
-			CatalogEnabled:   cfg.Catalog.Enabled,
+	// The two surfaces listen on separate ports: the mirrorz port serves
+	// /mirrorz.json only, so a routing mistake can only break the catalog,
+	// never leak the admin API (and vice versa).
+	apiServer := &webapi.Server{
+		Client:    mgr.GetClient(),
+		Writer:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Namespace: podNamespace,
+		LogStream: func(ctx context.Context, namespace, pod string, options *corev1.PodLogOptions) (io.ReadCloser, error) {
+			return clientset.CoreV1().Pods(namespace).GetLogs(pod, options).Stream(ctx)
+		},
+		Site:             webapi.SiteConfig{URL: cfg.Mirrorz.Site.URL, Abbr: cfg.Mirrorz.Site.Abbr, Name: cfg.Mirrorz.Site.Name, Logo: cfg.Mirrorz.Site.Logo, LogoDarkmode: cfg.Mirrorz.Site.LogoDarkmode, Homepage: cfg.Mirrorz.Site.Homepage, Issue: cfg.Mirrorz.Site.Issue, Request: cfg.Mirrorz.Site.Request, Email: cfg.Mirrorz.Site.Email, Group: cfg.Mirrorz.Site.Group, Disk: cfg.Mirrorz.Site.Disk, Note: cfg.Mirrorz.Site.Note, Big: cfg.Mirrorz.Site.Big, Disable: cfg.Mirrorz.Site.Disable},
+		PublishHostnames: cfg.Publish.HTTP.Hostnames,
+		MirrorzEnabled:   cfg.Mirrorz.Enabled,
+	}
+	if cfg.Admin.OAuth.ClientID != "" {
+		apiServer.Auth = &webapi.Authenticator{Config: webapi.GitHubAuthConfig{ClientID: cfg.Admin.OAuth.ClientID, ClientSecret: cfg.Admin.OAuth.ClientSecret, AllowedUserIDs: cfg.Admin.OAuth.AllowedUserIDs}, AdminHost: cfg.Admin.Host}
+	}
+	apiServer.UIUpstream = os.Getenv("FALCON_UI_UPSTREAM")
+	// ZFS usage aggregation behind GET /api/usage: enabled purely by the
+	// ZFS_AGENT_SERVICE environment variable (the chart injects it when
+	// zfsAgent.enabled); unset leaves the endpoint a 404.
+	if agentService := os.Getenv("ZFS_AGENT_SERVICE"); agentService != "" {
+		apiServer.Usage = webapi.NewUsageAggregator(clientset, podNamespace, agentService)
+		logger.Info("zfs-agent usage aggregation enabled", "service", agentService, "namespace", podNamespace)
+	}
+
+	for _, listener := range []struct {
+		name    string
+		addr    string
+		handler http.Handler
+	}{
+		{"mirrorz", cfg.API.MirrorzBindAddress, apiServer.MirrorzHandler()},
+		{"admin", cfg.API.AdminBindAddress, apiServer.AdminHandler()},
+	} {
+		if listener.name == "admin" && !cfg.Admin.Enabled {
+			continue
 		}
-		apiServer.Auth = &webapi.Authenticator{Config: webapi.GitHubAuthConfig{ClientID: cfg.Auth.GitHub.ClientID, ClientSecret: cfg.Auth.GitHub.ClientSecret, AllowedUserIDs: cfg.Auth.GitHub.AllowedUserIDs}, AdminHost: cfg.Admin.Host}
-		apiServer.UIUpstream = os.Getenv("FALCON_UI_UPSTREAM")
-		// ZFS usage aggregation behind GET /api/usage: enabled purely by the
-		// ZFS_AGENT_SERVICE environment variable (the chart injects it when
-		// zfsAgent.enabled); unset leaves the endpoint a 404.
-		if agentService := os.Getenv("ZFS_AGENT_SERVICE"); agentService != "" {
-			apiServer.Usage = webapi.NewUsageAggregator(clientset, podNamespace, agentService)
-			logger.Info("zfs-agent usage aggregation enabled", "service", agentService, "namespace", podNamespace)
+		if listener.addr == "" || listener.addr == "0" {
+			continue
 		}
 		httpSrv := &http.Server{
-			Addr:              cfg.API.WebapiBindAddress,
-			Handler:           apiServer.Handler(),
+			Addr:              listener.addr,
+			Handler:           listener.handler,
 			ReadHeaderTimeout: 10 * time.Second,
 		}
-		if err := mgr.Add(managerRunnable(httpSrv)); err != nil {
-			logger.Error(err, "unable to register mirrorz API server")
+		if err := mgr.Add(managerRunnable(listener.name, httpSrv)); err != nil {
+			logger.Error(err, "unable to register webapi listener", "listener", listener.name)
 			os.Exit(1)
 		}
 	}
@@ -178,11 +197,11 @@ func main() {
 // managerRunnable wraps an http.Server as a controller-runtime Runnable:
 // it serves until the manager context is cancelled, then shuts down
 // gracefully.
-func managerRunnable(srv *http.Server) manager.Runnable {
+func managerRunnable(name string, srv *http.Server) manager.Runnable {
 	return manager.RunnableFunc(func(ctx context.Context) error {
 		errCh := make(chan error, 1)
 		go func() {
-			ctrl.Log.Info("starting read-only mirrorz API server", "addr", srv.Addr)
+			ctrl.Log.Info("starting webapi listener", "listener", name, "addr", srv.Addr)
 			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errCh <- err
 				return

@@ -222,7 +222,7 @@ func (r *MirrorReconciler) updateSyncPhase(m *mirrorv1alpha1.Mirror) {
 		m.Status.Sync.Phase = mirrorv1alpha1.SyncStatePending
 		return
 	}
-	if !m.Spec.Sync.Paused && m.Status.NextSyncAt != nil && !m.Status.NextSyncAt.After(r.now()) {
+	if !m.SyncPaused() && m.Status.NextSyncAt != nil && !m.Status.NextSyncAt.After(r.now()) {
 		m.Status.Sync.Phase = mirrorv1alpha1.SyncStatePending
 		return
 	}

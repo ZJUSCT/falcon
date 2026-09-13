@@ -41,7 +41,7 @@ func logRequest(s *Server, path string, auth bool, host string) *httptest.Respon
 		req.AddCookie(&http.Cookie{Name: "falcon_session", Value: s.Auth.cookieValue(1)})
 	}
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, req)
+	s.AdminHandler().ServeHTTP(w, req)
 	return w
 }
 func TestSyncLogSourceOwnershipAndFallback(t *testing.T) {
@@ -183,7 +183,7 @@ func TestSyncLogStreamValidationAndFrames(t *testing.T) {
 		auth bool
 		host string
 		want int
-	}{{false, "admin.example.org", 401}, {true, "public.example.org", 403}} {
+	}{{false, "admin.example.org", 401}, {false, "public.example.org", 401}} {
 		w := logRequest(s, path+q.Encode(), tc.auth, tc.host)
 		if w.Code != tc.want {
 			t.Fatalf("unauthorized logs: %d", w.Code)
@@ -219,7 +219,7 @@ func TestSyncLogDisconnectClosesUpstream(t *testing.T) {
 		close(opened)
 		return &cancellingLogReader{ctx, closed}, nil
 	}
-	server := httptest.NewServer(s.Handler())
+	server := httptest.NewServer(s.AdminHandler())
 	defer server.Close()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

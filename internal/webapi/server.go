@@ -46,8 +46,8 @@ type Server struct {
 	// case-insensitively) is on the list gets its mirrorz document reflected
 	// with that host; anything else falls back to Site.URL. May be empty.
 	PublishHostnames []string
-	// CatalogEnabled gates GET /mirrorz.json (config catalog.enabled).
-	CatalogEnabled bool
+	// MirrorzEnabled gates GET /mirrorz.json (config mirrorz.enabled).
+	MirrorzEnabled bool
 	// Usage aggregates zfs-agent reports for GET /api/usage. It is nil when
 	// the ZFS_AGENT_SERVICE environment variable is unset, which disables
 	// the endpoint (404) — there is no config field for it.
@@ -56,10 +56,33 @@ type Server struct {
 	UIUpstream string
 }
 
-// Handler keeps public routes read-only and gates mutations on administrator auth.
-func (s *Server) Handler() http.Handler {
+// MirrorzHandler serves the public catalog port: /mirrorz.json only. The
+// port structurally cannot expose anything else — no admin route, no /api,
+// no OAuth — regardless of routing mistakes upstream; wiring this handler
+// into an admin-facing route yields 404s, not leaks.
+func (s *Server) MirrorzHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/mirrorz.json", s.handleMirrorZ)
+	mux.HandleFunc("/mirrorz.json", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed: this endpoint is read-only (GET)")
+			return
+		}
+		s.handleMirrorZ(w, r)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONError(w, http.StatusNotFound, "not found")
+	})
+	return mux
+}
+
+// AdminHandler serves the admin port: /api endpoints, OAuth, the UI
+// reverse proxy, and the /api/mirrors mutations. When OAuth is configured
+// the ENTIRE surface requires a session (no anonymous reads); without it
+// everything answers unauthenticated — debug/local mode. /mirrorz.json
+// deliberately lives on the mirrorz port only.
+func (s *Server) AdminHandler() http.Handler {
+	mux := http.NewServeMux()
 	mux.HandleFunc("/api/jobs", s.handleJobs)
 	mux.HandleFunc("/api/repos", s.handleRepoRoot)
 	mux.HandleFunc("/api/repos/", s.handleRepo)
@@ -76,15 +99,14 @@ func (s *Server) Handler() http.Handler {
 		writeJSONError(w, http.StatusNotFound, "not found")
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		admin := s.Auth != nil && strings.EqualFold(hostOnly(r.Host), s.Auth.AdminHost)
-		if strings.HasPrefix(r.URL.Path, "/api/mirrors/") {
-			if !admin {
-				writeJSONError(w, 403, "administrator host required")
-				return
-			}
+		// The login flow itself must stay reachable pre-session.
+		oauth := strings.HasPrefix(r.URL.Path, "/oauth/")
+		if s.Auth != nil && !oauth {
 			if !s.Auth.require(w, r) {
 				return
 			}
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/mirrors/") {
 			if strings.HasSuffix(r.URL.Path, "/logs") || strings.HasSuffix(r.URL.Path, "/logs/stream") {
 				if r.Method != http.MethodGet {
 					w.Header().Set("Allow", http.MethodGet)
@@ -102,34 +124,17 @@ func (s *Server) Handler() http.Handler {
 			s.handleMirrorAction(w, r)
 			return
 		}
-		if admin {
-			if strings.HasPrefix(r.URL.Path, "/oauth/") {
-				if r.Method != http.MethodGet {
-					w.Header().Set("Allow", http.MethodGet)
-					writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-					return
-				}
-				mux.ServeHTTP(w, r)
+		// Non-API paths serve the admin UI (static export) when deployed.
+		if !oauth && !strings.HasPrefix(r.URL.Path, "/api/") && s.UIUpstream != "" {
+			u, err := url.Parse(s.UIUpstream)
+			if err != nil {
+				http.Error(w, "invalid UI upstream", http.StatusInternalServerError)
 				return
 			}
-			if r.URL.Path == "/mirrorz.json" && r.Method == http.MethodGet {
-				mux.ServeHTTP(w, r)
-				return
-			}
-			if !s.Auth.require(w, r) {
-				return
-			}
-			if !strings.HasPrefix(r.URL.Path, "/api/") && s.UIUpstream != "" {
-				u, err := url.Parse(s.UIUpstream)
-				if err != nil {
-					http.Error(w, "invalid UI upstream", http.StatusInternalServerError)
-					return
-				}
-				httputil.NewSingleHostReverseProxy(u).ServeHTTP(w, r)
-				return
-			}
+			httputil.NewSingleHostReverseProxy(u).ServeHTTP(w, r)
+			return
 		}
-		// Read-only listener: reject anything that is not a plain GET.
+		// Everything else is read-only: only plain GET passes.
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed: this endpoint is read-only (GET)")

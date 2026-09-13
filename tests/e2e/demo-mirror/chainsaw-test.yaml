@@ -1,0 +1,53 @@
+# The demo Mirror's full observable chain: sync job succeeded -> snapshot
+# ready -> publish rolled out -> route accepted (Ready), the page served
+# through the gateway, and the mirrorz.json catalog entry.
+#
+# Environment contract with scripts/e2e/run.sh (the bootstrap): KUBECONFIG,
+# E2E_SITE_HOST and E2E_ENVOY_ADDR are inherited from the chainsaw process.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: demo-mirror
+spec:
+  steps:
+    - name: ready-and-serving
+      description: The demo Mirror becomes Ready and serves through the gateway.
+      try:
+        - apply:
+            file: mirror-demo.yaml
+        - assert:
+            resource:
+              apiVersion: mirrors.zjusct.io/v1alpha1
+              kind: Mirror
+              metadata:
+                name: demo
+              # Official conditions idiom (chainsaw assertion-trees docs):
+              # an expression key filters the conditions array and the
+              # expected list matches against the filtered result, ignoring
+              # sibling conditions. Hoisted to the resource root so a
+              # not-yet-written status is a retryable mismatch instead of a
+              # required-field error.
+              (status.conditions[?type == 'Ready']):
+                - status: "True"
+        - script:
+            content: >
+              curl -sS -H "Host: $E2E_SITE_HOST"
+              "http://$E2E_ENVOY_ADDR/demo/index.html"
+            outputs:
+              - name: PAGE
+                value: ($stdout)
+        - assert:
+            resource:
+              # The page is the busybox `date -u` output of the sync job.
+              (contains($PAGE, 'UTC')): true
+        - script:
+            content: >
+              curl -sS -H "Host: $E2E_SITE_HOST"
+              "http://$E2E_ENVOY_ADDR/mirrorz.json"
+              | jq -j '.mirrors[] | select(.cname == "demo") | .status'
+            outputs:
+              - name: STATUS
+                value: ($stdout)
+        - assert:
+            resource:
+              (starts_with($STATUS, 'S')): true

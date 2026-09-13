@@ -181,12 +181,12 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 			return ctrl.Result{}, err
 		}
 	}
-	if !mirror.Spec.Sync.Paused && mirror.Status.PausedAt != nil {
+	if !mirror.SyncPaused() && mirror.Status.PausedAt != nil {
 		if _, err := r.patchStatus(ctx, mirror, func() { mirror.Status.PausedAt = nil }); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
-	if mirror.Spec.Sync.Paused && mirror.Status.CurrentSync == nil && mirror.Status.PausedAt == nil {
+	if mirror.SyncPaused() && mirror.Status.CurrentSync == nil && mirror.Status.PausedAt == nil {
 		if _, err := r.patchStatus(ctx, mirror, func() { mirror.Status.PausedAt = timePtr(r.now()) }); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -224,7 +224,7 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 		return ctrl.Result{}, err
 	}
 	manualDue := mirror.SyncRequested()
-	if mirror.Spec.Sync.Paused && !manualDue {
+	if mirror.SyncPaused() && !manualDue {
 		return r.patchStatus(ctx, mirror, func() {
 			mirror.Status.ObservedGeneration = mirror.Generation
 			if mirror.Status.PausedAt == nil {
@@ -486,7 +486,7 @@ func (r *MirrorReconciler) observeSyncJob(ctx context.Context, mirror *mirrorv1a
 			queueRequestCleanup(mirror, current.Manual, false)
 			mirror.Status.CurrentSync = nil
 		}
-		if mirror.Spec.Sync.Paused {
+		if mirror.SyncPaused() {
 			mirror.Status.PausedAt = timePtr(now)
 		}
 		applyMirrorConditions(mirror, publicationHealth{ready: mirrorWasReady(mirror), reason: "SynchronizationCompleted", message: "synchronization Job completed"}, "SynchronizationCompleted", message, nil)

@@ -81,7 +81,7 @@ func mirrorPresentationPhase(m *mirrorv1alpha1.Mirror) string {
 			return mirrorv1alpha1.SyncPhaseSnapshotting
 		}
 		if current.Phase == mirrorv1alpha1.SyncPhasePending {
-			if m.Spec.Sync.Paused && m.Status.PausedAt != nil {
+			if m.SyncPaused() && m.Status.PausedAt != nil {
 				return mirrorv1alpha1.PhasePaused
 			}
 			return mirrorv1alpha1.PhaseInitializing
@@ -92,7 +92,7 @@ func mirrorPresentationPhase(m *mirrorv1alpha1.Mirror) string {
 		return mirrorv1alpha1.PhasePublishing
 	}
 
-	if m.Spec.Sync.Paused {
+	if m.SyncPaused() {
 		return mirrorv1alpha1.PhasePaused
 	}
 	if degraded != nil && degraded.Status == metav1.ConditionTrue {
@@ -172,10 +172,10 @@ func mirrorJobEntry(m *mirrorv1alpha1.Mirror) JobEntry {
 		ActivePVC:     m.Status.ActivePVC,
 		Actions:       []string{}, // legacy field, no action history anymore
 		NextAttemptAt: timeOrZero(m.Status.NextSyncAt),
-		Paused:        m.Spec.Sync.Paused,
+		Paused:        m.SyncPaused(),
 		SyncBusy:      m.Status.CurrentSync != nil || m.SyncRequested(),
 	}
-	if m.Spec.Sync.Paused {
+	if m.SyncPaused() {
 		entry.NextAttemptAt = time.Time{}
 	}
 	if current := m.Status.CurrentSync; current != nil {

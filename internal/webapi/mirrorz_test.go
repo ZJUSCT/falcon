@@ -57,7 +57,7 @@ func TestMirrorzStatusForMirror(t *testing.T) {
 			m.Status.NextSyncAt = &next
 		}, "Y1788380000O1788300000N1788000000"},
 		{"paused uses pause time without stale schedule", func(m *mirrorv1alpha1.Mirror) {
-			m.Spec.Sync.Paused = true
+			m.SetSyncPaused(true)
 			m.Status.PausedAt = &finished
 			m.Status.NextSyncAt = &next
 		}, "P1788388984N1788000000"},
@@ -70,7 +70,7 @@ func TestMirrorzStatusForMirror(t *testing.T) {
 			m.Status.NextSyncAt = &next
 		}, "D1788380000N1788000000"},
 		{"snapshotting is not a running Job even with pause requested", func(m *mirrorv1alpha1.Mirror) {
-			m.Spec.Sync.Paused = true
+			m.SetSyncPaused(true)
 			m.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSnapshotting}
 			m.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded, FinishedAt: &finished}
 		}, "S1788388984N1788000000"},
@@ -227,7 +227,7 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 		Client:           c,
 		Site:             SiteConfig{URL: "https://mirrors.zjusct.io", Abbr: "ZJU", Name: "Zhejiang University Mirror"},
 		PublishHostnames: hostnames,
-		CatalogEnabled:   true,
+		MirrorzEnabled:   true,
 	}
 }
 
@@ -362,7 +362,7 @@ func singleMirrorServer(t *testing.T, hostnames []string) *Server {
 		Client:           c,
 		Site:             SiteConfig{URL: "https://mirrors.zjusct.io", Abbr: "ZJU"},
 		PublishHostnames: hostnames,
-		CatalogEnabled:   true,
+		MirrorzEnabled:   true,
 	}
 }
 
@@ -370,7 +370,7 @@ func singleMirrorServer(t *testing.T, hostnames []string) *Server {
 // shape (version/site/info/mirrors) and that it is valid JSON.
 func TestHandleMirrorZ(t *testing.T) {
 	s := singleMirrorServer(t, []string{"mirrors.zjusct.io"})
-	srv := httptest.NewServer(s.Handler())
+	srv := httptest.NewServer(s.MirrorzHandler())
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/mirrorz.json")
@@ -418,7 +418,7 @@ func TestHandleMirrorZ(t *testing.T) {
 // so the Host header decides which URL base the document carries.
 func TestHandleMirrorZReflectsRequestHost(t *testing.T) {
 	s := singleMirrorServer(t, []string{"mirrors.zjusct.io"})
-	srv := httptest.NewServer(s.Handler())
+	srv := httptest.NewServer(s.MirrorzHandler())
 	defer srv.Close()
 
 	req, err := http.NewRequest(http.MethodGet, srv.URL+"/mirrorz.json", nil)
@@ -451,8 +451,8 @@ func TestHandleMirrorZReflectsRequestHost(t *testing.T) {
 // /mirrorz.json endpoint away entirely.
 func TestHandleMirrorZCatalogDisabled(t *testing.T) {
 	s := mirrorzTestServer(t, nil)
-	s.CatalogEnabled = false
-	srv := httptest.NewServer(s.Handler())
+	s.MirrorzEnabled = false
+	srv := httptest.NewServer(s.MirrorzHandler())
 	defer srv.Close()
 
 	resp, _ := get(t, srv.URL+"/mirrorz.json")
@@ -499,7 +499,7 @@ func TestHandleMirrorZTimestampInvariants(t *testing.T) {
 		{"missing creation", func(m *mirrorv1alpha1.Mirror) { m.CreationTimestamp = metav1.Time{} }, "metadata.creationTimestamp"},
 		{"missing start", func(m *mirrorv1alpha1.Mirror) { m.Status.CurrentSync.StartedAt = nil }, "status.currentSync.startedAt"},
 		{"missing queue time", func(m *mirrorv1alpha1.Mirror) { m.Status.CurrentSync.Phase = mirrorv1alpha1.SyncPhasePending }, "status.currentSync.queuedAt"},
-		{"missing pause time", func(m *mirrorv1alpha1.Mirror) { m.Status.CurrentSync = nil; m.Spec.Sync.Paused = true }, "status.pausedAt"},
+		{"missing pause time", func(m *mirrorv1alpha1.Mirror) { m.Status.CurrentSync = nil; m.SetSyncPaused(true) }, "status.pausedAt"},
 		{"missing successful finish", func(m *mirrorv1alpha1.Mirror) {
 			m.Status.CurrentSync = nil
 			m.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded}
@@ -526,9 +526,9 @@ func TestHandleMirrorZTimestampInvariants(t *testing.T) {
 			}
 			catalogMirrorTimes(m)
 			tc.mutate(m)
-			s := &Server{CatalogEnabled: true, Site: SiteConfig{URL: "https://example.org"}, Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()}
+			s := &Server{MirrorzEnabled: true, Site: SiteConfig{URL: "https://example.org"}, Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()}
 			recorder := httptest.NewRecorder()
-			s.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/mirrorz.json", nil))
+			s.MirrorzHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/mirrorz.json", nil))
 			if tc.errorField != "" {
 				if recorder.Code != http.StatusInternalServerError || !strings.Contains(recorder.Body.String(), tc.errorField) || !strings.Contains(recorder.Body.String(), "Mirror mirrors/debian") || strings.Contains(recorder.Body.String(), `"mirrors":`) {
 					t.Fatalf("expected explicit invariant error for %s, got %d %s", tc.errorField, recorder.Code, recorder.Body.String())
@@ -552,9 +552,9 @@ func TestMirrorZRejectsProxyWithoutCreationTime(t *testing.T) {
 		Spec:       mirrorv1alpha1.ProxyMirrorSpec{Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: httpService().HTTP}},
 		Status:     mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
 	}
-	s := &Server{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(p).Build(), CatalogEnabled: true}
+	s := &Server{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(p).Build(), MirrorzEnabled: true}
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/mirrorz.json", nil))
+	s.MirrorzHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/mirrorz.json", nil))
 	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "ProxyMirror mirrors/pypi") || !strings.Contains(w.Body.String(), "metadata.creationTimestamp") {
 		t.Fatalf("expected explicit proxy timestamp error: %d %s", w.Code, w.Body.String())
 	}
@@ -577,7 +577,7 @@ func TestMirrorZManualModeAndCancellation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &mirrorv1alpha1.Mirror{}
 			catalogMirrorTimes(m)
-			m.Spec.Sync.Paused = tc.paused
+			m.SetSyncPaused(tc.paused)
 			m.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{Phase: tc.phase, QueuedAt: &queued}
 			if tc.held {
 				m.Status.PausedAt = &stopped
@@ -597,7 +597,7 @@ func TestMirrorZManualModeAndCancellation(t *testing.T) {
 	if got, err := mirrorzStatusForMirror(m); err != nil || got != "F1788380100O1788300000N1788000000" {
 		t.Fatalf("cancelled sync: %q, %v", got, err)
 	}
-	m.Spec.Sync.Paused = true
+	m.SetSyncPaused(true)
 	m.Status.PausedAt = &stopped
 	if got, err := mirrorzStatusForMirror(m); err != nil || got != "P1788380200N1788000000" {
 		t.Fatalf("paused after cancellation: %q, %v", got, err)

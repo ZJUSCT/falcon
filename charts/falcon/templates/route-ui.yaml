@@ -1,0 +1,36 @@
+{{- /*
+Admin UI route: OAuth-gated UI and read-only API on ui.route.hostnames.
+parentRefs is a standard Gateway API ParentReference list, rendered
+verbatim. The first hostname doubles as the admin host the controller gates
+admin operations on.
+*/ -}}
+{{- if .Values.ui.enabled }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "falcon.fullname" . }}-ui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "falcon.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+    {{- with .Values.ui.route.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.ui.route.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+{{ toYaml (.Values.ui.route.parentRefs | default list) | indent 4 }}
+  hostnames:
+{{ toYaml (.Values.ui.route.hostnames | default list) | indent 4 }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ include "falcon.fullname" . }}-admin
+          port: 80
+{{- end }}

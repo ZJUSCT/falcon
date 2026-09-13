@@ -1,0 +1,26 @@
+# Storage fixtures backed by the vendored hostpath CSI driver. The names are
+# referenced by the demo Mirror; the WFFC/Immediate split follows the README
+# storage guidance for real deployments. A future zfs-localpv provider for
+# manual runs on real clusters only needs to swap the provisioner/driver here.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: falcon-e2e-sync
+provisioner: hostpath.csi.k8s.io
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: falcon-e2e-publish
+provisioner: hostpath.csi.k8s.io
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+---
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: falcon-e2e-snapshot
+driver: hostpath.csi.k8s.io
+deletionPolicy: Delete

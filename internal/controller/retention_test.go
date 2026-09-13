@@ -118,7 +118,7 @@ func TestSyncOnlyRetentionRunsWhilePaused(t *testing.T) {
 	m := testMirror()
 	m.UID = "mirror-uid"
 	m.Finalizers = []string{MirrorFinalizer}
-	m.Spec.Sync.Paused = true
+	m.SetSyncPaused(true)
 	m.Spec.Publish = mirrorv1alpha1.MirrorServicesSpec{}
 	m.Spec.Storage.Retention = 1
 	old, previous, latest := retentionSnapshot(m, 100), retentionSnapshot(m, 200), retentionSnapshot(m, 300)

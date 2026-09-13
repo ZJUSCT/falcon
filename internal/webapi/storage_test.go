@@ -84,7 +84,7 @@ func TestStorageDegraded(t *testing.T) {
 // ZFS_AGENT_SERVICE is set.
 func TestStorageDisabledIs404(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	srv := httptest.NewServer((&Server{Client: c}).Handler())
+	srv := httptest.NewServer((&Server{Client: c}).AdminHandler())
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/storage")
@@ -109,7 +109,7 @@ func TestStoragePinsWireShape(t *testing.T) {
 	ep, _ := fakeAgent(t, http.StatusOK, storage1CapReport, 0, "storage-1")
 	a := newTestAggregator(&fakeAgents{endpoints: []AgentEndpoint{ep}})
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	srv := httptest.NewServer((&Server{Client: c, Usage: a}).Handler())
+	srv := httptest.NewServer((&Server{Client: c, Usage: a}).AdminHandler())
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/storage")

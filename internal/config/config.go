@@ -2,7 +2,7 @@
 // configuration file (mounted from a ConfigMap at /etc/falcon/config.yaml).
 // It holds the complete runtime configuration: the former Deployment flags
 // (listen addresses, log level) and the behavior knobs
-// (site identity, catalog, sync concurrency, publish route generation).
+// (mirrorz output, sync concurrency, per-protocol publish settings).
 package config
 
 import (
@@ -14,36 +14,83 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// GatewayRef points at the Gateway that terminates traffic for the publish
-// hostnames. An empty Namespace means "same namespace as the controller".
+// GatewayRef points at the Gateway that terminates traffic for a publish
+// protocol. An empty Namespace means "same namespace as the controller".
 type GatewayRef struct {
 	Name        string `json:"name,omitempty"`
 	Namespace   string `json:"namespace,omitempty"`
 	SectionName string `json:"sectionName,omitempty"`
 }
 
-// PublishConfig describes the publishing topology: which Gateway and
-// hostnames serve the mirrors, plus labels/annotations stamped onto every
-// generated HTTPRoute. An empty Hostnames list disables publish-route
+// HTTPPublishConfig describes the HTTP publishing topology: which Gateway
+// and hostnames serve the mirrors, plus labels/annotations stamped onto
+// every generated HTTPRoute. An empty Hostnames list disables publish-route
 // generation (catalog/webapi keep working).
-type PublishConfig struct {
+type HTTPPublishConfig struct {
 	GatewayRef  GatewayRef        `json:"gatewayRef,omitempty"`
 	Hostnames   []string          `json:"hostnames,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
+// PublishConfig scopes publishing per protocol; each protocol names its own
+// Gateway and hostnames because they may be served on different domains.
+// Additional protocols (e.g. an rsync gateway) will live alongside HTTP.
+type PublishConfig struct {
+	HTTP HTTPPublishConfig `json:"http,omitempty"`
+}
+
+// SiteConfig is the identity of this mirror site, rendered into the site
+// section of the mirrorz document.
+type SiteConfig struct {
+	// URL is the fallback site URL (no trailing slash) used by
+	// /mirrorz.json when the request Host is not in publish.http.hostnames.
+	URL          string `json:"url"`
+	Abbr         string `json:"abbr,omitempty"`
+	Name         string `json:"name,omitempty"`
+	Logo         string `json:"logo,omitempty"`
+	LogoDarkmode string `json:"logo_darkmode,omitempty"`
+	Homepage     string `json:"homepage,omitempty"`
+	Issue        string `json:"issue,omitempty"`
+	Request      string `json:"request,omitempty"`
+	Email        string `json:"email,omitempty"`
+	Group        string `json:"group,omitempty"`
+	Disk         string `json:"disk,omitempty"`
+	Note         string `json:"note,omitempty"`
+	Big          string `json:"big,omitempty"`
+	Disable      bool   `json:"disable,omitempty"`
+}
+
+// MirrorzConfig groups everything driving the /mirrorz.json output: the
+// endpoint switch and the site identity the document carries. The document
+// follows the MirrorZ spec, hence the name.
+type MirrorzConfig struct {
+	// Enabled gates the GET /mirrorz.json endpoint.
+	Enabled bool       `json:"enabled,omitempty"`
+	Site    SiteConfig `json:"site"`
+}
+
+// AdminOAuthConfig is the GitHub OAuth application guarding the whole admin
+// surface when configured: every admin endpoint then requires a session.
+// Without it the admin endpoints answer unauthenticated (debug/local mode).
+type AdminOAuthConfig struct {
+	ClientID       string  `json:"clientID,omitempty"`
+	ClientSecret   string  `json:"clientSecret,omitempty"`
+	AllowedUserIDs []int64 `json:"allowedUserIDs,omitempty"`
+}
+
 // Config is the whole controller configuration file.
 type Config struct {
-	Auth struct {
-		GitHub struct {
-			ClientID       string  `json:"clientID,omitempty"`
-			ClientSecret   string  `json:"clientSecret,omitempty"`
-			AllowedUserIDs []int64 `json:"allowedUserIDs,omitempty"`
-		} `json:"github,omitempty"`
-	} `json:"auth,omitempty"`
 	Admin struct {
+		// Enabled turns on the admin listener and its API/UI surface.
+		Enabled bool `json:"enabled,omitempty"`
+		// Host is the admin hostname: the OAuth redirect anchor and the
+		// hostname the UI is served on. Required when OAuth is configured.
 		Host string `json:"host,omitempty"`
+		// OAuth gates the admin surface on GitHub login. The whole
+		// configuration is optional; a clientSecret of "${...}" expands
+		// from the environment (the chart injects a Secret).
+		OAuth AdminOAuthConfig `json:"oauth,omitempty"`
 	} `json:"admin,omitempty"`
 	Log struct {
 		// Level is one of debug, info, warn, error (default info).
@@ -53,32 +100,15 @@ type Config struct {
 	API struct {
 		MetricsBindAddress     string `json:"metricsBindAddress,omitempty"`
 		HealthProbeBindAddress string `json:"healthProbeBindAddress,omitempty"`
-		WebapiBindAddress      string `json:"webapiBindAddress,omitempty"`
+		// MirrorzBindAddress serves the public catalog port: /mirrorz.json
+		// only. "0" disables the listener.
+		MirrorzBindAddress string `json:"mirrorzBindAddress,omitempty"`
+		// AdminBindAddress serves the admin port: /api, OAuth and the UI
+		// reverse proxy. "0" disables the listener.
+		AdminBindAddress string `json:"adminBindAddress,omitempty"`
 	} `json:"api,omitempty"`
 
-	Site struct {
-		// URL is the fallback site URL (no trailing slash) used by
-		// /mirrorz.json when the request Host is not in publish.hostnames.
-		URL          string `json:"url"`
-		Abbr         string `json:"abbr,omitempty"`
-		Name         string `json:"name,omitempty"`
-		Logo         string `json:"logo,omitempty"`
-		LogoDarkmode string `json:"logo_darkmode,omitempty"`
-		Homepage     string `json:"homepage,omitempty"`
-		Issue        string `json:"issue,omitempty"`
-		Request      string `json:"request,omitempty"`
-		Email        string `json:"email,omitempty"`
-		Group        string `json:"group,omitempty"`
-		Disk         string `json:"disk,omitempty"`
-		Note         string `json:"note,omitempty"`
-		Big          string `json:"big,omitempty"`
-		Disable      bool   `json:"disable,omitempty"`
-	} `json:"site"`
-
-	Catalog struct {
-		// Enabled gates the GET /mirrorz.json endpoint.
-		Enabled bool `json:"enabled,omitempty"`
-	} `json:"catalog,omitempty"`
+	Mirrorz MirrorzConfig `json:"mirrorz,omitempty"`
 
 	Sync struct {
 		// MaxConcurrent caps the number of concurrently running sync Jobs
@@ -98,7 +128,8 @@ func Default() *Config {
 	cfg.Log.Level = defaultLogLevel
 	cfg.API.MetricsBindAddress = ":8080"
 	cfg.API.HealthProbeBindAddress = ":8081"
-	cfg.API.WebapiBindAddress = ":8082"
+	cfg.API.MirrorzBindAddress = ":8082"
+	cfg.API.AdminBindAddress = ":8083"
 	return cfg
 }
 
@@ -125,7 +156,7 @@ func Load(path string) (*Config, error) {
 // Validate normalizes and checks the config. It is called by Load; callers
 // that build a Config programmatically (tests) should call it too.
 func (c *Config) Validate() error {
-	c.Site.URL = strings.TrimRight(strings.TrimSpace(c.Site.URL), "/")
+	c.Mirrorz.Site.URL = strings.TrimRight(strings.TrimSpace(c.Mirrorz.Site.URL), "/")
 	if c.Log.Level == "" {
 		c.Log.Level = "info"
 	}
@@ -134,8 +165,15 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("log.level must be one of debug, info, warn, error")
 	}
-	if c.Site.URL == "" {
-		return fmt.Errorf("site.url must not be empty")
+	// The site identity exists only for the mirrorz document, so it is
+	// required only when the endpoint is on.
+	if c.Mirrorz.Enabled {
+		if c.Mirrorz.Site.URL == "" {
+			return fmt.Errorf("mirrorz.site.url must not be empty when mirrorz.enabled is set")
+		}
+		if !strings.Contains(c.Mirrorz.Site.URL, "://") {
+			return fmt.Errorf("mirrorz.site.url must carry a scheme (e.g. https://...)")
+		}
 	}
 	if c.Admin.Host != "" {
 		c.Admin.Host = strings.TrimSpace(strings.ToLower(c.Admin.Host))
@@ -143,26 +181,32 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("admin.host must be a bare hostname")
 		}
 	}
-	if !strings.Contains(c.Site.URL, "://") {
-		return fmt.Errorf("site.url must carry a scheme (e.g. https://...)")
+	if c.Admin.OAuth.ClientID != "" {
+		if !c.Admin.Enabled {
+			return fmt.Errorf("admin.oauth requires admin.enabled")
+		}
+		if c.Admin.Host == "" {
+			return fmt.Errorf("admin.host must not be empty when admin.oauth is configured")
+		}
 	}
-	if len(c.Publish.Hostnames) > 0 && c.Publish.GatewayRef.Name == "" {
-		return fmt.Errorf("publish.gatewayRef.name is required when publish.hostnames is set")
+	http := c.Publish.HTTP
+	if len(http.Hostnames) > 0 && http.GatewayRef.Name == "" {
+		return fmt.Errorf("publish.http.gatewayRef.name is required when publish.http.hostnames is set")
 	}
-	for _, host := range c.Publish.Hostnames {
+	for _, host := range http.Hostnames {
 		if strings.TrimSpace(host) == "" {
-			return fmt.Errorf("publish.hostnames must not contain empty entries")
+			return fmt.Errorf("publish.http.hostnames must not contain empty entries")
 		}
 		if strings.Contains(host, "/") {
-			return fmt.Errorf("publish.hostnames entries must be bare hostnames")
+			return fmt.Errorf("publish.http.hostnames entries must be bare hostnames")
 		}
 	}
 	return nil
 }
 
 // PublishEnabled reports whether the controller should generate publish
-// HTTPRoutes: it requires at least one publish hostname (a Gateway name is
-// guaranteed alongside by Validate).
+// HTTPRoutes: it requires at least one HTTP publish hostname (a Gateway
+// name is guaranteed alongside by Validate).
 func (c *Config) PublishEnabled() bool {
-	return len(c.Publish.Hostnames) > 0
+	return len(c.Publish.HTTP.Hostnames) > 0
 }

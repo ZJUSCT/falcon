@@ -2,14 +2,15 @@
 {{- if .Values.controller.enabled }}
 
 {{- /*
-The liveness/readiness probes and the metrics/webapi Services address the
+The liveness/readiness probes and the metrics/mirrorz/admin Services address the
 listeners by NAMED ports, so the containerPort numbers below carry the actual
 port. They are derived from the configured bind addresses (falcon.port), so
 moving a listener here moves its probe and Service targets with it.
 */ -}}
-{{- $probePort := include "falcon.port" (.Values.controller.config.api.healthProbeBindAddress | default ":8081") -}}
-{{- $metricsPort := include "falcon.port" (.Values.controller.config.api.metricsBindAddress | default ":8080") -}}
-{{- $webapiPort := include "falcon.port" (.Values.controller.config.api.webapiBindAddress | default ":8082") -}}
+{{- $probePort := include "falcon.port" ":8081" -}}
+{{- $metricsPort := include "falcon.port" ":8080" -}}
+{{- $mirrorzPort := include "falcon.port" ":8082" -}}
+{{- $adminPort := include "falcon.port" ":8083" -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -23,7 +24,6 @@ spec:
   {{- with .Values.controller.revisionHistoryLimit }}
   revisionHistoryLimit: {{ . }}
   {{- end }}
-  replicas: {{ .Values.controller.replicaCount }}
   strategy:
     type: Recreate
   selector:
@@ -82,14 +82,27 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            {{- if .Values.webui.enabled }}
+            {{- if or .Values.ui.oauth.clientSecret .Values.ui.oauth.existingSecret }}
+            # Expands ${FALCON_ADMIN_OAUTH_CLIENT_SECRET} inside config.yaml;
+            # the value itself lives in a Secret, never in the ConfigMap.
+            - name: FALCON_ADMIN_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.ui.oauth.existingSecret }}
+                  name: {{ .Values.ui.oauth.existingSecret }}
+                  {{- else }}
+                  name: {{ include "falcon.fullname" . }}-auth
+                  {{- end }}
+                  key: client-secret
+            {{- end }}
+            {{- if .Values.ui.enabled }}
             - name: FALCON_UI_UPSTREAM
               # Use the Service FQDN so the controller's optional outbound
               # HTTP proxy never handles this in-cluster reverse-proxy hop.
               value: http://{{ include "falcon.fullname" . }}-ui.{{ .Release.Namespace }}.svc.cluster.local
             {{- end }}
             {{- if .Values.zfsAgent.enabled }}
-            # Wires webapi GET /api/usage: the controller aggregates the
+            # Wires admin GET /api/usage: the controller aggregates the
             # zfs-agent DaemonSet's reports through this headless Service.
             # Unset (zfsAgent disabled) leaves /api/usage a 404.
             - name: ZFS_AGENT_SERVICE
@@ -105,8 +118,10 @@ spec:
             - name: health
               containerPort: {{ $probePort | int }}
               protocol: TCP
-            - name: webapi
-              containerPort: {{ $webapiPort | int }}
+            - name: mirrorz
+              containerPort: {{ $mirrorzPort | int }}
+            - name: admin
+              containerPort: {{ $adminPort | int }}
               protocol: TCP
           livenessProbe:
             httpGet:

@@ -1,0 +1,46 @@
+{{- /*
+MirrorZ catalog route: GET /mirrorz.json on every publish hostname. Fully
+derived from controller.config.publish.http — same hostnames, same Gateway
+(mirrorz.json is served by the mirrorz listener on the publish domains) — so this
+template only carries the on/off switch.
+*/ -}}
+{{- if .Values.mirrorz.route.enabled }}
+{{- $http := .Values.controller.config.publish.http | default dict }}
+{{- $hostnames := $http.hostnames | default list }}
+{{- if eq (len $hostnames) 0 }}
+{{- fail "mirrorz.route.enabled requires controller.config.publish.http.hostnames" }}
+{{- end }}
+{{- $gw := $http.gatewayRef | default dict }}
+{{- if not (index $gw "name" | default "") }}
+{{- fail "mirrorz.route.enabled requires controller.config.publish.http.gatewayRef.name" }}
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "falcon.fullname" . }}-mirrorz
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "falcon.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mirrorz
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ index $gw "name" | quote }}
+      {{- with index $gw "namespace" }}
+      namespace: {{ . | quote }}
+      {{- end }}
+      {{- with index $gw "sectionName" }}
+      sectionName: {{ . | quote }}
+      {{- end }}
+  hostnames:
+{{ toYaml $hostnames | indent 4 }}
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: /mirrorz.json
+      backendRefs:
+        - name: {{ include "falcon.fullname" . }}-mirrorz
+          port: 80
+{{- end }}

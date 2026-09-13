@@ -27,13 +27,18 @@ const (
 	SyncRequestAnnotation    = "mirrors.zjusct.io/sync-request"
 	AbortRequestAnnotation   = "mirrors.zjusct.io/abort-request"
 	RequestCleanupAnnotation = "mirrors.zjusct.io/request-cleanup"
-	SyncPhaseCancelling      = "Cancelling"
-	SyncPhaseCancelled       = "Cancelled"
-	SyncPhasePending         = "Pending"
-	SyncPhaseRunning         = "Running"
-	SyncPhaseSnapshotting    = "Snapshotting"
-	SyncPhaseSucceeded       = "Succeeded"
-	SyncPhaseFailed          = "Failed"
+	SyncPausedAnnotation     = "mirrors.zjusct.io/sync-paused"
+
+	// requestTrue is the single value all request/pause annotations compare
+	// against and write.
+	requestTrue           = "true"
+	SyncPhaseCancelling   = "Cancelling"
+	SyncPhaseCancelled    = "Cancelled"
+	SyncPhasePending      = "Pending"
+	SyncPhaseRunning      = "Running"
+	SyncPhaseSnapshotting = "Snapshotting"
+	SyncPhaseSucceeded    = "Succeeded"
+	SyncPhaseFailed       = "Failed"
 )
 
 // MirrorInfo carries the public catalog metadata of a mirror. There is no URL
@@ -62,9 +67,6 @@ type MirrorInfo struct {
 // the bound PV's nodeAffinity pins every later sync pod) — see the
 // "存储的局部性" (storage locality) section of the documentation.
 type MirrorSyncSpec struct {
-	// Paused disables automatic synchronization; explicit requests still run.
-	// Published content and its serving workloads remain available.
-	Paused   bool            `json:"paused,omitempty"`
 	Interval metav1.Duration `json:"interval"`
 	// RetryInterval is the delay before the next synchronization attempt
 	// after a *failed* run. It applies while status.consecutiveFailures is
@@ -358,8 +360,8 @@ type MirrorStatus struct {
 	Sync               MirrorSyncState          `json:"sync,omitempty"`
 	Publication        *MirrorPublicationStatus `json:"publication,omitempty"`
 	ObservedGeneration int64                    `json:"observedGeneration,omitempty"`
-	// LastAcceptedSpecHash identifies spec.sync accepted for the last
-	// synchronization, excluding paused.
+	// LastAcceptedSpecHash identifies the spec.sync accepted for the last
+	// synchronization.
 	LastAcceptedSpecHash string `json:"lastAcceptedSpecHash,omitempty"`
 	WorkPVC              string `json:"workPVC,omitempty"`
 	// ActivePVC is the name of the publish PVC currently published. Names
@@ -381,8 +383,9 @@ type MirrorStatus struct {
 	// MirrorZ's O token when a later Job is running or has failed.
 	// Required before publication; only absent before the first successful Job.
 	LastSuccessfulSyncAt *metav1.Time `json:"lastSuccessfulSyncAt,omitempty"`
-	// PausedAt is when the controller observed syncing stop under paused=true.
-	// Running Jobs drain first; publication proceeds independently.
+	// PausedAt is when the controller observed syncing stop under the
+	// sync-paused annotation. Running Jobs drain first; publication proceeds
+	// independently.
 	PausedAt *metav1.Time `json:"pausedAt,omitempty"`
 	// LastAttempt records the last accepted synchronization request outcome,
 	// including cancellation before a Job starts. Success means a ready snapshot
@@ -417,10 +420,27 @@ type MirrorList struct {
 
 // SyncRequested reports one outstanding manual request. Repeated true writes coalesce.
 func (m *Mirror) SyncRequested() bool {
-	return m.Annotations[SyncRequestAnnotation] == "true"
+	return m.Annotations[SyncRequestAnnotation] == requestTrue
 }
 
 // AbortRequested applies to the synchronization current when the controller handles it.
 func (m *Mirror) AbortRequested() bool {
-	return m.Annotations[AbortRequestAnnotation] == "true"
+	return m.Annotations[AbortRequestAnnotation] == requestTrue
+}
+
+// SyncPaused reports whether automatic synchronization is paused.
+func (m *Mirror) SyncPaused() bool {
+	return m.Annotations[SyncPausedAnnotation] == requestTrue
+}
+
+// SetSyncPaused toggles the pause annotation; resume removes it.
+func (m *Mirror) SetSyncPaused(paused bool) {
+	if paused {
+		if m.Annotations == nil {
+			m.Annotations = map[string]string{}
+		}
+		m.Annotations[SyncPausedAnnotation] = requestTrue
+		return
+	}
+	delete(m.Annotations, SyncPausedAnnotation)
 }

@@ -1,12 +1,13 @@
 {{- /*
-Read-only webapi listener of the controller (GET /mirrorz.json, /api/jobs,
-/api/repos/...). Exposed on port 80 for the admin and catalog HTTPRoutes.
+Public mirrorz listener of the controller: /mirrorz.json only (the handler
+registers nothing else, so this Service structurally cannot expose the admin
+API). Exposed on port 80 for the derived mirrorz HTTPRoute.
 */ -}}
 {{- if .Values.controller.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "falcon.fullname" . }}-webapi
+  name: {{ include "falcon.fullname" . }}-mirrorz
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "falcon.labels" . | nindent 4 }}
@@ -17,8 +18,8 @@ spec:
     {{- include "falcon.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: controller
   ports:
-    - name: http
+    - name: mirrorz
       port: 80
-      targetPort: webapi
+      targetPort: mirrorz
       protocol: TCP
 {{- end }}

@@ -1,0 +1,17 @@
+# EG's data-plane Service defaults to type LoadBalancer; kind has no load
+# balancer implementation, so the Gateway would never get an address
+# (Programmed=False / AddressNotAssigned). NodePort solves both that and the
+# test access: run.sh only reads the assigned node port instead of patching
+# the Service. The namespace is the EG install one (created by its chart
+# before this kustomization is applied).
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: envoy-gateway
+  namespace: envoy-gateway-system
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: NodePort
