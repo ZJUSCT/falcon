@@ -85,10 +85,8 @@ services:
     volumes:
       - .:/source:ro
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./.e2e-dump:/tmp/e2e-dump
     environment:
       HOME: /tmp
-      E2E_DUMP_DIR: /tmp/e2e-dump
   generate:
     <<: *go
     profiles: [write]

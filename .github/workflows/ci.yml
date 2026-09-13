@@ -15,30 +15,21 @@ permissions:
 
 jobs:
   checks:
-    name: Containerized checks
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out code
-        uses: actions/checkout@v4
-
-      - name: Run the same checks as local development
-        run: make check
-
-  e2e:
-    name: End-to-end (kind)
+    name: ${{ matrix.check }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      # Let every leg finish so one failure doesn't hide others.
+      fail-fast: false
+      matrix:
+        # Each containerized check group (and the e2e scenario) runs as its
+        # own leg: the tool image builds overlap instead of stacking behind
+        # `make check`'s sequential run (the groups are also the local
+        # entry points).
+        check: [hygiene, verify-generated, go-checks, ui-checks, chart-checks, e2e]
     steps:
       - name: Check out code
         uses: actions/checkout@v4
 
-      - name: Run the e2e scenario
-        run: make e2e
-
-      - name: Upload diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-diagnostics
-          path: .e2e-dump/
-          if-no-files-found: ignore
+      - name: Run the check group
+        run: make ${{ matrix.check }}

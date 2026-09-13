@@ -11,38 +11,37 @@ SITE_HOST=mirrors.example.org
 NODE_IMAGE=kindest/node:v1.36.4
 IMAGE=falcon:e2e
 KUBECONFIG=/tmp/kubeconfig
-DUMP_DIR=${E2E_DUMP_DIR:-/tmp/e2e-dump}
 export KUBECONFIG
 
 log() { printf '\n==> %s\n' "$*"; }
 
+# dump prints the cluster state straight to stdout (the run's live output)
+# on failure only. Fail fast per request: with the API server unreachable
+# every call would otherwise hang for minutes in client-side retries.
 dump() {
-    mkdir -p "$DUMP_DIR"
-    # Fail fast per request: with the API server unreachable every call
-    # would otherwise hang for minutes in client-side retries.
     k=(kubectl --request-timeout=10s)
-    {
-        "${k[@]}" get pods -A || true
-        "${k[@]}" get events -A --sort-by=.lastTimestamp || true
-        "${k[@]}" get mirror,httproute,gateway,pvc,volumesnapshot -A || true
-        "${k[@]}" describe gatewayclass envoy-gateway || true
-        "${k[@]}" describe -n "$NAMESPACE" gateway mirror-gateway || true
-        "${k[@]}" -n envoy-gateway-system logs deploy/envoy-gateway --tail=300 || true
-        "${k[@]}" -n default logs statefulset/csi-hostpathplugin --all-containers --tail=60 || true
-        "${k[@]}" get csidriver,csinode -o wide || true
-        "${k[@]}" describe -n "$NAMESPACE" mirror demo || true
-        "${k[@]}" -n "$NAMESPACE" logs deploy/falcon --tail=300 || true
-        jobs=$("${k[@]}" -n "$NAMESPACE" get jobs -o name 2>/dev/null || true)
-        for job in $jobs; do
-            "${k[@]}" -n "$NAMESPACE" logs "$job" --tail=100 || true
-        done
-        kind export logs "$DUMP_DIR/kind" --name "$CLUSTER" || true
-    } >"$DUMP_DIR/summary.txt" 2>&1
+    echo "==== e2e diagnostics ===="
+    "${k[@]}" get pods -A || true
+    "${k[@]}" get events -A --sort-by=.lastTransitionTime || true
+    "${k[@]}" get mirror,httproute,gateway,pvc,volumesnapshot -A || true
+    "${k[@]}" describe gatewayclass envoy-gateway || true
+    "${k[@]}" describe -n "$NAMESPACE" gateway mirror-gateway || true
+    "${k[@]}" -n envoy-gateway-system logs deploy/envoy-gateway --tail=300 || true
+    "${k[@]}" -n default logs statefulset/csi-hostpathplugin --all-containers --tail=60 || true
+    "${k[@]}" get csidriver,csinode -o wide || true
+    "${k[@]}" describe -n "$NAMESPACE" mirror demo || true
+    "${k[@]}" -n "$NAMESPACE" logs deploy/falcon --tail=300 || true
+    jobs=$("${k[@]}" -n "$NAMESPACE" get jobs -o name 2>/dev/null || true)
+    for job in $jobs; do
+        "${k[@]}" -n "$NAMESPACE" logs "$job" --tail=100 || true
+    done
 }
 
 cleanup() {
     rc=$?
-    dump
+    if [ "$rc" -ne 0 ]; then
+        dump
+    fi
     kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
     exit "$rc"
 }
