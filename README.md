@@ -903,7 +903,7 @@ Action 有检查和发版两个 workflow。在检查的 workflow 通过之前，
 
 ### Roadmap & Todo
 
-- [ ] v0.1.6
+- [ ] v0.1.7
     - [ ] 镜像相关资源在生命周期管理增强：实现 reloader 的功能，感觉可模仿 helm chart 注入 hash，或者采用 reloader 的方式（暂不了解 reloader 怎么做到的）
     - [ ] zfs-agent：在 Grafana 中对采集的信息进行校验，并制作 Dashboard。
     - [ ] UI：storage(zfs) 页面须修复。
