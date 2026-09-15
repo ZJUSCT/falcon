@@ -578,7 +578,24 @@ Falcon 仅对 CRD 做基础校验，派生资源的校验由其他组件负责�
 
 - 一个 Mirror 对应一个长期复用的同步卷和若干发布代次。每代内容来自一次成功同步后的快照。
 - 时间戳是**控制器接受同步事务时**的 UNIX 时间戳，并传播到同步 Job、快照、发布 PVC 的名字与标签。
-- Service 名和 label 值受最长 63 字符的 DNS label 约束，超长会被 K8s 拒绝。
+
+K8s 对对象名定义了三档约束：
+
+| 标准 | 长度 | 允许字符 | 首字符 | 是否允许点号 |
+| --- | --- | --- | --- | --- |
+| DNS Subdomain（RFC 1123） | ≤253 | [a-z0-9-.] | 字母数字 | 允许 |
+| RFC 1123 Label | ≤63 | [a-z0-9-] | 字母 | 不允许 |
+| DNS-1035 Label | ≤63 | [a-z0-9-] | 字母（1.34+ 起 Service 经 RelaxedServiceNameValidation 默认放宽为可数字开头） | 不允许 |
+
+绝大多数资源用 DNS Subdomain；Service 是 Falcon 用到的资源中唯一强制 DNS-1035 的。因此命名转换**仅作用于发布 Deployment 与 Service** 这一对发布工作负载：
+
+- 当且仅当 CR 名含点号时，将名字中的点号替换为 `-`：例如 `crates.io-index` 的发布 Deployment 和 Service 名为 `crates-io-index-publish-http`。Deployment 与 Service 始终同名，HTTPRoute 的 `backendRef`、停服删除、发布健康检查、旧 Pod 排空判定等引用随之一致。
+- 转换不做进一步消歧（不加 hash、不截断）。若转换后的名字与其他镜像冲突（例如 `crates.io-index` 与 `crates-io-index` 并存），Falcon 不接管对方对象，向父 CR 报告 `Degraded=True/DerivedResourceInvalid`；由 CR 名点号以外的非法性（如超长）导致的 apiserver 拒绝同样按该语义转述。
+- Mirror 与 ProxyMirror 适用相同规则。
+
+> 参考文献：
+>
+> - [Object Names and IDs | Kubernetes](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/)
 
 子资源 Label：
 
@@ -886,9 +903,11 @@ Action 有检查和发版两个 workflow。在检查的 workflow 通过之前，
 
 ### Roadmap & Todo
 
-- [ ] 在生命周期中实现 reloader 的功能
-- [ ] zfs-agent：在 Grafana 中对采集的信息进行校验，并制作 Dashboard。
+- [ ] v0.1.6
+    - [ ] 镜像相关资源在生命周期管理增强：实现 reloader 的功能，感觉可模仿 helm chart 注入 hash，或者采用 reloader 的方式（暂不了解 reloader 怎么做到的）
+    - [ ] zfs-agent：在 Grafana 中对采集的信息进行校验，并制作 Dashboard。
+    - [ ] UI：storage(zfs) 页面须修复。
+    - [ ] 历史 Job 日志消失问题
 
-未排期：
-
-- Before the next OpenEBS ZFS LocalPV release: enable snapshotter creation metadata, verify ZFS annotations, and align Falcon zfs-agent handling（好像已经发布了包含该特性的 commit）
+- 未排期：
+    - [ ] Before the next OpenEBS ZFS LocalPV release: enable snapshotter creation metadata, verify ZFS annotations, and align Falcon zfs-agent handling（好像已经发布了包含该特性的 commit）

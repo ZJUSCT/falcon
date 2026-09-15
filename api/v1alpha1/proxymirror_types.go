@@ -43,7 +43,9 @@ type ProxyMirrorSpec struct {
 	// (see ProxyMirrorServicesSpec). With the key absent (including an
 	// entirely absent services object) nothing is deployed: the proxy is not
 	// published. A serving http key gets Deployment/Service
-	// `<name>-publish-http` plus the publish HTTPRoute (once Ready); an http
+	// `<name>-publish-http` (dots in the CR name map to '-': Service names
+	// are DNS-1035 labels and forbid dots) plus the publish HTTPRoute (once
+	// Ready); an http
 	// key in redirect mode (no podTemplate, a redirect hostname) deploys no
 	// workload and 302-redirects the public paths through the route instead.
 	// The optional cache PVC keeps being maintained across a temporary

@@ -43,8 +43,12 @@ const (
 
 // publishChildName is the deterministic name of one service entry's publish
 // Deployment and Service: <base>-publish-<protocol> (e.g. <base>-publish-http).
+// Service names are DNS-1035 labels and cannot contain dots, so a dotted CR
+// name has its dots mapped to '-' for both workloads (e.g. `crates.io-index`
+// -> `crates-io-index-publish-http`); the Deployment shares the name so every
+// reference (backendRef, teardown, health, drain) stays in lockstep.
 func publishChildName(base, protocol string) string {
-	return resourceName(base, "publish-"+protocol)
+	return resourceName(dns1035Base(base), "publish-"+protocol)
 }
 
 // publishRole is the role label value shared by one service entry's

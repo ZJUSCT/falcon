@@ -539,9 +539,12 @@ func (r *MirrorReconciler) ensurePublishEntry(ctx context.Context, mirror *mirro
 
 // ensurePublishServiceAndDeployment maintains the Service/Deployment pair of
 // one enabled publish service key ("http"/"rsync") for owner (a Mirror or a
-// ProxyMirror): Service `<base>-publish-<key>` (port 80 -> the first declared
-// port on the operator-owned template), and Deployment `<base>-publish-<key>`.
-// It reports the Deployment rollout readiness.
+// ProxyMirror): Service `<base>-publish-<key>` with dots in <base> mapped to
+// '-' (Service names are DNS-1035; the Deployment shares the name so all
+// references stay consistent), port 80 -> the first declared port on the
+// operator-owned template. It reports the Deployment rollout readiness.
+// A child already controlled by another owner (transformed-name collision)
+// is never adopted; the returned error projects as Degraded.
 func ensurePublishServiceAndDeployment(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, base, serviceKey string, replicas int32, podTemplate corev1.PodTemplateSpec) (bool, error) {
 	childName := publishChildName(base, serviceKey)
 	role := publishRole(serviceKey)
@@ -559,7 +562,7 @@ func ensurePublishServiceAndDeployment(ctx context.Context, c client.Client, sch
 		}}
 		return controllerutil.SetControllerReference(owner, svc, scheme)
 	}); err != nil {
-		return false, err
+		return false, wrapDerivedConflict(err, "Service", childName)
 	}
 
 	// Rolling updates never drop below the desired replica count and surge by
@@ -582,7 +585,7 @@ func ensurePublishServiceAndDeployment(ctx context.Context, c client.Client, sch
 		deployment.Spec.Template = podTemplate
 		return controllerutil.SetControllerReference(owner, deployment, scheme)
 	}); err != nil {
-		return false, err
+		return false, wrapDerivedConflict(err, "Deployment", childName)
 	}
 
 	if deployment.Generation != deployment.Status.ObservedGeneration {
@@ -650,17 +653,28 @@ func objectTimestamp(labels map[string]string) (int64, bool) {
 	return timestamp, err == nil
 }
 
-// childBase returns the base of every derived child object name: the CR name
-// as-is, unconverted. CR names are already enforced to RFC 1123 subdomains by
-// the API server (lowercase alphanumerics, '-' and '.'; dots allowed, e.g.
-// `linux.git`), and dots are legal both in DNS subdomain child names
-// (`linux.git-sync-<ts>`) and in label values, so there is nothing to map —
-// the controller's early lowercasing/'.'→'-' normalization was unreachable
-// for valid CR names and is gone. Falcon imposes no additional length limit;
-// the API server validates each derived resource according to that resource's
-// own name and label constraints.
+// childBase returns the base for labels and DNS-subdomain child names: the
+// CR name as-is, unconverted. CR names are already enforced to RFC 1123
+// subdomains by the API server (lowercase alphanumerics, '-' and '.'; dots
+// allowed, e.g. `crates.io-index`), and dots are legal both in DNS subdomain
+// child names (`crates.io-index-sync-<ts>`) and in label values. The one
+// exception is the publish workload pair (Deployment + Service): Service
+// names are DNS-1035 labels and forbid dots, handled by publishChildName.
+// Falcon imposes no additional length limit; the API server validates each
+// derived resource according to that resource's own name and label
+// constraints.
 func childBase(name string) string {
 	return name
+}
+
+// dns1035Base maps a CR name into the DNS-1035 label alphabet by replacing
+// dots with hyphens. It is applied only where a derived child kind forbids
+// dots (the publish Service, and the publish Deployment that always shares
+// its name); every other child name is a DNS subdomain and keeps the CR name
+// as-is. No further disambiguation happens: a collision with another mirror
+// surfaces as Degraded/DerivedResourceInvalid.
+func dns1035Base(name string) string {
+	return strings.ReplaceAll(name, ".", "-")
 }
 
 // resourceName joins a base and a role suffix into a child object name. Name
