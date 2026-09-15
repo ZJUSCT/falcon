@@ -135,7 +135,7 @@ func mirrorzStatusForMirror(m *mirrorv1alpha1.Mirror) (string, error) {
 	}
 	// pending publishes the queue time plus the retained old success: the
 	// mirror keeps serving the last synced data while queued.
-	pending := func(queuedAt *metav1.Time) string {
+	pending := func(queuedAt *metav1.Time) (string, error) {
 		b.timestamp(mirrorzPending, "status.currentSync.queuedAt", queuedAt)
 		b.timestamp("O", "status.lastSuccessfulSyncAt", st.LastSuccessfulSyncAt)
 		return b.result(m.CreationTimestamp)

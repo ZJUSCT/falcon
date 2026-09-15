@@ -130,8 +130,10 @@ def main() -> None:
         (d.get("kind"), d.get("metadata", {}).get("name"))
         for d in renders["all-on"]
     }
+    # Cluster-scoped names carry the release-namespace suffix for
+    # multi-instance deployments; render() pins release "falcon" in "default".
     expected = [
-        ("ClusterRole", "falcon-node-stats"),
+        ("ClusterRole", "falcon-node-stats-default"),
         ("Deployment", "falcon"),
         ("Service", "falcon-mirrorz"),
         ("Service", "falcon-admin"),
@@ -140,7 +142,7 @@ def main() -> None:
         ("Secret", "falcon-auth"),
     ]
     failures += [
-        f"expected resource absent: {r}"
+        f"expected resource present: {r}"
         for r in expected
         if r not in identities
     ]
