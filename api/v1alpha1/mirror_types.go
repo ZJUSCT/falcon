@@ -166,7 +166,6 @@ type MirrorStorageSpec struct {
 type MirrorServiceSpec struct {
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=3
 	Replicas *int32 `json:"replicas,omitempty"`
 	// PodTemplate is the FULL pod template of the publish Deployment
 	// (Deployment .spec.template): the user declares every container, port,

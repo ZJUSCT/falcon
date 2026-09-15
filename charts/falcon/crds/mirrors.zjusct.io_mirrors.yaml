@@ -8767,7 +8767,6 @@ spec:
                       replicas:
                         default: 1
                         format: int32
-                        maximum: 3
                         minimum: 1
                         type: integer
                     type: object
@@ -17418,7 +17417,6 @@ spec:
                       replicas:
                         default: 1
                         format: int32
-                        maximum: 3
                         minimum: 1
                         type: integer
                     type: object

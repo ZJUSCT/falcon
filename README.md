@@ -350,7 +350,7 @@ spec:
       # int32：发布副本数
       # 可选：默认 1
       # 对应：发布 Deployment spec.replicas
-      # 校验（schema）：1–3
+      # 校验（schema）：≥1（不设上限）
       aliases:
         - /git/debian
       # []MirrorHTTPAlias：额外路由，用于补充 CR 名无法表达的合法路由，例如：
