@@ -765,14 +765,12 @@ MirrorZ 字段与 Falcon 字段的映射：
 | 情况 | 条件 | 完整 status |
 | --- | --- | --- |
 | 手动模式，暂停已生效 | `sync-paused 注解存在 && pausedAt != nil && (currentSync == nil | | currentSync.phase == "Pending")` | `P<pausedAt>N<creationTimestamp>` |
-| 正在排队／取消尚未开始的同步 | `currentSync.phase == "Pending"`，或 `currentSync.phase == "Cancelling" && currentSync.startedAt == nil` | `D<currentSync.queuedAt>N<creationTimestamp>` |
+| 正在排队／取消尚未开始的同步 | `currentSync.phase == "Pending"`，或 `currentSync.phase == "Cancelling" && currentSync.startedAt == nil` | `D<currentSync.queuedAt>O<lastSuccessfulSyncAt>N<creationTimestamp>` |
 | 正在同步／等待运行中的同步终止 | `currentSync.phase == "Running"`，或 `currentSync.phase == "Cancelling" && currentSync.startedAt != nil` | `Y<currentSync.startedAt>O<lastSuccessfulSyncAt>N<creationTimestamp>` |
 | 最近同步成功 | `lastSync.phase == "Succeeded"` | `S<lastSync.finishedAt>[X<nextSyncAt>]N<creationTimestamp>` |
 | 最近同步失败／已中止 | `lastSync.phase` 为 `Failed` 或 `Cancelled` | `F<lastSync.startedAt>O<lastSuccessfulSyncAt>[X<nextSyncAt>]N<creationTimestamp>` |
 | ProxyMirror：缓存启用 | `spec.cache` 存在 | `CN<creationTimestamp>` |
 | ProxyMirror：无缓存 | `spec.cache` 未设置 | `RN<creationTimestamp>` |
-
-Falcon 不输出 `D`：首次成功前 Ready=False，条目不会进入目录；周期同步的等待态则用上一笔已完成结果 `S` 或 `F` 表达，比 `D` 更准确。同步或失败期间的 `O` 让 monitor 使用旧的成功发布时间判断仍在服务的 immutable snapshot 是否新鲜。
 
 其他：
 

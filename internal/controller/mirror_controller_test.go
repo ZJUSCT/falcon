@@ -257,7 +257,7 @@ func TestAtomicPublicationUsesStableSyncPVCAndSnapshotClone(t *testing.T) {
 		t.Fatal(err)
 	}
 	reconcile(t, ctx, reconciler, request)
-	assertMirrorZLifecycleStatus(t, fakeClient, fmt.Sprintf("D%dN%d", now.Unix(), mirror.CreationTimestamp.Unix()))
+	assertMirrorZLifecycleStatus(t, fakeClient, fmt.Sprintf("D%dO%dN%d", now.Unix(), completion.Unix(), mirror.CreationTimestamp.Unix()))
 	reconcile(t, ctx, reconciler, request)
 	current = getMirror(t, ctx, fakeClient, request.NamespacedName)
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: currentSyncJobName(current)}, job)

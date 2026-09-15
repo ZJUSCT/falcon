@@ -65,10 +65,10 @@ func TestMirrorzStatusForMirror(t *testing.T) {
 			m.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseFailed, StartedAt: &started, FinishedAt: &finished}
 			m.Status.NextSyncAt = &next
 		}, "F1788380000O1788300000X1788400000N1788000000"},
-		{"queued excludes old success and stale schedule", func(m *mirrorv1alpha1.Mirror) {
+		{"queued retains old success without stale schedule", func(m *mirrorv1alpha1.Mirror) {
 			m.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{Phase: mirrorv1alpha1.SyncPhasePending, QueuedAt: &started}
 			m.Status.NextSyncAt = &next
-		}, "D1788380000N1788000000"},
+		}, "D1788380000O1788300000N1788000000"},
 		{"snapshotting is not a running Job even with pause requested", func(m *mirrorv1alpha1.Mirror) {
 			m.SetSyncPaused(true)
 			m.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSnapshotting}
@@ -568,9 +568,9 @@ func TestMirrorZManualModeAndCancellation(t *testing.T) {
 		want                  string
 	}{
 		{"held automatic queue", mirrorv1alpha1.SyncPhasePending, true, true, false, "P1788380200N1788000000"},
-		{"manual queue", mirrorv1alpha1.SyncPhasePending, true, false, false, "D1788380000N1788000000"},
+		{"manual queue", mirrorv1alpha1.SyncPhasePending, true, false, false, "D1788380000O1788300000N1788000000"},
 		{"manual running", mirrorv1alpha1.SyncPhaseRunning, true, false, true, "Y1788380100O1788300000N1788000000"},
-		{"cancelling held queue", mirrorv1alpha1.SyncPhaseCancelling, true, true, false, "D1788380000N1788000000"},
+		{"cancelling held queue", mirrorv1alpha1.SyncPhaseCancelling, true, true, false, "D1788380000O1788300000N1788000000"},
 		{"cancelling running job", mirrorv1alpha1.SyncPhaseCancelling, true, false, true, "Y1788380100O1788300000N1788000000"},
 	}
 	for _, tc := range cases {

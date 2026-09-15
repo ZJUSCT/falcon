@@ -27,6 +27,12 @@ import (
 // with cache, R reverse proxy without cache, U unknown) plus any number of
 // auxiliary tokens (X next sync, N new mirror, O old success), each carrying
 // a unix timestamp where the spec allows one.
+//
+// Falcon also publishes O while a sync is merely queued (the spec allows it
+// only when syncing or failed): mirrorz-monitor — the data source behind the
+// mirrors.cernet.edu.cn redirector — derives sync freshness only from S/O/F/P
+// tokens, so without O a queued (still serving) mirror is ranked as unknown
+// and demoted to a last-resort fallback.
 const mirrorzVersion = 1.7
 
 type mirrorzSite struct {
@@ -127,15 +133,20 @@ func mirrorzStatusForMirror(m *mirrorv1alpha1.Mirror) (string, error) {
 		b.timestamp(mirrorzPaused, "status.pausedAt", st.PausedAt)
 		return b.result(m.CreationTimestamp)
 	}
+	// pending publishes the queue time plus the retained old success: the
+	// mirror keeps serving the last synced data while queued.
+	pending := func(queuedAt *metav1.Time) string {
+		b.timestamp(mirrorzPending, "status.currentSync.queuedAt", queuedAt)
+		b.timestamp("O", "status.lastSuccessfulSyncAt", st.LastSuccessfulSyncAt)
+		return b.result(m.CreationTimestamp)
+	}
 	if current := st.CurrentSync; current != nil {
 		switch current.Phase {
 		case mirrorv1alpha1.SyncPhasePending:
-			b.timestamp(mirrorzPending, "status.currentSync.queuedAt", current.QueuedAt)
-			return b.result(m.CreationTimestamp)
+			return pending(current.QueuedAt)
 		case mirrorv1alpha1.SyncPhaseCancelling:
 			if current.StartedAt == nil {
-				b.timestamp(mirrorzPending, "status.currentSync.queuedAt", current.QueuedAt)
-				return b.result(m.CreationTimestamp)
+				return pending(current.QueuedAt)
 			}
 			fallthrough
 		case mirrorv1alpha1.SyncPhaseRunning:
