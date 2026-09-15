@@ -3,14 +3,11 @@
   <br>Falcon<br>
 </h1>
 
-> [!WARNING]
-> Falcon 目前处于开发早期阶段，在 [浙江大学镜像站（ZJU Mirror）](https://mirrors.zju.edu.cn/) 的校内测试站点运行。
-
-Falcon 是一个运行在 [Kubernetes](https://kubernetes.io/) 上的软件源镜像编排器。
+Falcon 是一个运行在 [Kubernetes](https://kubernetes.io/) 上的软件源镜像编排器。第三代 [浙江大学镜像站（ZJU Mirror）](https://mirrors.zju.edu.cn/) 由 Falcon 强力驱动。
 
 - **镜像编排**：用 `Mirror` 声明镜像的存储、同步任务和发布服务，用 `ProxyMirror` 声明代理及其可选缓存。Falcon 创建并维护相应的 Kubernetes 资源。
-- **原子化发布**：同步任务写入独立的可写 PV；同步成功后，Falcon 创建 VolumeSnapshot 并从中克隆发布 PV。用户访问的内容不包含同步过程中的中间状态。
-- **滚动更新**：借助 K8s Service 机制，Falcon 在新旧发布之间平滑切换，现有请求在滚动更新的 grace period 内不被打断。
+- **原子化发布**：同步任务写入独立的可写 PV；同步成功后，Falcon 创建 VolumeSnapshot 并从中克隆只读 PV 用于提供服务。同步的中间状态不对用户暴露。
+- **滚动更新**：借助 K8s Deployment 滚动更新机制，在新旧的镜像版本平滑切换，现有请求在 grace period 内不被打断。
 - **`mirrorz.json`**：符合 [教育网联合镜像站（MirrorZ）](https://github.com/mirrorz-org/mirrorz) 标准。
 
 ![Falcon Overview](overview.png)
