@@ -33,6 +33,10 @@ import (
 
 var scheme = runtime.NewScheme()
 
+// version is stamped at release build time via -ldflags -X (see the
+// Dockerfile and the release workflow); plain builds report "dev".
+var version = "dev"
+
 func main() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(snapshotv1.AddToScheme(scheme))
@@ -137,6 +141,7 @@ func main() {
 		Site:             webapi.SiteConfig{URL: cfg.Mirrorz.Site.URL, Abbr: cfg.Mirrorz.Site.Abbr, Name: cfg.Mirrorz.Site.Name, Logo: cfg.Mirrorz.Site.Logo, LogoDarkmode: cfg.Mirrorz.Site.LogoDarkmode, Homepage: cfg.Mirrorz.Site.Homepage, Issue: cfg.Mirrorz.Site.Issue, Request: cfg.Mirrorz.Site.Request, Email: cfg.Mirrorz.Site.Email, Group: cfg.Mirrorz.Site.Group, Disk: cfg.Mirrorz.Site.Disk, Note: cfg.Mirrorz.Site.Note, Big: cfg.Mirrorz.Site.Big, Disable: cfg.Mirrorz.Site.Disable},
 		PublishHostnames: cfg.Publish.HTTP.Hostnames,
 		MirrorzEnabled:   cfg.Mirrorz.Enabled,
+		Version:          version,
 	}
 	if cfg.Admin.OAuth.ClientID != "" {
 		apiServer.Auth = &webapi.Authenticator{Config: webapi.GitHubAuthConfig{ClientID: cfg.Admin.OAuth.ClientID, ClientSecret: cfg.Admin.OAuth.ClientSecret, AllowedUserIDs: cfg.Admin.OAuth.AllowedUserIDs}, AdminHost: cfg.Admin.Host}

@@ -48,6 +48,10 @@ type Server struct {
 	PublishHostnames []string
 	// MirrorzEnabled gates GET /mirrorz.json (config mirrorz.enabled).
 	MirrorzEnabled bool
+	// Version is the controller build version reported by GET /api/version.
+	// Release builds stamp the git tag via ldflags (see the Dockerfile and
+	// the release workflow); unstamped builds report "dev".
+	Version string
 	// Usage aggregates zfs-agent reports for GET /api/usage. It is nil when
 	// the ZFS_AGENT_SERVICE environment variable is unset, which disables
 	// the endpoint (404) — there is no config field for it.
@@ -88,6 +92,7 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("/api/repos/", s.handleRepo)
 	mux.HandleFunc("/api/usage", s.handleUsage)
 	mux.HandleFunc("/api/storage", s.handleStorage)
+	mux.HandleFunc("/api/version", s.handleVersion)
 	if s.Auth != nil {
 		mux.HandleFunc("/oauth/login", s.Auth.login)
 		mux.HandleFunc("/oauth/callback", s.Auth.callback)

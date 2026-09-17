@@ -72,6 +72,10 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ env.IMAGE }}
+          # Consumed by the controller Dockerfile (ldflags -X main.version);
+          # the other images ignore it. GET /api/version serves the value.
+          build-args: |
+            FALCON_VERSION=${{ github.ref_name }}
 
   chart:
     name: Release chart
