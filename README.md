@@ -911,10 +911,8 @@ Action 有检查和发版两个 workflow。在检查的 workflow 通过之前，
 
 ### Roadmap & Todo
 
-- [ ] v0.1.7
+- [ ] v0.1.8
     - [ ] zfs-agent：在 Grafana 中对采集的信息进行校验，并制作 Dashboard。
-    - [ ] UI：storage(zfs) 页面须修复。Mirror 全部改相对时间。
-    - [ ] 历史 Job 日志消失问题
 
 - 未排期：
     - [ ] Before the next OpenEBS ZFS LocalPV release: enable snapshotter creation metadata, verify ZFS annotations, and align Falcon zfs-agent handling（好像已经发布了包含该特性的 commit）
