@@ -8,6 +8,12 @@ module.exports = {
   ],
   theme: {
     extend: {
+      // The default opacity scale has no 15 (0,5,10,20,...), so every
+      // /15 utility silently generated no CSS; several status badges
+      // relied on it.
+      opacity: {
+        15: '0.15',
+      },
       colors: {
         background: 'hsl(var(--background))',
         foreground: 'hsl(var(--foreground))',

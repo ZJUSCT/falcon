@@ -2,8 +2,9 @@
 
 import { useState, useEffect } from 'react';
 import { cn } from '@/lib/utils';
+import { apiClient } from '@/lib/api';
 import {
-  BarChart3, Disc3, ExternalLink, HardDrive, PanelLeftClose, PanelLeft, Menu, X,
+  BarChart3, Disc3, HardDrive, PanelLeftClose, PanelLeft, Menu, X,
   Sun, Moon, MonitorSmartphone,
 } from 'lucide-react';
 
@@ -28,9 +29,14 @@ const navItems: { id: PageId; label: string; icon: typeof BarChart3 }[] = [
 
 export function Sidebar({ activePage, onNavigate }: SidebarProps) {
   const [namespace, setNamespace] = useState<string>('');
+  const [version, setVersion] = useState<string>('');
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [theme, setThemeState] = useState<'dark' | 'light' | 'system'>('system');
+
+  useEffect(() => {
+    apiClient.getVersion().then(setVersion).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     let saved: string | null = null;
@@ -97,18 +103,6 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
           </button>
         );
       })}
-      {!collapsed && (
-        <a
-          href="https://mirrors.zjusct.io/mirrorz.json"
-          target="_blank"
-          rel="noreferrer"
-          style={{ padding: '8px 10px', gap: '10px' }}
-          className="w-full flex items-center rounded-md text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-        >
-          <ExternalLink className="h-4 w-4 flex-shrink-0" />
-          <span>mirrorz.json</span>
-        </a>
-      )}
     </nav>
   );
 
@@ -124,6 +118,9 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
             <img src="/falcon.svg" alt="Falcon logo" className="w-7 h-7 rounded-md flex-shrink-0" />
             {!collapsed && <span className="font-bold text-sm">Falcon</span>}
           </div>
+          {!collapsed && version && (
+            <div className="pl-9 mt-0.5 text-[10px] font-mono text-muted-foreground" title="Controller version (GET /api/version)">{version}</div>
+          )}
         </div>
         {!collapsed && namespace && (
           <div className="px-3 py-3 border-b">
@@ -164,7 +161,7 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
           <img src="/falcon.svg" alt="Falcon logo" className="w-7 h-7 rounded-md flex-shrink-0" />
           <span className="font-bold text-sm">Falcon</span>
         </div>
-        <button onClick={() => setMobileOpen(!mobileOpen)} className="text-muted-foreground">
+        <button onClick={() => setMobileOpen(!mobileOpen)} aria-label={mobileOpen ? 'Close navigation menu' : 'Open navigation menu'} className="text-muted-foreground">
           {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
       </div>

@@ -90,7 +90,7 @@ export interface StorageObjectRef {
 
 export interface StorageSnapshot {
   name: string; // full "dataset@snapshot" name
-  volumeSnapshot: StorageObjectRef | null; // null: manual snapshot (no VolumeSnapshot CR)
+  volumeSnapshot: StorageObjectRef | null; // from the openebs.io:vs-* properties; null when unset (the storage page does not show this)
   writtenBytes: number; // incremental bytes vs. the previous snapshot
   referencedBytes: number;
   createdAt: number; // epoch seconds
@@ -98,7 +98,8 @@ export interface StorageSnapshot {
 
 export interface StorageDataset {
   name: string; // full dataset path, e.g. "tank/pvc-xxxx"
-  pvc: StorageObjectRef | null; // null: not openebs-managed (manual dataset)
+  pvc: StorageObjectRef | null; // from the openebs.io:pvc-* properties; null when unset
+  mirror?: string; // Mirror (or ProxyMirror) CR the dataset belongs to, resolved by the controller's join; absent when unattributed
   usedBytes: number; // on-disk footprint, including snapshot-held space
   referencedBytes: number;
   writtenBytes: number; // incremental bytes since the latest snapshot

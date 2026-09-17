@@ -136,7 +136,7 @@ function StorageUsageCard({ mirrorId, kind, syncTime }: { mirrorId: string; kind
                     <span className="font-mono">{mirrorUsage.sync.pvc}</span>
                     <span className="ml-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">Sync</span>
                   </td>
-                  <td className="py-2 text-muted-foreground">{syncTime ? <RelativeTime date={syncTime} variant="absolute" /> : '—'}</td>
+                  <td className="py-2 text-muted-foreground">{syncTime ? <RelativeTime date={syncTime} /> : '—'}</td>
                   <td className="py-2 text-right font-mono tabular-nums">{formatBytes(mirrorUsage.sync.writtenBytes) ?? '—'}</td>
                 </tr>
               )}
@@ -151,7 +151,7 @@ function StorageUsageCard({ mirrorId, kind, syncTime }: { mirrorId: string; kind
                       <span className="ml-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">Active</span>
                     )}
                   </td>
-                  <td className="py-2"><RelativeTime date={new Date(snapshot.createdAt * 1000).toISOString()} variant="absolute" /></td>
+                  <td className="py-2"><RelativeTime date={new Date(snapshot.createdAt * 1000).toISOString()} /></td>
                   <td className="py-2 text-right font-mono tabular-nums">{formatBytes(index === mirrorUsage.snapshots.length - 1 ? snapshot.referencedBytes : snapshot.writtenBytes) ?? '—'}</td>
                 </tr>
               ))}
@@ -231,13 +231,10 @@ export function MirrorDetail({ mirrorId, onBack }: MirrorDetailProps) {
           <div className="text-destructive">Error: {error}</div>
         </div>
       ) : job ? (
-        <div className="rounded-lg border border-border bg-card p-4 space-y-3">
+        <>
+          <div className="rounded-lg border border-border bg-card p-4 space-y-3">
           <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Mirror State</h3>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 text-sm">
-            <div>
-              <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Conditions</div>
-              <ConditionBadges conditions={job.conditions} />
-            </div>
             <div>
               <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Sync phase</div>
               <div className="font-mono">{job.sync_phase || '—'}</div>
@@ -252,26 +249,46 @@ export function MirrorDetail({ mirrorId, onBack }: MirrorDetailProps) {
             </div>
             <div>
               <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Last Success</div>
-              <RelativeTime date={job.last_success_at} variant="absolute" />
+              <RelativeTime date={job.last_success_at} />
             </div>
             <div>
               <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Last Failure</div>
-              <RelativeTime date={job.last_failure_at} variant="absolute" />
+              <RelativeTime date={job.last_failure_at} />
             </div>
             <div>
               <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Last Attempt</div>
-              <RelativeTime date={job.last_attempt_at} variant="absolute" />
+              <RelativeTime date={job.last_attempt_at} />
             </div>
             <div>
               <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Next Attempt</div>
-              <RelativeTime date={job.next_attempt_at} variant="countdown" />
+              <RelativeTime date={job.next_attempt_at} />
             </div>
             <div>
               <div className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Last Finished</div>
-              <RelativeTime date={job.last_finished_at} variant="absolute" />
+              <RelativeTime date={job.last_finished_at} />
             </div>
           </div>
-        </div>
+          </div>
+
+          {/* Full condition records: every condition with its status, reason,
+              message, and age — the table badges stay compact. */}
+          {(job.conditions ?? []).length > 0 && (
+            <div className="rounded-lg border border-border bg-card p-4 space-y-3">
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Conditions</h3>
+              <div className="space-y-2">
+                {job.conditions.map(condition => (
+                  <div key={condition.type} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
+                    <StatusBadge status={condition.type} />
+                    <span className={condition.status === 'True' ? 'text-green-500' : condition.status === 'Unknown' ? 'text-yellow-500' : 'text-muted-foreground'}>{condition.status}</span>
+                    <span className="font-mono text-xs text-muted-foreground">{condition.reason}</span>
+                    <span className="flex-1 min-w-[12rem] text-xs text-muted-foreground">{condition.message}</span>
+                    <span className="ml-auto text-xs text-muted-foreground"><RelativeTime date={condition.lastTransitionTime} /></span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
       ) : (
         <div className="rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground">
           No sync job found for this mirror (ProxyMirror resources without sync history may look like this).

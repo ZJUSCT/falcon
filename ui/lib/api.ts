@@ -48,6 +48,12 @@ class ApiClient {
     return this.fetchJson<StorageResponse>('/storage');
   }
 
+  // GET /api/version — controller build version ("dev" in unstamped builds).
+  async getVersion(): Promise<string> {
+    const data = await this.fetchJson<{ version: string }>('/version');
+    return data.version;
+  }
+
   // GET /api/repos/<name> — spec-only view of one Mirror/ProxyMirror.
   // Default serialization is YAML; pass ext: 'json' for JSON.
   async getRepoSpec(name: string, ext: '' | 'json' = ''): Promise<string> {

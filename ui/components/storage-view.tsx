@@ -39,7 +39,7 @@ function getPoolHealthColor(health: string): string {
     case 'UNAVAIL':
       return 'text-red-500 bg-red-500/15 border-red-500/30 hover:bg-red-500/25';
     default:
-      return 'text-muted-foreground bg-muted/60 border-border hover:bg-muted';
+      return 'text-muted-foreground bg-muted border-border hover:bg-muted';
   }
 }
 
@@ -73,9 +73,7 @@ function capacityBarColor(percent: number): string {
   return 'bg-green-500';
 }
 
-// Snapshot rows of one expanded dataset (indented sub-table). Manual
-// snapshots — those without a VolumeSnapshot CR — are tagged "manual"
-// instead of showing an object name.
+// Snapshot rows of one expanded dataset (indented sub-table).
 function SnapshotList({ snapshots }: { snapshots: StorageSnapshot[] }) {
   return (
     <div className="px-3 py-2 sm:px-6">
@@ -87,7 +85,6 @@ function SnapshotList({ snapshots }: { snapshots: StorageSnapshot[] }) {
           <thead>
             <tr className="text-[10px] uppercase tracking-wide text-muted-foreground">
               <th className="py-1 pr-3 text-left font-semibold">Snapshot</th>
-              <th className="py-1 pr-3 text-left font-semibold">VolumeSnapshot</th>
               <th className="py-1 pr-3 text-right font-semibold">Written</th>
               <th className="py-1 pr-3 text-right font-semibold">Referenced</th>
               <th className="py-1 text-right font-semibold">Created</th>
@@ -101,20 +98,6 @@ function SnapshotList({ snapshots }: { snapshots: StorageSnapshot[] }) {
                     {snapshotLeafName(snapshot.name)}
                   </span>
                 </td>
-                <td className="py-1.5 pr-3 whitespace-nowrap">
-                  {snapshot.volumeSnapshot ? (
-                    <span
-                      className="font-mono text-muted-foreground"
-                      title={`${snapshot.volumeSnapshot.namespace}/${snapshot.volumeSnapshot.name}`}
-                    >
-                      {snapshot.volumeSnapshot.name}
-                    </span>
-                  ) : (
-                    <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-                      manual
-                    </span>
-                  )}
-                </td>
                 <td className="py-1.5 pr-3 text-right font-mono tabular-nums whitespace-nowrap">
                   {formatBytes(snapshot.writtenBytes) ?? '—'}
                 </td>
@@ -122,7 +105,7 @@ function SnapshotList({ snapshots }: { snapshots: StorageSnapshot[] }) {
                   {formatBytes(snapshot.referencedBytes) ?? '—'}
                 </td>
                 <td className="py-1.5 text-right whitespace-nowrap">
-                  <RelativeTime date={new Date(snapshot.createdAt * 1000).toISOString()} variant="compact" />
+                  <RelativeTime date={new Date(snapshot.createdAt * 1000).toISOString()} />
                 </td>
               </tr>
             ))}
@@ -208,7 +191,7 @@ function PoolCard({ pool }: { pool: StoragePool }) {
           <thead className="bg-muted/40 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
             <tr>
               <th className="px-3 py-2 text-left">Dataset</th>
-              <th className="hidden lg:table-cell px-3 py-2 text-left">PVC</th>
+              <th className="hidden lg:table-cell px-3 py-2 text-left">Mirror</th>
               <th className="px-3 py-2 text-right">Used</th>
               <th className="hidden md:table-cell px-3 py-2 text-right">Referenced</th>
               <th className="hidden md:table-cell px-3 py-2 text-right">Written</th>
@@ -248,13 +231,8 @@ function PoolCard({ pool }: { pool: StoragePool }) {
                       </div>
                     </td>
                     <td className="hidden lg:table-cell px-3 py-2 align-top whitespace-nowrap">
-                      {dataset.pvc ? (
-                        <span
-                          className="font-mono text-muted-foreground"
-                          title={`${dataset.pvc.namespace}/${dataset.pvc.name}`}
-                        >
-                          {dataset.pvc.namespace}/{dataset.pvc.name}
-                        </span>
+                      {dataset.mirror ? (
+                        <span className="font-mono">{dataset.mirror}</span>
                       ) : (
                         <span className="font-mono text-muted-foreground">—</span>
                       )}
@@ -311,7 +289,7 @@ export function StorageView() {
         <h2 className="text-lg font-bold">Storage (ZFS)</h2>
         {storage && (
           <span className="text-xs text-muted-foreground">
-            updated <RelativeTime date={storage.generatedAt} variant="compact" className="font-mono" />
+            updated <RelativeTime date={storage.generatedAt} className="font-mono" />
           </span>
         )}
       </div>

@@ -790,7 +790,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
         <div className="shrink-0 flex flex-wrap justify-center gap-2 pb-4">
           <button
             onClick={handleZoomIn}
-            className="flex items-center gap-1 px-3 py-1 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+            className="flex items-center gap-1 px-3 py-1 text-sm bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/80 transition-colors"
             title="Zoom In"
           >
             <ZoomIn className="h-4 w-4" />
@@ -798,7 +798,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
           </button>
           <button
             onClick={handleZoomOut}
-            className="flex items-center gap-1 px-3 py-1 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+            className="flex items-center gap-1 px-3 py-1 text-sm bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/80 transition-colors"
             title="Zoom Out"
           >
             <ZoomOut className="h-4 w-4" />
@@ -806,7 +806,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
           </button>
           <button
             onClick={handleReset}
-            className="flex items-center gap-1 px-3 py-1 text-sm bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/90 transition-colors"
+            className="flex items-center gap-1 px-3 py-1 text-sm bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/80 transition-colors"
             title="Reset View"
           >
             <RotateCcw className="h-4 w-4" />
