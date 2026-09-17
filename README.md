@@ -370,6 +370,7 @@ spec:
         # 对其挂载必须 readOnly
         # Falcon 管理只读 mirror-data PVC 卷和控制器标签；不注入放置约束、安全设置、探针、端口、
         # /tmp、镜像策略或其他工作负载字段。Service 的 targetPort 使用第一容器声明的第一个 containerPort。
+        # 唯一保留的外部注解键：reloader.stakater.com/last-reloaded-from，见「发布工作负载的配置热更新」。
         # 以下 metadata/spec 仅示意控制器注入后的字段，不是用户输入。
         # 用户只声明 mirror-data 的只读 volumeMounts，不得声明同名 volume。
         metadata:
@@ -535,6 +536,7 @@ spec:
         #   （仅缓存启用时管理；可写卷源——缓存本身就是写入目标；保留卷名，
         #   用户不得声明同名 volume；挂载与否、挂载路径由用户自行声明）
         # 代理 Deployment/Pod 的其他字段同样完全来自运维人员的 PodTemplate；Falcon 只注入上述缓存卷和控制器标签。
+        # 唯一保留的外部注解键：reloader.stakater.com/last-reloaded-from，见「发布工作负载的配置热更新」。
         # 模板 labels 叠加 mirrors.zjusct.io/mirror: <base>、app.kubernetes.io/component: publish-http
         # 节点放置不注入（代理无数据卷，局部性无从推导，调度由用户决定）
         # 无工作负载默认注入；安全策略由集群准入策略或用户 PodTemplate 管理。
@@ -685,7 +687,7 @@ ProxyMirror 不存在同步和发布流程。Falcon 按照其配置创建好相�
 
 手动请求同步：点击 WebUI 上的按钮或设置 `mirrors.zjusct.io/sync-request: "true"`。Annotation 在同步流程结束后移除。快照错误时保留请求并报告 `Degraded`。注解存在期间重复写入 `"true"` 合并为一次请求。
 
-配置变更触发同步：`spec.sync` 的变更触发自动同步，通过 `lastAcceptedSpecHash` 记录已接受的配置。信息、存储和发布配置的变更不触发同步；自动同步仍受暂停模式和发布完成的约束。
+配置变更触发自动同步：`spec.sync` 的变更触发自动同步，通过 `lastAcceptedSpecHash` 记录已接受的配置。信息、存储和发布配置的变更不触发同步；自动同步仍受暂停模式和发布完成的约束。
 
 强制终止运行中的同步：
 
@@ -700,6 +702,12 @@ ProxyMirror 不存在同步和发布流程。Falcon 按照其配置创建好相�
 停服不关闭自动同步，存储仍按保留策略管理。ProxyMirror 移除 HTTP 服务时，只要 `spec.cache` 仍存在，就保留缓存 PVC。
 
 K8s 已接受的停服配置不会被其他字段的控制器校验错误或尚未完成的同步取消所阻塞；移除 HTTP 后 `Ready=False`。
+
+#### 配置更新
+
+Falcon 不负责监控 Workload 的 ConfigMap/Secret 变更并进行重启。Falcon 将该功能委托给 [Reloader](https://github.com/stakater/Reloader) 以 annotation 方式完成，在 Reconcile 时忽略 `reloader.stakater.com/last-reloaded-from`。
+
+进行中的同步任务一般不宜打断，下次同步任务自动使用最新配置。
 
 #### HTTP 重定向
 
@@ -904,9 +912,8 @@ Action 有检查和发版两个 workflow。在检查的 workflow 通过之前，
 ### Roadmap & Todo
 
 - [ ] v0.1.7
-    - [ ] 镜像相关资源在生命周期管理增强：实现 reloader 的功能，感觉可模仿 helm chart 注入 hash，或者采用 reloader 的方式（暂不了解 reloader 怎么做到的）
     - [ ] zfs-agent：在 Grafana 中对采集的信息进行校验，并制作 Dashboard。
-    - [ ] UI：storage(zfs) 页面须修复。
+    - [ ] UI：storage(zfs) 页面须修复。Mirror 全部改相对时间。
     - [ ] 历史 Job 日志消失问题
 
 - 未排期：

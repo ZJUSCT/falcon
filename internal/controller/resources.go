@@ -582,7 +582,19 @@ func ensurePublishServiceAndDeployment(ctx context.Context, c client.Client, sch
 			},
 		}
 		deployment.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{MirrorLabel: base, ComponentLabel: role}}
+		// The live template is the fetched object's template: carry its
+		// Reloader stamp across the wholesale replacement so a
+		// reloader-triggered rollout is not wiped (and re-rolled) by this
+		// reconcile. The live value always wins; the CR cannot declare this
+		// key.
+		stamp := deployment.Spec.Template.Annotations[reloaderStampAnnotation]
 		deployment.Spec.Template = podTemplate
+		if stamp != "" {
+			if deployment.Spec.Template.Annotations == nil {
+				deployment.Spec.Template.Annotations = map[string]string{}
+			}
+			deployment.Spec.Template.Annotations[reloaderStampAnnotation] = stamp
+		}
 		return controllerutil.SetControllerReference(owner, deployment, scheme)
 	}); err != nil {
 		return false, wrapDerivedConflict(err, "Deployment", childName)

@@ -39,6 +39,14 @@ const (
 	// label value ("publish-http", "publish-rsync") — publish pods are told
 	// apart from other children by this prefix.
 	publishRolePrefix = "publish-"
+
+	// reloaderStampAnnotation is Reloader's pod-template annotation under
+	// the annotations reload strategy (--reload-strategy=annotations). It is
+	// the one foreign mutation preserved when the controller replaces the
+	// publish pod template: wiping it would revert (and re-roll) every
+	// reloader-triggered rollout on the next reconcile. See the README,
+	// "发布工作负载的配置热更新".
+	reloaderStampAnnotation = "reloader.stakater.com/last-reloaded-from"
 )
 
 // publishChildName is the deterministic name of one service entry's publish

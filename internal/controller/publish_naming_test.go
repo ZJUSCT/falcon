@@ -44,19 +44,20 @@ func TestPublishChildNameDNS1035Mapping(t *testing.T) {
 	}
 }
 
-// dottedMirrorFixture is testMirror renamed to a dotted CR name and primed
-// with a published active snapshot, like the paused-publish tests use.
-func dottedMirrorFixture(t *testing.T) *mirrorv1alpha1.Mirror {
+// pausedPublishedMirror is testMirror paused with a published active
+// snapshot — the standing setup of the paused-publish tests; name selects
+// the CR name (e.g. a dotted one for the naming tests).
+func pausedPublishedMirror(t *testing.T, name string) *mirrorv1alpha1.Mirror {
 	t.Helper()
 	mirror := testMirror()
-	mirror.Name = "crates.io-index"
+	mirror.Name = name
 	mirror.SetSyncPaused(true)
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
-		WorkPVC:            "crates.io-index-sync",
-		ActivePVC:          "crates.io-index-snap-1756147200",
-		ActiveSnapshot:     "crates.io-index-snap-1756147200",
+		WorkPVC:            name + "-sync",
+		ActivePVC:          name + "-snap-1756147200",
+		ActiveSnapshot:     name + "-snap-1756147200",
 	}
 	return mirror
 }
@@ -67,7 +68,7 @@ func dottedMirrorFixture(t *testing.T) *mirrorv1alpha1.Mirror {
 // and the route's backendRef points at the transformed name.
 func TestDottedMirrorPublishChildren(t *testing.T) {
 	ctx := context.Background()
-	mirror := dottedMirrorFixture(t)
+	mirror := pausedPublishedMirror(t, "crates.io-index")
 	scheme := testScheme(t)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -102,7 +103,7 @@ func TestDottedMirrorPublishChildren(t *testing.T) {
 // other mirror's child; the conflict projects as Degraded/DerivedResourceInvalid.
 func TestDottedNameCollisionReportsDegraded(t *testing.T) {
 	ctx := context.Background()
-	mirror := dottedMirrorFixture(t)
+	mirror := pausedPublishedMirror(t, "crates.io-index")
 	scheme := testScheme(t)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
