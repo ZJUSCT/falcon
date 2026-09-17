@@ -7,7 +7,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	mirrorv1alpha1 "github.com/ZJUSCT/falcon/api/v1alpha1"
 )
 
 // storage1CapReport extends storage1Report with the pool capacity and health
@@ -31,8 +35,9 @@ func TestStorageAggregation(t *testing.T) {
 	ep1, _ := fakeAgent(t, http.StatusOK, storage1CapReport, 0, "storage-1")
 	ep2, _ := fakeAgent(t, http.StatusOK, storage2Report, 0, "storage-2")
 	a := newTestAggregator(&fakeAgents{endpoints: []AgentEndpoint{ep1, ep2}})
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 
-	resp, err := a.Storage(t.Context())
+	resp, err := a.Storage(t.Context(), c)
 	if err != nil {
 		t.Fatalf("Storage: %v", err)
 	}
@@ -67,8 +72,9 @@ func TestStorageDegraded(t *testing.T) {
 	ep1, _ := fakeAgent(t, http.StatusOK, storage1CapReport, 0, "storage-1")
 	ep2, _ := fakeAgent(t, http.StatusInternalServerError, `{"error":"boom"}`, 0, "storage-2")
 	a := newTestAggregator(&fakeAgents{endpoints: []AgentEndpoint{ep1, ep2}})
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 
-	resp, err := a.Storage(t.Context())
+	resp, err := a.Storage(t.Context(), c)
 	if err != nil {
 		t.Fatalf("Storage: %v", err)
 	}
@@ -101,6 +107,69 @@ func TestStorageDisabledIs404(t *testing.T) {
 	}
 	if err := json.Unmarshal(body, &got); err != nil || got.Error != "storage aggregation is disabled" {
 		t.Errorf("body = %s, want {\"error\": \"storage aggregation is disabled\"} (err: %v)", body, err)
+	}
+}
+
+// storageAttributionReport carries one dataset per attribution case: sync
+// PVC via status pointer, publish PVC via the <base>-snap-<ts> prefix,
+// ProxyMirror cache PVC, and a foreign dataset that must stay unattributed.
+const storageAttributionReport = `{
+  "node": "storage-1", "generatedAt": "2026-08-31T12:00:00Z",
+  "pools": [{"name": "tank",
+    "datasets": [
+      {"name": "tank/pvc-vol-1", "usedBytes": 10, "snapshots": []},
+      {"name": "tank/pvc-vol-2", "usedBytes": 20, "snapshots": []},
+      {"name": "tank/pvc-vol-3", "usedBytes": 30, "snapshots": []},
+      {"name": "tank/foreign", "usedBytes": 40, "snapshots": []}
+    ]}]
+}`
+
+// TestStorageMirrorAttribution: datasets join to their Mirror through the
+// claim's volume name and the controller's child PVC naming; foreign
+// datasets stay unattributed.
+func TestStorageMirrorAttribution(t *testing.T) {
+	ep, _ := fakeAgent(t, http.StatusOK, storageAttributionReport, 0, "storage-1")
+	a := newTestAggregator(&fakeAgents{endpoints: []AgentEndpoint{ep}})
+
+	volumeOf := func(name, volume string) *corev1.PersistentVolumeClaim {
+		return &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "mirror"},
+			Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: volume},
+		}
+	}
+	ubuntu := &mirrorv1alpha1.Mirror{
+		ObjectMeta: metav1.ObjectMeta{Name: "ubuntu", Namespace: "mirror"},
+		Status:     mirrorv1alpha1.MirrorStatus{WorkPVC: "ubuntu-sync"},
+	}
+	debian := &mirrorv1alpha1.Mirror{
+		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirror"},
+	}
+	ghcr := &mirrorv1alpha1.ProxyMirror{
+		ObjectMeta: metav1.ObjectMeta{Name: "ghcr", Namespace: "mirror"},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(ubuntu, debian, ghcr,
+			volumeOf("ubuntu-sync", "pvc-vol-1"),
+			volumeOf("debian-snap-123", "pvc-vol-2"),
+			volumeOf("ghcr-cache", "pvc-vol-3"),
+		).Build()
+
+	resp, err := a.Storage(t.Context(), c)
+	if err != nil {
+		t.Fatalf("Storage: %v", err)
+	}
+	want := map[string]string{
+		"tank/pvc-vol-1": "ubuntu", // status.workPVC
+		"tank/pvc-vol-2": "debian", // <base>-snap-<ts> history PVC
+		"tank/pvc-vol-3": "ghcr",   // ProxyMirror cache PVC
+		"tank/foreign":   "",       // not a Mirror's dataset
+	}
+	for _, pool := range resp.Nodes[0].Pools {
+		for _, ds := range pool.Datasets {
+			if ds.Mirror != want[ds.Name] {
+				t.Errorf("%s: mirror = %q, want %q", ds.Name, ds.Mirror, want[ds.Name])
+			}
+		}
 	}
 }
 
