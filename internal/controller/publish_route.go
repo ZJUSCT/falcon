@@ -190,14 +190,18 @@ func ensureRouteWithRules(ctx context.Context, c client.Client, recorder record.
 	return nil
 }
 
-// ensurePublishRouteFor maintains the SERVING-mode publish HTTPRoute: one rule
-// with one PathPrefix match per public path, all pointing at Service
-// <base>-publish-http port 80. The route always targets the http service: the
-// rsync service is Service-only and never routed.
+// ensurePublishRouteFor maintains the SERVING-mode publish HTTPRoute. The
+// canonical /<owner name> prefix points at Service <base>-publish-http port 80.
+// Aliases, when present, share a second rule that permanently redirects each
+// matched prefix to the canonical prefix while preserving the unmatched
+// suffix. Backends therefore only need to serve the name-derived canonical
+// path. The route always targets the http service: the rsync service is
+// Service-only and never routed.
 func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record.EventRecorder, scheme *runtime.Scheme, cfg *config.Config, owner client.Object, pathPrefixes []string) error {
 	httpServiceName := publishChildName(childBase(owner.GetName()), PublishProtocolHTTP)
+	canonicalPath := pathPrefixes[0]
 	rules := []gatewayv1.HTTPRouteRule{{
-		Matches: pathPrefixMatches(pathPrefixes),
+		Matches: pathPrefixMatches(pathPrefixes[:1]),
 		BackendRefs: []gatewayv1.HTTPBackendRef{{
 			BackendRef: gatewayv1.BackendRef{
 				BackendObjectReference: gatewayv1.BackendObjectReference{
@@ -210,6 +214,21 @@ func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record
 			},
 		}},
 	}}
+	if len(pathPrefixes) > 1 {
+		rules = append(rules, gatewayv1.HTTPRouteRule{
+			Matches: pathPrefixMatches(pathPrefixes[1:]),
+			Filters: []gatewayv1.HTTPRouteFilter{{
+				Type: gatewayv1.HTTPRouteFilterRequestRedirect,
+				RequestRedirect: &gatewayv1.HTTPRequestRedirectFilter{
+					Path: &gatewayv1.HTTPPathModifier{
+						Type:               gatewayv1.PrefixMatchHTTPPathModifier,
+						ReplacePrefixMatch: ptr.To(canonicalPath),
+					},
+					StatusCode: ptr.To(301),
+				},
+			}},
+		})
+	}
 	return ensureRouteWithRules(ctx, c, recorder, scheme, cfg, owner, rules, fmt.Sprintf("PathPrefix /%s", owner.GetName()))
 }
 
@@ -267,10 +286,9 @@ func hostnamesAsGatewayHostnames(hostnames []string) []gatewayv1.Hostname {
 // ensurePublishedMirrorRoute guards the Mirror-specific invocation of the
 // publish route, in whichever mode the http service declares. Published
 // serving Mirrors (status.activePVC non-empty) get the serving route,
-// exposing the canonical /<mirror name> path first and every declared http
-// alias after it (in declaration order). Redirect-mode Mirrors get the
-// redirect variant instead, regardless of publication state — no workload
-// depends on it.
+// exposing the canonical /<mirror name> path and permanently redirecting every
+// declared http alias to it. Redirect-mode Mirrors get the redirect variant
+// instead, regardless of publication state — no workload depends on it.
 func ensurePublishedMirrorRoute(ctx context.Context, r *MirrorReconciler, mirror *mirrorv1alpha1.Mirror) error {
 	if !r.Config.PublishEnabled() {
 		return nil
@@ -324,9 +342,9 @@ func deletePublishRouteFor(ctx context.Context, c client.Client, owner client.Ob
 	return nil
 }
 
-// mirrorRoutePaths returns the public path prefixes a Mirror is served under:
-// the canonical /<mirror name> first, then the enabled http service's aliases
-// in declaration order. The rsync service has no path representation.
+// mirrorRoutePaths returns the public path prefixes of a Mirror: the canonical
+// /<mirror name> first, then the enabled http service's redirecting aliases in
+// declaration order. The rsync service has no path representation.
 func mirrorRoutePaths(mirror *mirrorv1alpha1.Mirror) []string {
 	paths := []string{"/" + mirror.Name}
 	if http := mirror.Spec.Publish.HTTP; http != nil {

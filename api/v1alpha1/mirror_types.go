@@ -189,8 +189,9 @@ type MirrorHTTPAlias string
 // MirrorHTTPServiceSpec is the http publish service of a Mirror: the base
 // MirrorServiceSpec plus additional public path prefixes (Aliases) and the
 // redirect target (Redirect). The key is in SERVING mode when podTemplate.spec
-// declares containers: the canonical path and aliases are forwarded to the
-// publish Deployment through the publish HTTPRoute, and Redirect is ignored.
+// declares containers: the canonical path is forwarded to the publish
+// Deployment through the publish HTTPRoute, aliases permanently redirect to
+// that canonical path, and Redirect is ignored.
 // When no serving podTemplate is declared, a set Redirect puts the key in
 // REDIRECT mode: no workload is deployed, and the publish HTTPRoute 302-
 // redirects every public path (canonical and aliases) to the redirect
@@ -202,12 +203,12 @@ type MirrorHTTPServiceSpec struct {
 	MirrorServiceSpec `json:",inline"`
 	// Aliases are ADDITIONAL public path prefixes served by the http service
 	// next to the canonical /<mirror name> (e.g. /linux.git and /git/linux.git
-	// for the same content — Git smart HTTP is prefix-opaque, so every path
-	// serves identical content and negotiation). Aliases are routing-only:
-	// the canonical path stays the one true public path (mirrorz output,
-	// portal links, documentation). Each alias gets a PathPrefix match on the
-	// publish HTTPRoute, appended after the canonical path in declaration
-	// order (matches within a rule are OR). Case-sensitive, uppercase
+	// for the same content). In serving mode each alias permanently redirects
+	// to the canonical /<CR name> path with its unmatched suffix preserved, so
+	// backends only serve that canonical path. The canonical path stays the one
+	// true public path (mirrorz output, portal links, documentation). Aliases
+	// share a PathPrefix rule on the publish HTTPRoute in declaration order
+	// (matches within the rule are OR). Case-sensitive, uppercase
 	// allowed; the syntax rules and the canonical-path/duplicate rules are
 	// enforced by the controller (validateHTTPAliases). Whether the gateway
 	// accepts the resulting routes (including precedence against other

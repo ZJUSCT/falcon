@@ -48,6 +48,8 @@ spec:
                 mountPath: /data
   publish:
     http:
+      aliases:
+        - /DEMO
       podTemplate:
         metadata:
           annotations:

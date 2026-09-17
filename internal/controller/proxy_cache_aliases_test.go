@@ -24,9 +24,19 @@ func TestProxyAliasesShareMirrorValidationAndRouteBehavior(t *testing.T) {
 	}
 	route := &gatewayv1.HTTPRoute{}
 	get(t, t.Context(), c, client.ObjectKey{Namespace: p.Namespace, Name: "pypi-proxy-publish"}, route)
-	matches := route.Spec.Rules[0].Matches
-	if len(matches) != 3 || *matches[0].Path.Value != "/pypi-proxy" || *matches[1].Path.Value != "/PyPI" || *matches[2].Path.Value != "/packages/python" {
-		t.Fatalf("proxy aliases not rendered: %#v", matches)
+	if len(route.Spec.Rules) != 2 || len(route.Spec.Rules[0].Matches) != 1 || *route.Spec.Rules[0].Matches[0].Path.Value != "/pypi-proxy" {
+		t.Fatalf("proxy canonical rule not rendered: %#v", route.Spec.Rules)
+	}
+	aliases := route.Spec.Rules[1]
+	if len(aliases.Matches) != 2 || *aliases.Matches[0].Path.Value != "/PyPI" || *aliases.Matches[1].Path.Value != "/packages/python" {
+		t.Fatalf("proxy aliases not rendered: %#v", aliases.Matches)
+	}
+	if len(aliases.BackendRefs) != 0 || len(aliases.Filters) != 1 {
+		t.Fatalf("proxy aliases must redirect without a backend: %#v", aliases)
+	}
+	redirect := aliases.Filters[0].RequestRedirect
+	if redirect == nil || redirect.Path == nil || *redirect.StatusCode != 301 || *redirect.Path.ReplacePrefixMatch != "/pypi-proxy" {
+		t.Fatalf("proxy aliases must permanently redirect to the canonical path: %#v", aliases)
 	}
 	for _, aliases := range [][]mirrorv1alpha1.MirrorHTTPAlias{{"/pypi-proxy"}, {"/duplicate", "/duplicate"}, {"missing-slash"}, {"/trailing/"}} {
 		p.Spec.Publish.HTTP.Aliases = aliases

@@ -40,7 +40,7 @@ func testConfig() *config.Config {
 
 // assertPublishRouteShape pins the generated HTTPRoute shape: owner ref,
 // merged labels, stamped annotations, gateway parentRef, publish hostnames,
-// and a single PathPrefix /<name> -> <base>-publish-http:80 rule.
+// and a single PathPrefix /<name> -> <base>-publish-http:80 canonical rule.
 func assertPublishRouteShape(t *testing.T, route *gatewayv1.HTTPRoute, owner client.Object, wantPath, wantService string) {
 	t.Helper()
 	if len(route.OwnerReferences) != 1 || route.OwnerReferences[0].UID != owner.GetUID() || !ptr.Deref(route.OwnerReferences[0].Controller, false) {
@@ -66,8 +66,8 @@ func assertPublishRouteShape(t *testing.T, route *gatewayv1.HTTPRoute, owner cli
 	if len(route.Spec.Hostnames) != 2 || route.Spec.Hostnames[0] != "mirrors.zjusct.io" || route.Spec.Hostnames[1] != "mirror.zju.edu.cn" {
 		t.Errorf("hostnames wrong: %v", route.Spec.Hostnames)
 	}
-	if len(route.Spec.Rules) != 1 || len(route.Spec.Rules[0].Matches) < 1 {
-		t.Fatalf("want one rule with at least the canonical match, got %#v", route.Spec.Rules)
+	if len(route.Spec.Rules) < 1 || len(route.Spec.Rules[0].Matches) < 1 {
+		t.Fatalf("want a first rule with the canonical match, got %#v", route.Spec.Rules)
 	}
 	match := route.Spec.Rules[0].Matches[0]
 	if ptr.Deref(match.Path.Type, "") != gatewayv1.PathMatchPathPrefix || ptr.Deref(match.Path.Value, "") != wantPath {
@@ -825,9 +825,10 @@ func publishedMirrorFixture(t *testing.T, name string, aliases ...mirrorv1alpha1
 	}, ctx
 }
 
-// TestAliasesServeMultiMatchRoute: aliases append PathPrefix matches to the
-// single rule after the canonical path (OR semantics, same backend).
-func TestAliasesServeMultiMatchRoute(t *testing.T) {
+// TestAliasesRedirectToCanonicalPath: aliases share a second PathPrefix rule
+// that permanently redirects every matched prefix to /<name>, preserving the
+// unmatched suffix; only the canonical rule reaches the backend.
+func TestAliasesRedirectToCanonicalPath(t *testing.T) {
 	mirror, reconciler, fakeClient, request, ctx := publishedMirrorFixture(t, "smoke", "/linux.git", "/git/linux.git")
 	reconcile(t, ctx, reconciler, request) // creates the workload (+ route attempt)
 	markDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace, "smoke-publish-http")
@@ -835,22 +836,36 @@ func TestAliasesServeMultiMatchRoute(t *testing.T) {
 
 	route := &gatewayv1.HTTPRoute{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
-	if len(route.Spec.Rules) != 1 {
-		t.Fatalf("want exactly one rule, got %#v", route.Spec.Rules)
+	if len(route.Spec.Rules) != 2 {
+		t.Fatalf("want canonical backend + alias redirect rules, got %#v", route.Spec.Rules)
 	}
-	matches := route.Spec.Rules[0].Matches
-	if len(matches) != 3 {
-		t.Fatalf("want canonical + 2 alias matches, got %#v", matches)
+	canonical := route.Spec.Rules[0]
+	if len(canonical.Matches) != 1 || ptr.Deref(canonical.Matches[0].Path.Value, "") != "/smoke" {
+		t.Fatalf("canonical rule match wrong: %#v", canonical.Matches)
 	}
-	wantPaths := []string{"/smoke", "/linux.git", "/git/linux.git"}
+	if len(canonical.BackendRefs) != 1 || string(canonical.BackendRefs[0].Name) != "smoke-publish-http" || len(canonical.Filters) != 0 {
+		t.Fatalf("canonical rule must be the only backend rule: %#v", canonical)
+	}
+	aliases := route.Spec.Rules[1]
+	if len(aliases.Matches) != 2 {
+		t.Fatalf("want 2 alias matches, got %#v", aliases.Matches)
+	}
+	wantPaths := []string{"/linux.git", "/git/linux.git"}
 	for i, want := range wantPaths {
-		if ptr.Deref(matches[i].Path.Type, "") != gatewayv1.PathMatchPathPrefix || ptr.Deref(matches[i].Path.Value, "") != want {
-			t.Fatalf("match %d = %#v, want PathPrefix %s", i, matches[i], want)
+		if ptr.Deref(aliases.Matches[i].Path.Type, "") != gatewayv1.PathMatchPathPrefix || ptr.Deref(aliases.Matches[i].Path.Value, "") != want {
+			t.Fatalf("match %d = %#v, want PathPrefix %s", i, aliases.Matches[i], want)
 		}
 	}
-	// All matches share the single http backend.
-	if backends := route.Spec.Rules[0].BackendRefs; len(backends) != 1 || string(backends[0].Name) != "smoke-publish-http" {
-		t.Fatalf("aliases must share the canonical backend, got %#v", backends)
+	if len(aliases.BackendRefs) != 0 || len(aliases.Filters) != 1 || aliases.Filters[0].Type != gatewayv1.HTTPRouteFilterRequestRedirect {
+		t.Fatalf("aliases must redirect without a backend: %#v", aliases)
+	}
+	redirect := aliases.Filters[0].RequestRedirect
+	if redirect == nil || ptr.Deref(redirect.StatusCode, 0) != 301 || redirect.Path == nil ||
+		redirect.Path.Type != gatewayv1.PrefixMatchHTTPPathModifier || ptr.Deref(redirect.Path.ReplacePrefixMatch, "") != "/smoke" {
+		t.Fatalf("alias redirect must replace its matched prefix with /smoke using 301: %#v", redirect)
+	}
+	if redirect.Scheme != nil || redirect.Hostname != nil || redirect.Port != nil {
+		t.Fatalf("alias redirect must preserve scheme, hostname, and port: %#v", redirect)
 	}
 	assertPublishRouteShape(t, route, mirror, "/smoke", "smoke-publish-http")
 }

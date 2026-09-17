@@ -24,6 +24,8 @@ spec:
               spec:
                 publish:
                   http:
+                    aliases:
+                      - /DEMO
                     podTemplate:
                       metadata:
                         annotations:
@@ -47,6 +49,36 @@ spec:
             resource:
               # The page is the busybox `date -u` output of the sync job.
               (contains($PAGE, 'UTC')): true
+        - script:
+            content: |
+              alias_redirect=$(curl -sS -o /dev/null \
+                -H "Host: $E2E_SITE_HOST" \
+                -w '%{http_code} %{redirect_url}' \
+                "http://$E2E_ENVOY_ADDR/DEMO/index.html")
+              expected="301 http://$E2E_SITE_HOST/demo/index.html"
+              if [ "$alias_redirect" != "$expected" ]; then
+                echo "got $alias_redirect, want $expected" >&2
+                exit 1
+              fi
+              printf '%s' "$alias_redirect"
+            outputs:
+              - name: ALIAS_REDIRECT
+                value: ($stdout)
+        - assert:
+            resource:
+              (starts_with($ALIAS_REDIRECT, '301 http://')): true
+              (!contains($ALIAS_REDIRECT, ':8080')): true
+        - script:
+            content: >
+              curl -sS -L
+              --connect-to "$E2E_SITE_HOST:80:$E2E_ENVOY_ADDR"
+              "http://$E2E_SITE_HOST/DEMO/index.html"
+            outputs:
+              - name: ALIAS_PAGE
+                value: ($stdout)
+        - assert:
+            resource:
+              (contains($ALIAS_PAGE, 'UTC')): true
         - script:
             content: >
               curl -sS -H "Host: $E2E_SITE_HOST"
