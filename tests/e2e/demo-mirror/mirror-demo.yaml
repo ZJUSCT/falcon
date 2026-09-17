@@ -1,3 +1,13 @@
+# The publish pod mounts this ConfigMap so Reloader can prove the complete
+# admission -> workload annotation -> ConfigMap watch -> rollout path.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-publish-config
+  namespace: mirror
+data:
+  revision: initial
+---
 # The demo Mirror from the README quickstart, wired to the e2e storage
 # fixtures. busybox generates a timestamped page so the full
 # sync -> snapshot -> publish chain needs no real upstream.
@@ -39,6 +49,9 @@ spec:
   publish:
     http:
       podTemplate:
+        metadata:
+          annotations:
+            reloader.stakater.com/auto: "true"
         spec:
           containers:
             - name: nginx
@@ -46,6 +59,9 @@ spec:
               ports:
                 - containerPort: 80
               volumeMounts:
+                - name: publish-config
+                  mountPath: /etc/falcon-e2e
+                  readOnly: true
                 - name: mirror-data
                   mountPath: /usr/share/nginx/html/demo
                   readOnly: true
@@ -53,3 +69,7 @@ spec:
                 httpGet:
                   path: /demo/index.html
                   port: 80
+          volumes:
+            - name: publish-config
+              configMap:
+                name: demo-publish-config

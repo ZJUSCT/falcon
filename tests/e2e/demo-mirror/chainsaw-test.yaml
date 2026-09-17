@@ -21,6 +21,13 @@ spec:
               kind: Mirror
               metadata:
                 name: demo
+              spec:
+                publish:
+                  http:
+                    podTemplate:
+                      metadata:
+                        annotations:
+                          reloader.stakater.com/auto: "true"
               # Official conditions idiom (chainsaw assertion-trees docs):
               # an expression key filters the conditions array and the
               # expected list matches against the filtered result, ignoring
@@ -51,3 +58,83 @@ spec:
         - assert:
             resource:
               (starts_with($STATUS, 'S')): true
+    - name: reloader-rollout
+      description: Reloader rolls the publish pod and Falcon preserves its stamp.
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: demo-publish-http
+              spec:
+                template:
+                  metadata:
+                    annotations:
+                      reloader.stakater.com/auto: "true"
+        - script:
+            content: >
+              kubectl -n mirror get pod
+              -l mirrors.zjusct.io/mirror=demo,app.kubernetes.io/component=publish-http
+              -o jsonpath='{.items[0].metadata.uid}'
+            outputs:
+              - name: POD_UID_BEFORE
+                value: ($stdout)
+        - script:
+            content: >
+              kubectl -n mirror patch configmap demo-publish-config --type merge
+              -p '{"data":{"revision":"reloaded"}}'
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: demo-publish-http
+              (spec.template.metadata.annotations."reloader.stakater.com/last-reloaded-from" != ''): true
+        - script:
+            content: |
+              if ! kubectl -n mirror rollout status deployment/demo-publish-http --timeout=120s >&2; then
+                kubectl -n mirror get deployment/demo-publish-http -o yaml
+                kubectl -n mirror get replicaset,pod \
+                  -l mirrors.zjusct.io/mirror=demo,app.kubernetes.io/component=publish-http \
+                  -o wide
+                kubectl -n mirror get events --sort-by=.lastTimestamp
+                exit 1
+              fi
+              kubectl -n mirror get pod \
+                -l mirrors.zjusct.io/mirror=demo,app.kubernetes.io/component=publish-http \
+                -o jsonpath='{.items[0].metadata.uid}'
+            outputs:
+              - name: POD_UID_AFTER
+                value: ($stdout)
+        - assert:
+            resource:
+              ($POD_UID_AFTER != $POD_UID_BEFORE): true
+        - script:
+            content: >
+              kubectl -n mirror get deployment demo-publish-http
+              -o jsonpath='{.metadata.generation}'
+            outputs:
+              - name: RELOADER_GENERATION
+                value: ($stdout)
+        - script:
+            content: >
+              kubectl -n mirror patch mirror demo --type merge
+              -p '{"spec":{"info":{"description":"reconciled after Reloader rollout"}}}'
+        - assert:
+            resource:
+              apiVersion: mirrors.zjusct.io/v1alpha1
+              kind: Mirror
+              metadata:
+                name: demo
+              (status.observedGeneration == metadata.generation): true
+              (status.conditions[?type == 'Ready']):
+                - status: "True"
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: demo-publish-http
+              (to_string(metadata.generation) == $RELOADER_GENERATION): true
+              (spec.template.metadata.annotations."reloader.stakater.com/last-reloaded-from" != ''): true

@@ -21,7 +21,7 @@ git -c user.name=Falcon -c user.email=checks@localhost -c commit.gpgsign=false c
 
 generate() {
     controller-gen object:headerFile= paths=./api/... \
-        crd:allowDangerousTypes=true paths=./api/... \
+        crd:allowDangerousTypes=true,generateEmbeddedObjectMeta=true paths=./api/... \
         output:crd:artifacts:config=charts/falcon/crds
 }
 

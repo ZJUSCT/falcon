@@ -24,6 +24,9 @@ dump() {
     "${k[@]}" get pods -A || true
     "${k[@]}" get events -A --sort-by=.lastTransitionTime || true
     "${k[@]}" get mirror,httproute,gateway,pvc,volumesnapshot -A || true
+    "${k[@]}" -n "$NAMESPACE" get deployment,replicaset,pod \
+        -l mirrors.zjusct.io/mirror=demo -o yaml || true
+    "${k[@]}" -n "$NAMESPACE" describe deployment demo-publish-http || true
     "${k[@]}" describe gatewayclass envoy-gateway || true
     "${k[@]}" describe -n "$NAMESPACE" gateway mirror-gateway || true
     "${k[@]}" -n envoy-gateway-system logs deploy/envoy-gateway --tail=300 || true
@@ -31,6 +34,7 @@ dump() {
     "${k[@]}" get csidriver,csinode -o wide || true
     "${k[@]}" describe -n "$NAMESPACE" mirror demo || true
     "${k[@]}" -n "$NAMESPACE" logs deploy/falcon --tail=300 || true
+    "${k[@]}" -n reloader logs deploy/reloader-reloader --tail=300 || true
     jobs=$("${k[@]}" -n "$NAMESPACE" get jobs -o name 2>/dev/null || true)
     for job in $jobs; do
         "${k[@]}" -n "$NAMESPACE" logs "$job" --tail=100 || true
@@ -85,6 +89,11 @@ if [ "$result" -ne 0 ]; then
 fi
 kubectl -n kube-system rollout status deploy/snapshot-controller --timeout=300s
 kubectl -n default rollout status statefulset/csi-hostpathplugin --timeout=300s
+
+log "installing Reloader (2.2.17, annotations strategy)"
+helm upgrade --install reloader oci://ghcr.io/stakater/charts/reloader \
+    --version 2.2.17 -n reloader --create-namespace \
+    --set reloader.reloadStrategy=annotations --wait --timeout 5m
 
 log "installing falcon"
 helm upgrade --install falcon charts/falcon \
