@@ -32,6 +32,7 @@ import (
 const (
 	MirrorFinalizer       = "mirrors.zjusct.io/storage-cleanup"
 	SyncRequestAnnotation = mirrorv1alpha1.SyncRequestAnnotation
+	activePVCUsageRetry   = 15 * time.Second
 	MirrorLabel           = "mirrors.zjusct.io/mirror"
 	// SyncTimestampLabel carries the Unix seconds timestamp of a sync task
 	// (allocated once when the controller creates the task) on every
@@ -151,6 +152,22 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	if changed, err := r.discardSyncRequest(ctx, mirror); err != nil || changed {
 		return ctrl.Result{RequeueAfter: time.Second}, err
 	}
+	usageUnknown := false
+	if r.UsageReader != nil && publishEnabled(mirror) && mirror.Status.ActivePVC != "" && mirror.Status.SizeBytes == 0 {
+		usage, ok := r.publishPVCUsage(ctx, mirror, mirror.Status.ActivePVC)
+		if ok {
+			if _, err := r.patchStatus(ctx, mirror, func() { mirror.Status.SizeBytes = usage }); err != nil {
+				return ctrl.Result{}, err
+			}
+		} else {
+			usageUnknown = true
+		}
+	}
+	defer func() {
+		if reconcileErr == nil && usageUnknown {
+			result = requeueWithin(result, activePVCUsageRetry)
+		}
+	}()
 	if mirror.Status.CurrentSync != nil && mirror.Status.CurrentSync.Phase == mirrorv1alpha1.SyncPhaseCancelling {
 		return r.reconcileCancellation(ctx, mirror, publicationHealth{ready: publishHTTPEnabled(mirror) && r.Config.PublishEnabled() && mirrorWasReady(mirror), reason: "Cancellation", message: "preserving existing publication"})
 	}
@@ -205,14 +222,7 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 		})
 	}
 	if (publication.progressing || publication.failure != nil) && (mirror.Status.CurrentSync == nil || mirror.Status.CurrentSync.StartedAt == nil) {
-		usage, ok := int64(0), false
-		if mirror.Status.ActivePVC != "" && mirror.Status.SizeBytes == 0 {
-			usage, ok = r.publishPVCUsage(ctx, mirror, mirror.Status.ActivePVC)
-		}
 		return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: 5 * time.Second}, func() {
-			if ok {
-				mirror.Status.SizeBytes = usage
-			}
 			applyMirrorConditions(mirror, publication, "PublicationPending", "waiting for publication and old Pods to finish", nil)
 		})
 	}
@@ -243,15 +253,6 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 		return r.startSync(ctx, mirror, manualDue, publication)
 	}
 
-	// Publish PVC content is immutable, so the kubelet-reported usage recorded
-	// once stays accurate forever: backfill only while sizeBytes is still
-	// unset, best-effort as everywhere else.
-	var pvcUsage int64
-	pvcUsageOK := false
-	if mirror.Status.ActivePVC != "" && mirror.Status.SizeBytes == 0 {
-		pvcUsage, pvcUsageOK = r.publishPVCUsage(ctx, mirror, mirror.Status.ActivePVC)
-	}
-
 	nextResult := ctrl.Result{}
 	if mirror.Status.NextSyncAt != nil {
 		nextResult.RequeueAfter = time.Until(mirror.Status.NextSyncAt.Time)
@@ -261,11 +262,16 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	}
 	return r.patchStatusWithResult(ctx, mirror, nextResult, func() {
 		mirror.Status.ObservedGeneration = mirror.Generation
-		if pvcUsageOK {
-			mirror.Status.SizeBytes = pvcUsage
-		}
 		applyMirrorConditions(mirror, publication, "Idle", "no synchronization is running", nil)
 	})
+}
+
+func requeueWithin(result ctrl.Result, interval time.Duration) ctrl.Result {
+	if result.RequeueAfter > 0 && result.RequeueAfter <= interval {
+		return result
+	}
+	result.RequeueAfter = interval
+	return result
 }
 
 // startSync begins a new synchronization run. The Unix seconds timestamp is

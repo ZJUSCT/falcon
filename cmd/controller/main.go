@@ -95,8 +95,6 @@ func main() {
 	// Node kubelet stats summary reader backing status.sizeBytes (best-effort
 	// usage accounting of the active publish PVC, through the API server node
 	// proxy — needs the chart's node-stats ClusterRole for nodes/proxy).
-	// Summaries are cached per node for a minute so backfills across Mirrors
-	// sharing a node do not hammer the proxy.
 	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
 	if err != nil {
 		logger.Error(err, "unable to create client-go client for node stats")
@@ -108,7 +106,7 @@ func main() {
 		Recorder:    mgr.GetEventRecorderFor("falcon-controller"), //nolint:staticcheck // migrate when typed Events support is ubiquitous
 		Config:      cfg,
 		SyncLimiter: controller.NewSyncLimiter(cfg.Sync.MaxConcurrent),
-		UsageReader: controller.NewKubeletUsageReader(clientset, time.Minute),
+		UsageReader: controller.NewKubeletUsageReader(clientset),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to register Mirror controller")

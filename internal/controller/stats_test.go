@@ -46,11 +46,7 @@ func stubSummarySource(t *testing.T, body string, fail *bool) (*KubeletUsageRead
 	t.Helper()
 	calls := 0
 	fetchErr := errors.New("stats fetch failed")
-	reader := &KubeletUsageReader{
-		ttl:     time.Minute,
-		now:     func() time.Time { return time.Unix(1756158000, 0) },
-		entries: map[string]statsSummaryEntry{},
-	}
+	reader := &KubeletUsageReader{}
 	reader.fetch = func(_ context.Context, _ string) ([]byte, error) {
 		calls++
 		if fail != nil && *fail {
@@ -94,9 +90,9 @@ func TestKubeletUsageReaderMatchesPVC(t *testing.T) {
 	}
 }
 
-// TestKubeletUsageReaderCacheTTL: per-node summaries are reused within the
-// TTL and refetched after it expires; fetch failures are not cached.
-func TestKubeletUsageReaderCacheTTL(t *testing.T) {
+// TestKubeletUsageReaderFetchesFreshSummary: every lookup fetches current
+// kubelet data, including an immediate retry after a fetch failure.
+func TestKubeletUsageReaderFetchesFreshSummary(t *testing.T) {
 	reader, calls := stubSummarySource(t, cannedSummary, nil)
 	ctx := context.Background()
 
@@ -105,22 +101,14 @@ func TestKubeletUsageReaderCacheTTL(t *testing.T) {
 			t.Fatalf("call %d: ok=%v err=%v", i, ok, err)
 		}
 	}
-	if got := *calls; got != 1 {
-		t.Fatalf("fetches = %d, want 1 (TTL cache must serve repeats)", got)
+	if got := *calls; got != 3 {
+		t.Fatalf("fetches = %d, want 3 (every lookup must fetch fresh data)", got)
 	}
 
-	// A different node has no cached summary: one more fetch.
+	// A different node is fetched in exactly the same way.
 	reader.PVCUsedBytes(ctx, "node-b", "mirrors", "smoke-snap-1756158000")
-	if got := *calls; got != 2 {
-		t.Fatalf("fetches after second node = %d, want 2", got)
-	}
-
-	// Advance the clock past the TTL: the next call refetches node-a.
-	before := *calls
-	reader.now = func() time.Time { return time.Unix(1756158000, 0).Add(2 * reader.ttl) }
-	reader.PVCUsedBytes(ctx, "node-a", "mirrors", "smoke-snap-1756158000")
-	if got := *calls; got != before+1 {
-		t.Fatalf("fetches after TTL expiry = %d, want %d", got, before+1)
+	if got := *calls; got != 4 {
+		t.Fatalf("fetches after second node = %d, want 4", got)
 	}
 
 	// A failed fetch is not cached: the immediate retry refetches.
@@ -157,14 +145,23 @@ func (s *stubUsageReader) PVCUsedBytes(_ context.Context, node, namespace, pvc s
 // runningPublishPod builds the pod publishPVCUsage locates: a Running pod of
 // one publish service entry, carrying the mirror/component labels and a
 // nodeName.
-func runningPublishPod(mirror *mirrorv1alpha1.Mirror, protocol, nodeName string) *corev1.Pod {
+func runningPublishPod(mirror *mirrorv1alpha1.Mirror, protocol, nodeName, pvcName string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: mirror.Namespace,
 			Name:      "smoke-publish-" + protocol + "-abcde",
 			Labels:    map[string]string{MirrorLabel: "smoke", ComponentLabel: publishRole(protocol)},
 		},
-		Spec: corev1.PodSpec{NodeName: nodeName},
+		Spec: corev1.PodSpec{
+			NodeName: nodeName,
+			Volumes: []corev1.Volume{{
+				Name: PublishDataVolumeName,
+				VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvcName,
+					ReadOnly:  true,
+				}},
+			}},
+		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			Conditions: []corev1.PodCondition{{
@@ -185,7 +182,7 @@ func TestPublishPVCUsageBestEffort(t *testing.T) {
 	mirror := testMirror()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
-		WithObjects(mirror, runningPublishPod(mirror, "http", "s3.mirrors.zjusct.io")).
+		WithObjects(mirror, runningPublishPod(mirror, "http", "s3.mirrors.zjusct.io", "smoke-snap-1")).
 		Build()
 	reconciler := &MirrorReconciler{Client: fakeClient, Scheme: scheme}
 
@@ -200,7 +197,7 @@ func TestPublishPVCUsageBestEffort(t *testing.T) {
 	}
 
 	// No running publish pod (sync-only mirror): unknown, no reader call.
-	if err := fakeClient.Delete(ctx, runningPublishPod(mirror, "http", "s3.mirrors.zjusct.io")); err != nil {
+	if err := fakeClient.Delete(ctx, runningPublishPod(mirror, "http", "s3.mirrors.zjusct.io", "smoke-snap-1")); err != nil {
 		t.Fatalf("delete publish pod: %v", err)
 	}
 	if _, ok := reconciler.publishPVCUsage(ctx, mirror, "smoke-snap-1"); ok {
@@ -278,7 +275,7 @@ func TestPublishActivationRecordsSizeBytes(t *testing.T) {
 	}
 	// The publish rollout is available: a running publish pod exists on the storage
 	// node, so activation can resolve the PVC usage.
-	if err := fakeClient.Create(ctx, runningPublishPod(mirror, "http", "s3.mirrors.zjusct.io")); err != nil {
+	if err := fakeClient.Create(ctx, runningPublishPod(mirror, "http", "s3.mirrors.zjusct.io", usage.pvc)); err != nil {
 		t.Fatalf("create publish pod: %v", err)
 	}
 
@@ -350,7 +347,7 @@ func TestIdlePathBackfillsSizeBytes(t *testing.T) {
 	if err := fakeClient.Status().Update(ctx, deployment); err != nil {
 		t.Fatalf("mark Deployment available: %v", err)
 	}
-	if err := fakeClient.Create(ctx, runningPublishPod(mirror, "http", "s3.mirrors.zjusct.io")); err != nil {
+	if err := fakeClient.Create(ctx, runningPublishPod(mirror, "http", "s3.mirrors.zjusct.io", mirror.Status.ActivePVC)); err != nil {
 		t.Fatalf("create publish pod: %v", err)
 	}
 
@@ -410,7 +407,7 @@ func TestPublicationClearsOldUsageAndBackfillsNewPVC(t *testing.T) {
 	if current.Status.ActivePVC != newPVC || current.Status.SizeBytes != 0 {
 		t.Fatalf("new generation retained stale usage: %#v", current.Status)
 	}
-	if err := c.Create(ctx, runningPublishPod(current, "http", "storage-node")); err != nil {
+	if err := c.Create(ctx, runningPublishPod(current, "http", "storage-node", newPVC)); err != nil {
 		t.Fatal(err)
 	}
 	r.UsageReader = &stubUsageReader{node: "storage-node", namespace: mirror.Namespace, pvc: newPVC, size: 42}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -31,37 +30,17 @@ type PVCUsageReader interface {
 // KubeletUsageReader is the production PVCUsageReader: it fetches a node's
 // kubelet stats summary through the API server node proxy
 // (GET /api/v1/nodes/<node>/proxy/stats/summary; client-go v0.36.1 has no
-// typed method for it) and caches one summary per node behind a short TTL —
-// a summary covers every pod of the node, so reconciles of Mirrors sharing a
-// node must not refetch it.
+// typed method for it). Each lookup fetches a fresh summary because kubelet
+// may begin reporting a newly mounted PVC shortly after an earlier miss.
 type KubeletUsageReader struct {
-	client kubernetes.Interface
-	ttl    time.Duration
-	// now is injectable for cache-TTL tests.
-	now func() time.Time
 	// fetch returns the raw summary body of a node; injectable for tests,
 	// production uses the node proxy RESTClient.
 	fetch func(ctx context.Context, nodeName string) ([]byte, error)
-
-	mu      sync.Mutex
-	entries map[string]statsSummaryEntry
 }
 
-type statsSummaryEntry struct {
-	summary   *statsv1alpha1.Summary
-	fetchedAt time.Time
-}
-
-// NewKubeletUsageReader returns a reader caching per-node stats summaries for
-// ttl (a minute is plenty: a published PVC's content is immutable, so its
-// usage never changes).
-func NewKubeletUsageReader(clientset kubernetes.Interface, ttl time.Duration) *KubeletUsageReader {
-	reader := &KubeletUsageReader{
-		client:  clientset,
-		ttl:     ttl,
-		now:     time.Now,
-		entries: map[string]statsSummaryEntry{},
-	}
+// NewKubeletUsageReader returns a reader of kubelet stats summaries.
+func NewKubeletUsageReader(clientset kubernetes.Interface) *KubeletUsageReader {
+	reader := &KubeletUsageReader{}
 	reader.fetch = func(ctx context.Context, nodeName string) ([]byte, error) {
 		// Bounded so a hung node proxy cannot stall a reconcile.
 		return clientset.CoreV1().RESTClient().Get().
@@ -75,7 +54,7 @@ func NewKubeletUsageReader(clientset kubernetes.Interface, ttl time.Duration) *K
 	return reader
 }
 
-// PVCUsedBytes implements PVCUsageReader on top of the cached node summary.
+// PVCUsedBytes implements PVCUsageReader on top of a fresh node summary.
 func (r *KubeletUsageReader) PVCUsedBytes(ctx context.Context, nodeName, namespace, pvcName string) (int64, bool, error) {
 	summary, err := r.summary(ctx, nodeName)
 	if err != nil {
@@ -96,14 +75,8 @@ func (r *KubeletUsageReader) PVCUsedBytes(ctx context.Context, nodeName, namespa
 	return 0, false, nil
 }
 
-// summary returns the node's stats summary, served from the cache while it is
-// fresh. Failures are not cached: the next call refetches.
+// summary fetches and decodes the node's current stats summary.
 func (r *KubeletUsageReader) summary(ctx context.Context, nodeName string) (*statsv1alpha1.Summary, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if entry, ok := r.entries[nodeName]; ok && r.now().Sub(entry.fetchedAt) < r.ttl {
-		return entry.summary, nil
-	}
 	raw, err := r.fetch(ctx, nodeName)
 	if err != nil {
 		return nil, fmt.Errorf("fetch stats summary of node %s: %w", nodeName, err)
@@ -114,7 +87,6 @@ func (r *KubeletUsageReader) summary(ctx context.Context, nodeName string) (*sta
 	if err := json.Unmarshal(raw, summary); err != nil {
 		return nil, fmt.Errorf("decode stats summary of node %s: %w", nodeName, err)
 	}
-	r.entries[nodeName] = statsSummaryEntry{summary: summary, fetchedAt: r.now()}
 	return summary, nil
 }
 
@@ -136,23 +108,38 @@ func (r *MirrorReconciler) publishPVCUsage(ctx context.Context, mirror *mirrorv1
 		logger.Info("publish PVC usage accounting skipped: cannot list publish pods", "mirror", mirror.Name, "error", err.Error())
 		return 0, false
 	}
+	nodes := map[string]struct{}{}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		// Any running publish pod works: every service entry mounts the same
-		// publish PVC, so its node's kubelet reports the volume's usage.
 		if !strings.HasPrefix(pod.Labels[ComponentLabel], publishRolePrefix) ||
-			pod.Status.Phase != corev1.PodRunning || pod.Spec.NodeName == "" {
+			pod.Status.Phase != corev1.PodRunning || pod.Spec.NodeName == "" ||
+			!podUsesPublishPVC(pod, pvcName) {
 			continue
 		}
+		if _, seen := nodes[pod.Spec.NodeName]; seen {
+			continue
+		}
+		nodes[pod.Spec.NodeName] = struct{}{}
 		size, ok, err := r.UsageReader.PVCUsedBytes(ctx, pod.Spec.NodeName, mirror.Namespace, pvcName)
 		if err != nil {
-			logger.Info("publish PVC usage accounting skipped", "mirror", mirror.Name, "pvc", pvcName, "node", pod.Spec.NodeName, "error", err.Error())
-			return 0, false
+			logger.Info("publish PVC usage accounting failed on candidate node", "mirror", mirror.Name, "pvc", pvcName, "node", pod.Spec.NodeName, "error", err.Error())
+			continue
 		}
-		return size, ok
+		if ok {
+			return size, true
+		}
 	}
 	// Expected for sync-only mirrors (no publish workload at all) and while a
-	// fresh publish rollout has not started yet — kept at debug level.
-	logger.V(1).Info("publish PVC usage accounting skipped: no running publish pod", "mirror", mirror.Name, "pvc", pvcName)
+	// fresh publish rollout or kubelet volume stats has not appeared yet.
+	logger.V(1).Info("publish PVC usage accounting unavailable: no eligible node reports the PVC", "mirror", mirror.Name, "pvc", pvcName)
 	return 0, false
+}
+
+func podUsesPublishPVC(pod *corev1.Pod, pvcName string) bool {
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name == PublishDataVolumeName && volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == pvcName {
+			return true
+		}
+	}
+	return false
 }
