@@ -2,6 +2,7 @@ package webapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -604,8 +605,9 @@ func TestMirrorZManualModeAndCancellation(t *testing.T) {
 	}
 }
 
-// TestMirrorZExcludesRedirectMode: a redirect-mode endpoint is not this site
-// serving the mirror — a 302 away is no catalog entry, even with Ready=True.
+// TestMirrorZExcludesRedirectMode: a redirected endpoint is not this site
+// serving the mirror — a 302 away is no catalog entry, even with Ready=True
+// and a fully declared (suppressed) serving http key.
 func TestMirrorZExcludesRedirectMode(t *testing.T) {
 	mirror := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors", CreationTimestamp: metav1.Unix(1788000000, 0)},
@@ -618,8 +620,11 @@ func TestMirrorZExcludesRedirectMode(t *testing.T) {
 			Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)},
 		},
 	}
-	mirror.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
-	mirror.Spec.Publish.HTTP.Redirect = "mirrors.cernet.edu.cn"
+	mirror.Spec.Publish.Redirect = "mirrors.cernet.edu.cn"
+	// A subset alias under redirect must not leak an entry either.
+	mirror.Spec.Publish.Aliases = []mirrorv1alpha1.MirrorAlias{
+		{Path: "/debian-nonfree", Subset: &mirrorv1alpha1.MirrorAliasSubset{SubPath: "unofficial/non-free"}},
+	}
 	proxy := &mirrorv1alpha1.ProxyMirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "pypi", Namespace: "mirrors", CreationTimestamp: metav1.Unix(1788000000, 0)},
 		Spec: mirrorv1alpha1.ProxyMirrorSpec{
@@ -627,14 +632,146 @@ func TestMirrorZExcludesRedirectMode(t *testing.T) {
 		},
 		Status: mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
 	}
-	proxy.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
-	proxy.Spec.Publish.HTTP.Redirect = "mirrors.cernet.edu.cn"
+	proxy.Spec.Publish.Redirect = "mirrors.cernet.edu.cn"
 	s := &Server{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(mirror, proxy).Build(), Site: SiteConfig{URL: "https://example.org"}}
 	doc, err := s.buildMirrorZ(t.Context(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(doc.Mirrors) != 0 {
-		t.Fatalf("redirect-mode entries must stay out of the catalog: %+v", doc.Mirrors)
+		t.Fatalf("redirected entries must stay out of the catalog: %+v", doc.Mirrors)
+	}
+}
+
+// TestMirrorZSubsetAliases: a subset alias becomes its own catalog entry next
+// to the parent's — same status projection, URL from the alias path, no size
+// (the parent's sizeBytes covers the whole tree) — while a plain alias stays
+// invisible, and entries sort by cname across parents and subsets.
+func TestMirrorZSubsetAliases(t *testing.T) {
+	mirror := &mirrorv1alpha1.Mirror{
+		ObjectMeta: metav1.ObjectMeta{Name: "debian-cdimage", Namespace: "mirrors", CreationTimestamp: metav1.Unix(1788000000, 0)},
+		Spec: mirrorv1alpha1.MirrorSpec{
+			Info: mirrorv1alpha1.MirrorInfo{Description: "Debian cd images", Upstream: "rsync://cdimage.debian.org/cdimage/"},
+			Publish: func() mirrorv1alpha1.MirrorServicesSpec {
+				publish := httpService()
+				publish.Aliases = []mirrorv1alpha1.MirrorAlias{
+					{Path: "/CDIMAGE"}, // plain alias: invisible to the catalog
+					{Path: "/debian-nonfree", Subset: &mirrorv1alpha1.MirrorAliasSubset{
+						SubPath:     "unofficial/non-free",
+						Description: "firmware-inclusive install media",
+						Upstream:    "rsync://cdimage.debian.org/cdimage/unofficial/non-free/",
+					}},
+					{Path: "/installer-all", Subset: &mirrorv1alpha1.MirrorAliasSubset{
+						SubPath: "weekly",
+						CName:   "debian-installer",
+					}},
+				}
+				return publish
+			}(),
+		},
+		Status: mirrorv1alpha1.MirrorStatus{
+			SizeBytes:  640141257728,
+			LastSync:   &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded},
+			Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)},
+		},
+	}
+	catalogMirrorTimes(mirror)
+	s := &Server{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(mirror).Build(), Site: SiteConfig{URL: "https://mirrors.zjusct.io"}}
+	doc, err := s.buildMirrorZ(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Mirrors) != 3 {
+		t.Fatalf("want parent + 2 subset entries, got %+v", doc.Mirrors)
+	}
+	byCName := map[string]mirrorzMirror{}
+	for _, entry := range doc.Mirrors {
+		byCName[entry.CName] = entry
+	}
+	parent := byCName["debian-cdimage"]
+	if parent.URL != "https://mirrors.zjusct.io/debian-cdimage" || parent.Size != "596.18G" || parent.Desc != "Debian cd images" {
+		t.Fatalf("parent entry wrong: %+v", parent)
+	}
+	if doc.Mirrors[0].CName != "debian-cdimage" || doc.Mirrors[1].CName != "debian-installer" || doc.Mirrors[2].CName != "debian-nonfree" {
+		t.Fatalf("entries must sort by cname across parents and subsets: %+v", doc.Mirrors)
+	}
+	// Default cname: /debian-nonfree -> debian-nonfree; explicit cname wins otherwise.
+	nonfree := byCName["debian-nonfree"]
+	if nonfree.URL != "https://mirrors.zjusct.io/debian-nonfree" {
+		t.Fatalf("subset entry URL must come from the alias path: %+v", nonfree)
+	}
+	if nonfree.Desc != "firmware-inclusive install media" || nonfree.Upstream != "rsync://cdimage.debian.org/cdimage/unofficial/non-free/" {
+		t.Fatalf("subset entry carries its own catalog metadata: %+v", nonfree)
+	}
+	if nonfree.Size != "" {
+		t.Fatalf("subset entries must carry no size: %+v", nonfree)
+	}
+	// Status is the parent's sync freshness, verbatim.
+	if want := parent.Status; nonfree.Status != want || byCName["debian-installer"].Status != want {
+		t.Fatalf("subset status must project the parent's: %q vs %q", nonfree.Status, want)
+	}
+	if _, plain := byCName["CDIMAGE"]; plain {
+		t.Fatalf("plain aliases must stay out of the catalog: %+v", doc.Mirrors)
+	}
+}
+
+func TestMirrorZProxySubsetAliases(t *testing.T) {
+	for _, cached := range []bool{false, true} {
+		for _, state := range []string{"ready", "unready", "stale", "redirect", "disabled"} {
+			t.Run(fmt.Sprintf("cached=%t/%s", cached, state), func(t *testing.T) {
+				proxy := &mirrorv1alpha1.ProxyMirror{
+					ObjectMeta: metav1.ObjectMeta{Name: "debian-cdimage", Namespace: "mirrors", Generation: 1, CreationTimestamp: metav1.Unix(1788000000, 0)},
+					Spec: mirrorv1alpha1.ProxyMirrorSpec{
+						Info: mirrorv1alpha1.MirrorInfo{Upstream: "https://upstream.example.org/"},
+						Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{
+							HTTP: httpService().HTTP,
+							Aliases: []mirrorv1alpha1.MirrorAlias{
+								{Path: "/CDIMAGE"},
+								{Path: "/debian-nonfree", Subset: &mirrorv1alpha1.MirrorAliasSubset{SubPath: "unofficial/non-free", Description: "install media"}},
+							},
+						},
+					},
+					Status: mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{{
+						Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: 1,
+					}}},
+				}
+				prefix := "RN"
+				if cached {
+					proxy.Spec.Cache = &mirrorv1alpha1.ProxyMirrorCacheSpec{}
+					prefix = "CN"
+				}
+				switch state {
+				case "unready":
+					proxy.Status.Conditions[0].Status = metav1.ConditionFalse
+				case "stale":
+					proxy.Status.Conditions[0].ObservedGeneration = 0
+				case "redirect":
+					proxy.Spec.Publish.Redirect = "other.example.org"
+				case "disabled":
+					proxy.Spec.Publish.HTTP = nil
+				}
+				s := &Server{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(proxy).Build(), Site: SiteConfig{URL: "https://example.org"}}
+				doc, err := s.buildMirrorZ(t.Context(), "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if state != "ready" {
+					if len(doc.Mirrors) != 0 {
+						t.Fatalf("parent and subset must both be omitted: %+v", doc.Mirrors)
+					}
+					return
+				}
+				if len(doc.Mirrors) != 2 {
+					t.Fatalf("want parent and subset, without plain alias: %+v", doc.Mirrors)
+				}
+				parent, subset := doc.Mirrors[0], doc.Mirrors[1]
+				if subset.CName != "debian-nonfree" || subset.URL != "https://example.org/debian-nonfree" || subset.Desc != "install media" || subset.Upstream != "" || subset.Size != "" {
+					t.Fatalf("incorrect subset metadata: %+v", subset)
+				}
+				if subset.Status != parent.Status || !strings.HasPrefix(subset.Status, prefix) {
+					t.Fatalf("subset must inherit proxy cache status: parent=%+v subset=%+v", parent, subset)
+				}
+			})
+		}
 	}
 }

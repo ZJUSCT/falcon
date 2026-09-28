@@ -355,9 +355,11 @@ func (r *MirrorReconciler) createSyncJob(ctx context.Context, mirror *mirrorv1al
 }
 
 // ensurePublish maintains the Deployment and Service of every ENABLED
-// spec.publish key (a present key) for the given claim. A redirect-mode http
-// key deploys nothing (the route redirects; there is no workload to feed),
-// so it is skipped. It reports readiness across all enabled services.
+// spec.publish key (a present key) for the given claim. It is only invoked
+// with publication enabled — an active publish-level redirect suppresses the
+// protocol keys entirely, so the caller never reaches here under one. A
+// non-serving http key (if one slipped past validation) deploys nothing. It
+// reports readiness across all enabled services.
 //
 // No placement is derived or injected: the bound PV's nodeAffinity is
 // enforced by the scheduler natively. Workload creation is gated on that
@@ -476,21 +478,23 @@ func deletePublishEntry(ctx context.Context, c client.Client, owner client.Objec
 }
 
 func (r *MirrorReconciler) cleanupDisabledPublishChildren(ctx context.Context, mirror *mirrorv1alpha1.Mirror) error {
-	// An http key that is absent OR in redirect mode has no serving workload:
-	// tear the Deployment/Service down. The route is separate — it stays for a
-	// redirect-mode key (it IS the endpoint) and is only removed when the http
-	// key itself is gone.
-	if !mirror.Spec.Publish.HTTP.Serving() {
+	// An active publish-level redirect suppresses every protocol key, and a
+	// non-serving http key has no workload either: tear the
+	// Deployments/Services down. The route is separate — it stays for an
+	// active redirect (it IS the endpoint) and is only removed when neither
+	// an http key nor a redirect remains.
+	_, redirecting := mirror.Spec.Publish.RedirectActive()
+	if redirecting || !mirror.Spec.Publish.HTTP.Serving() {
 		if err := deletePublishEntry(ctx, r.Client, mirror, PublishProtocolHTTP); err != nil {
 			return err
 		}
 	}
-	if mirror.Spec.Publish.Rsync == nil {
+	if redirecting || mirror.Spec.Publish.Rsync == nil {
 		if err := deletePublishEntry(ctx, r.Client, mirror, PublishProtocolRsync); err != nil {
 			return err
 		}
 	}
-	if mirror.Spec.Publish.HTTP == nil || !r.Config.PublishEnabled() {
+	if !publishRouteEnabled(mirror) || !r.Config.PublishEnabled() {
 		return deletePublishRouteFor(ctx, r.Client, mirror)
 	}
 	return nil

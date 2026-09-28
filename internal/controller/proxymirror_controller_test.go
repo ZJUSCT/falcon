@@ -286,17 +286,16 @@ func findCondition(conditions []metav1.Condition, conditionType string) *metav1.
 	return nil
 }
 
-// TestProxyMirrorRedirectModeRedirectsWithoutWorkload: a redirect-mode proxy
-// http key deploys no Deployment/Service; the redirect route is the whole
-// endpoint and becomes Ready on gateway acceptance, while the declared cache
-// PVC keeps being maintained (a temporary redirect preserves the cache for
-// the switch back to serving).
+// TestProxyMirrorRedirectModeRedirectsWithoutWorkload: a publish-level
+// redirect suppresses the proxy workload entirely — no Deployment/Service;
+// the redirect route is the whole endpoint and becomes Ready on gateway
+// acceptance, while the declared cache PVC keeps being maintained (a
+// temporary redirect preserves the cache for the switch back to serving).
 func TestProxyMirrorRedirectModeRedirectsWithoutWorkload(t *testing.T) {
 	ctx := context.Background()
 	proxy := testProxyMirror()
-	proxy.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
-	proxy.Spec.Publish.HTTP.Redirect = "mirrors.cernet.edu.cn"
-	proxy.Spec.Publish.HTTP.Aliases = []mirrorv1alpha1.MirrorHTTPAlias{"/pypi-files"}
+	proxy.Spec.Publish.Redirect = "mirrors.cernet.edu.cn"
+	proxy.Spec.Publish.Aliases = []mirrorv1alpha1.MirrorAlias{{Path: "/pypi-files"}}
 	scheme := testProxyScheme(t)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).

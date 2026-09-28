@@ -81,6 +81,16 @@ func publishHTTPEnabled(mirror *mirrorv1alpha1.Mirror) bool {
 	return mirror.Spec.Publish.HTTP != nil
 }
 
+// publishRouteEnabled reports whether a publish HTTPRoute is desired at all:
+// a declared http key, or an active publish-level redirect (its route is the
+// entire endpoint, with or without any protocol key).
+func publishRouteEnabled(mirror *mirrorv1alpha1.Mirror) bool {
+	if _, redirecting := mirror.Spec.Publish.RedirectActive(); redirecting {
+		return true
+	}
+	return mirror.Spec.Publish.HTTP != nil
+}
+
 // validatePublishPodTemplate checks the user-written pod template of an
 // enabled publish service: at least one container, whose first declared
 // container port becomes the Service target (targeted by number), and no
@@ -190,18 +200,29 @@ func ensureRouteWithRules(ctx context.Context, c client.Client, recorder record.
 	return nil
 }
 
+// aliasRedirectTarget returns the canonical-tree prefix an alias path
+// redirects into: the canonical /<owner name> prefix itself, or — for a
+// subset alias — that prefix plus the subset subpath.
+func aliasRedirectTarget(canonicalPath string, alias mirrorv1alpha1.MirrorAlias) string {
+	if alias.Subset != nil {
+		return canonicalPath + "/" + alias.Subset.SubPath
+	}
+	return canonicalPath
+}
+
 // ensurePublishRouteFor maintains the SERVING-mode publish HTTPRoute. The
 // canonical /<owner name> prefix points at Service <base>-publish-http port 80.
-// Aliases, when present, share a second rule that permanently redirects each
-// matched prefix to the canonical prefix while preserving the unmatched
-// suffix. Backends therefore only need to serve the name-derived canonical
-// path. The route always targets the http service: the rsync service is
-// Service-only and never routed.
-func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record.EventRecorder, scheme *runtime.Scheme, cfg *config.Config, owner client.Object, pathPrefixes []string) error {
+// Every publish-level alias gets its own rule that permanently redirects the
+// matched prefix into the canonical tree (a subset alias into its
+// subdirectory) while preserving the unmatched suffix. Backends therefore
+// only need to serve the name-derived canonical path. The route always
+// targets the http service: the rsync service is Service-only and never
+// routed.
+func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record.EventRecorder, scheme *runtime.Scheme, cfg *config.Config, owner client.Object, aliases []mirrorv1alpha1.MirrorAlias) error {
 	httpServiceName := publishChildName(childBase(owner.GetName()), PublishProtocolHTTP)
-	canonicalPath := pathPrefixes[0]
+	canonicalPath := "/" + owner.GetName()
 	rules := []gatewayv1.HTTPRouteRule{{
-		Matches: pathPrefixMatches(pathPrefixes[:1]),
+		Matches: pathPrefixMatches([]string{canonicalPath}),
 		BackendRefs: []gatewayv1.HTTPBackendRef{{
 			BackendRef: gatewayv1.BackendRef{
 				BackendObjectReference: gatewayv1.BackendObjectReference{
@@ -214,22 +235,23 @@ func ensurePublishRouteFor(ctx context.Context, c client.Client, recorder record
 			},
 		}},
 	}}
-	if len(pathPrefixes) > 1 {
+	for _, alias := range aliases {
+		target := aliasRedirectTarget(canonicalPath, alias)
 		rules = append(rules, gatewayv1.HTTPRouteRule{
-			Matches: pathPrefixMatches(pathPrefixes[1:]),
+			Matches: pathPrefixMatches([]string{alias.Path}),
 			Filters: []gatewayv1.HTTPRouteFilter{{
 				Type: gatewayv1.HTTPRouteFilterRequestRedirect,
 				RequestRedirect: &gatewayv1.HTTPRequestRedirectFilter{
 					Path: &gatewayv1.HTTPPathModifier{
 						Type:               gatewayv1.PrefixMatchHTTPPathModifier,
-						ReplacePrefixMatch: ptr.To(canonicalPath),
+						ReplacePrefixMatch: ptr.To(target),
 					},
 					StatusCode: ptr.To(301),
 				},
 			}},
 		})
 	}
-	return ensureRouteWithRules(ctx, c, recorder, scheme, cfg, owner, rules, fmt.Sprintf("PathPrefix /%s", owner.GetName()))
+	return ensureRouteWithRules(ctx, c, recorder, scheme, cfg, owner, rules, fmt.Sprintf("PathPrefix %s", canonicalPath))
 }
 
 // ensureRedirectRouteFor maintains the REDIRECT-mode publish HTTPRoute: the
@@ -284,42 +306,35 @@ func hostnamesAsGatewayHostnames(hostnames []string) []gatewayv1.Hostname {
 }
 
 // ensurePublishedMirrorRoute guards the Mirror-specific invocation of the
-// publish route, in whichever mode the http service declares. Published
-// serving Mirrors (status.activePVC non-empty) get the serving route,
-// exposing the canonical /<mirror name> path and permanently redirecting every
-// declared http alias to it. Redirect-mode Mirrors get the redirect variant
-// instead, regardless of publication state — no workload depends on it.
+// publish route, in whichever mode applies. An active publish-level redirect
+// wins over everything: the route is the redirect variant and no serving
+// workload is expected (cleanupDisabledPublishChildren tears any down).
+// Otherwise a published Mirror (status.activePVC non-empty) gets the serving
+// route: the canonical /<mirror name> path forwards to the publish Service,
+// and every publish-level alias redirects into the canonical tree.
 func ensurePublishedMirrorRoute(ctx context.Context, r *MirrorReconciler, mirror *mirrorv1alpha1.Mirror) error {
 	if !r.Config.PublishEnabled() {
 		return nil
 	}
-	// A parked redirect next to a serving podTemplate is legal but inert:
-	// say so, so a stale field cannot confuse an operator mid-incident.
-	if http := mirror.Spec.Publish.HTTP; r.Recorder != nil && http != nil && http.Serving() && http.Redirect != "" {
-		r.Recorder.Event(mirror, corev1.EventTypeNormal, "RedirectIgnored",
-			"publish.http.redirect is ignored while podTemplate serves")
+	if hostname, ok := mirror.Spec.Publish.RedirectActive(); ok {
+		return ensureRedirectRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, mirror, mirrorRoutePaths(mirror), hostname)
 	}
-	paths := mirrorRoutePaths(mirror)
-	if hostname, ok := mirror.Spec.Publish.HTTP.RedirectActive(); ok {
-		return ensureRedirectRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, mirror, paths, hostname)
-	}
-	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, mirror, paths)
+	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, mirror, mirror.Spec.Publish.Aliases)
 }
 
 // ensureReadyProxyRoute is the ProxyMirror-specific invocation, serving or
 // redirect mode like ensurePublishedMirrorRoute. In serving mode the route is
 // created while the Deployment converges so both resources can become ready
 // in parallel. The canonical path and aliases have the same semantics as
-// Mirror.
+// Mirror, including subset aliases handled by the proxy backend.
 func ensureReadyProxyRoute(ctx context.Context, r *ProxyMirrorReconciler, proxy *mirrorv1alpha1.ProxyMirror) error {
 	if !r.Config.PublishEnabled() {
 		return nil
 	}
-	paths := append([]string{"/" + proxy.GetName()}, proxyHTTPAliases(proxy)...)
-	if hostname, ok := proxy.Spec.Publish.HTTP.RedirectActive(); ok {
-		return ensureRedirectRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, proxy, paths, hostname)
+	if hostname, ok := proxy.Spec.Publish.RedirectActive(); ok {
+		return ensureRedirectRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, proxy, proxyRoutePaths(proxy), hostname)
 	}
-	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, proxy, paths)
+	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, proxy, proxy.Spec.Publish.Aliases)
 }
 
 // deletePublishRouteFor removes the deterministic route when HTTP publishing
@@ -343,14 +358,21 @@ func deletePublishRouteFor(ctx context.Context, c client.Client, owner client.Ob
 }
 
 // mirrorRoutePaths returns the public path prefixes of a Mirror: the canonical
-// /<mirror name> first, then the enabled http service's redirecting aliases in
-// declaration order. The rsync service has no path representation.
+// /<mirror name> first, then the publish-level aliases in declaration order.
+// The rsync service has no path representation.
 func mirrorRoutePaths(mirror *mirrorv1alpha1.Mirror) []string {
 	paths := []string{"/" + mirror.Name}
-	if http := mirror.Spec.Publish.HTTP; http != nil {
-		for _, alias := range http.Aliases {
-			paths = append(paths, string(alias))
-		}
+	for _, alias := range mirror.Spec.Publish.Aliases {
+		paths = append(paths, alias.Path)
+	}
+	return paths
+}
+
+// proxyRoutePaths is mirrorRoutePaths for a ProxyMirror.
+func proxyRoutePaths(proxy *mirrorv1alpha1.ProxyMirror) []string {
+	paths := []string{"/" + proxy.Name}
+	for _, alias := range proxy.Spec.Publish.Aliases {
+		paths = append(paths, alias.Path)
 	}
 	return paths
 }
@@ -439,14 +461,4 @@ func sameRouteParent(desired, observed gatewayv1.ParentReference, routeNamespace
 		desired.Name == observed.Name &&
 		ptr.Deref(desired.SectionName, "") == ptr.Deref(observed.SectionName, "") &&
 		ptr.Deref(desired.Port, 0) == ptr.Deref(observed.Port, 0)
-}
-
-func proxyHTTPAliases(proxy *mirrorv1alpha1.ProxyMirror) []string {
-	var paths []string
-	if proxy.Spec.Publish.HTTP != nil {
-		for _, alias := range proxy.Spec.Publish.HTTP.Aliases {
-			paths = append(paths, string(alias))
-		}
-	}
-	return paths
 }

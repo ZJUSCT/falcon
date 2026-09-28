@@ -65,16 +65,18 @@ func (r *ProxyMirrorReconciler) ensureCachePVC(ctx context.Context, proxy *mirro
 }
 
 func (r *ProxyMirrorReconciler) cleanupDisabledProxyChildren(ctx context.Context, proxy *mirrorv1alpha1.ProxyMirror) error {
-	// An http key that is absent OR in redirect mode has no serving workload:
-	// tear the Deployment/Service down. The route is separate — it stays for a
-	// redirect-mode key (it IS the endpoint) and is only removed when the http
-	// key itself is gone.
-	if !proxy.Spec.Publish.HTTP.Serving() {
+	// An active publish-level redirect suppresses the proxy workload, and a
+	// non-serving http key has no workload either: tear the
+	// Deployment/Service down. The route is separate — it stays for an
+	// active redirect (it IS the endpoint) and is only removed when neither
+	// an http key nor a redirect remains.
+	_, redirecting := proxy.Spec.Publish.RedirectActive()
+	if redirecting || !proxy.Spec.Publish.HTTP.Serving() {
 		if err := deletePublishEntry(ctx, r.Client, proxy, PublishProtocolHTTP); err != nil {
 			return err
 		}
 	}
-	if proxy.Spec.Publish.HTTP == nil || !r.Config.PublishEnabled() {
+	if (!redirecting && proxy.Spec.Publish.HTTP == nil) || !r.Config.PublishEnabled() {
 		if err := deletePublishRouteFor(ctx, r.Client, proxy); err != nil {
 			return err
 		}

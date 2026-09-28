@@ -169,7 +169,7 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 		}
 	}()
 	if mirror.Status.CurrentSync != nil && mirror.Status.CurrentSync.Phase == mirrorv1alpha1.SyncPhaseCancelling {
-		return r.reconcileCancellation(ctx, mirror, publicationHealth{ready: publishHTTPEnabled(mirror) && r.Config.PublishEnabled() && mirrorWasReady(mirror), reason: "Cancellation", message: "preserving existing publication"})
+		return r.reconcileCancellation(ctx, mirror, publicationHealth{ready: publishRouteEnabled(mirror) && r.Config.PublishEnabled() && mirrorWasReady(mirror), reason: "Cancellation", message: "preserving existing publication"})
 	}
 
 	if errs := validateMirror(mirror); len(errs) > 0 {
@@ -177,7 +177,7 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 		logger.Info("Mirror specification is invalid", "errors", message)
 		return r.patchStatus(ctx, mirror, func() {
 			mirror.Status.ObservedGeneration = mirror.Generation
-			setCondition(mirror, conditionReady, conditionStatus(publishHTTPEnabled(mirror) && r.Config.PublishEnabled() && mirrorWasReady(mirror)), "InvalidSpec", message)
+			setCondition(mirror, conditionReady, conditionStatus(publishRouteEnabled(mirror) && r.Config.PublishEnabled() && mirrorWasReady(mirror)), "InvalidSpec", message)
 			setCondition(mirror, conditionProgressing, conditionStatus(mirror.Status.Publication != nil), "InvalidSpec", message)
 			setCondition(mirror, conditionDegraded, metav1.ConditionTrue, "InvalidSpec", message)
 		})
@@ -683,9 +683,9 @@ func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirro
 		if err != nil {
 			return publicationHealth{}, err
 		}
-		// A redirect-mode http key routes without publishing: observe the
-		// redirect route instead of declaring the endpoint disabled.
-		if hostname, redirecting := mirror.Spec.Publish.HTTP.RedirectActive(); redirecting {
+		// An active publish-level redirect routes without publishing: observe
+		// the redirect route instead of declaring the endpoint disabled.
+		if hostname, redirecting := mirror.Spec.Publish.RedirectActive(); redirecting {
 			return r.redirectPublicationHealth(ctx, mirror, hostname, drained)
 		}
 		return publicationHealth{progressing: !drained, reason: "HTTPDisabled", message: "no HTTP endpoint is configured; waiting for any removed workloads to drain"}, nil
@@ -713,9 +713,7 @@ func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirro
 	}
 	converged = converged && drained
 	// With http+rsync both serving, availability follows the user-facing http
-	// endpoint alone. In redirect mode there is no http workload; rsync's own
-	// availability stands, and the route is judged further down like any
-	// publish HTTPRoute.
+	// endpoint alone. Redirects are handled above without any publish workload.
 	if mirror.Spec.Publish.HTTP.Serving() {
 		httpOnly := mirror.DeepCopy()
 		httpOnly.Spec.Publish.Rsync = nil
@@ -783,13 +781,17 @@ func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirro
 	return health, nil
 }
 
-// redirectPublicationHealth observes a redirect-mode http key of an otherwise
-// non-publishing Mirror (no serving http, no rsync): it maintains the redirect
-// publish HTTPRoute and reports the gateway's acceptance of it, mirroring the
-// serving tail of reconcileActivePublication. Readiness additionally requires
-// removed serving workloads to drain — a serving -> redirect switch tears the
-// http Deployment/Service down through cleanupDisabledPublishChildren.
+// redirectPublicationHealth observes a Mirror under an active publish-level
+// redirect: it maintains the redirect publish HTTPRoute and reports the
+// gateway's acceptance of it, mirroring the serving tail of
+// reconcileActivePublication. Readiness additionally requires the suppressed
+// workloads to drain — enabling the redirect tears the http and rsync
+// Deployments/Services down through cleanupDisabledPublishChildren.
 func (r *MirrorReconciler) redirectPublicationHealth(ctx context.Context, mirror *mirrorv1alpha1.Mirror, hostname string, drained bool) (publicationHealth, error) {
+	if r.Recorder != nil && (mirror.Spec.Publish.HTTP.Serving() || mirror.Spec.Publish.Rsync != nil) {
+		r.Recorder.Event(mirror, corev1.EventTypeNormal, "PublishSuppressed",
+			"spec.publish.redirect is active: the declared publish services are suppressed")
+	}
 	health := publicationHealth{
 		ready:       drained,
 		progressing: !drained,
@@ -913,28 +915,25 @@ func validateMirror(mirror *mirrorv1alpha1.Mirror) field.ErrorList {
 	if mirror.Spec.Storage.VolumeSnapshotClassName == "" {
 		errs = append(errs, field.Required(path.Child("storage", "volumeSnapshotClassName"), "is required for atomic publication"))
 	}
-	services := mirror.Spec.Publish
-	servicesPath := path.Child("services")
-	// The http key either serves (a containerful podTemplate; redirect ignored)
-	// or redirects (no serving podTemplate, a redirect hostname). The CRD
-	// enforces the either-or at admission (CEL on MirrorHTTPServiceSpec);
-	// these checks keep the InvalidSpec path complete for specs that bypassed it.
-	if http := services.HTTP; http != nil {
-		httpPath := servicesPath.Child("http")
-		switch {
-		case http.Serving():
-			errs = append(errs, validateMirrorService(&http.MirrorServiceSpec, httpPath)...)
-		case http.Redirect == "":
-			errs = append(errs, field.Required(httpPath, "must declare a serving podTemplate (spec.containers) or a redirect"))
-		default:
-			errs = append(errs, validateRedirectHostname(http.Redirect, httpPath.Child("redirect"))...)
-		}
-		// Alias paths of a declared http service apply in BOTH modes; an
-		// absent key may park anything.
-		errs = append(errs, validateHTTPAliases(http, mirror.Name, httpPath.Child("aliases"))...)
+	publish := mirror.Spec.Publish
+	publishPath := path.Child("publish")
+	// The publish-level redirect is validated whenever set — unlike the old
+	// http-key redirect it is meaningful in every mode (it suppresses the
+	// protocol keys), so no shape can park an invalid value out of use.
+	if publish.Redirect != "" {
+		errs = append(errs, validateRedirectHostname(publish.Redirect, publishPath.Child("redirect"))...)
 	}
-	if services.Rsync != nil {
-		errs = append(errs, validateMirrorService(services.Rsync, servicesPath.Child("rsync"))...)
+	// Aliases are passive declarations consumed by the enabled protocols, so
+	// they are validated independently of the protocol keys.
+	errs = append(errs, validateAliases(publish.Aliases, mirror.Name, mirror.Spec.Info.CName, publishPath.Child("aliases"))...)
+	// A declared http key must serve (the CRD enforces podTemplate.spec at
+	// admission; the controller-side checks keep the InvalidSpec path
+	// complete for specs that bypassed it).
+	if publish.HTTP != nil {
+		errs = append(errs, validateMirrorService(&publish.HTTP.MirrorServiceSpec, publishPath.Child("http"))...)
+	}
+	if publish.Rsync != nil {
+		errs = append(errs, validateMirrorService(publish.Rsync, publishPath.Child("rsync"))...)
 	}
 	// There is no placement validation: node locality is K8s-native on both
 	// sides (the bound PV's nodeAffinity, enforced by the scheduler). The
@@ -1005,40 +1004,73 @@ func validateMirrorDataMounts(mounts []corev1.VolumeMount, path *field.Path) fie
 	return errs
 }
 
-// validateHTTPAliases validates the additional public path prefixes of an
-// ENABLED http service: no duplicate, no alias equal to the canonical
-// /<mirror name> path, and the syntax rules (start with '/', no trailing '/',
-// no '//', no whitespace). This controller-side check is the SOLE syntax
-// enforcement (the CRD carries only the MaxItems/MaxLength bounds — a CEL
-// mirror of these rules was deliberately dropped); keeping it in the
-// InvalidSpec path buys precise error messages. Cross-route precedence is the
-// gateway's business (see routeGatewayRejection). Case-sensitive on purpose:
-// CR names are bound by DNS rules while alias paths are not.
-func validateHTTPAliases(http *mirrorv1alpha1.MirrorHTTPServiceSpec, mirrorName string, path *field.Path) field.ErrorList {
+// validateAliases validates the publish-level alias declarations: the path
+// syntax rules (start with '/', no trailing '/', no '//', no whitespace), no
+// duplicate, no alias equal to the canonical /<mirror name> path, the subset
+// subpath rules (a relative path of plain segments), and unique subset
+// catalog names (each becomes a mirrorz entry next to the CR's own). This
+// controller-side check is the SOLE syntax enforcement (the CRD carries only
+// the MaxItems/MaxLength bounds — a CEL mirror of these rules was
+// deliberately dropped); keeping it in the InvalidSpec path buys precise
+// error messages. Cross-route precedence is the gateway's business (see
+// publishRouteHealth). Case-sensitive on purpose: CR names are bound by DNS
+// rules while alias paths are not.
+func validateAliases(aliases []mirrorv1alpha1.MirrorAlias, mirrorName, mirrorCName string, path *field.Path) field.ErrorList {
 	var errs field.ErrorList
 	canonical := "/" + mirrorName
-	seen := map[mirrorv1alpha1.MirrorHTTPAlias]bool{}
-	for i, alias := range http.Aliases {
+	seenPaths := map[string]bool{}
+	parentCName := mirrorCName
+	if parentCName == "" {
+		parentCName = mirrorName
+	}
+	seenCNames := map[string]bool{parentCName: true}
+	for i, alias := range aliases {
 		aliasPath := path.Index(i)
-		value := string(alias)
-		if seen[alias] {
-			errs = append(errs, field.Duplicate(aliasPath, value))
+		if seenPaths[alias.Path] {
+			errs = append(errs, field.Duplicate(aliasPath.Child("path"), alias.Path))
 			continue
 		}
-		seen[alias] = true
-		if value == canonical {
-			errs = append(errs, field.Invalid(aliasPath, value, "must not equal the canonical path "+canonical))
-			continue
-		}
+		seenPaths[alias.Path] = true
 		switch {
-		case !strings.HasPrefix(value, "/"):
-			errs = append(errs, field.Invalid(aliasPath, value, "must start with '/'"))
-		case strings.HasSuffix(value, "/"):
-			errs = append(errs, field.Invalid(aliasPath, value, "must not end with '/'"))
-		case strings.Contains(value, "//"):
-			errs = append(errs, field.Invalid(aliasPath, value, "must not contain '//'"))
-		case strings.ContainsFunc(value, unicode.IsSpace):
-			errs = append(errs, field.Invalid(aliasPath, value, "must not contain whitespace"))
+		case alias.Path == canonical:
+			errs = append(errs, field.Invalid(aliasPath.Child("path"), alias.Path, "must not equal the canonical path "+canonical))
+			continue
+		case !strings.HasPrefix(alias.Path, "/"):
+			errs = append(errs, field.Invalid(aliasPath.Child("path"), alias.Path, "must start with '/'"))
+		case strings.HasSuffix(alias.Path, "/"):
+			errs = append(errs, field.Invalid(aliasPath.Child("path"), alias.Path, "must not end with '/'"))
+		case strings.Contains(alias.Path, "//"):
+			errs = append(errs, field.Invalid(aliasPath.Child("path"), alias.Path, "must not contain '//'"))
+		case strings.ContainsFunc(alias.Path, unicode.IsSpace):
+			errs = append(errs, field.Invalid(aliasPath.Child("path"), alias.Path, "must not contain whitespace"))
+		}
+		if alias.Subset == nil {
+			continue
+		}
+		subPath := aliasPath.Child("subset", "subpath")
+		switch {
+		case alias.Subset.SubPath == "":
+			errs = append(errs, field.Required(subPath, "must not be empty"))
+		case strings.HasPrefix(alias.Subset.SubPath, "/"):
+			errs = append(errs, field.Invalid(subPath, alias.Subset.SubPath, "must be a relative path (no leading '/')"))
+		case strings.HasSuffix(alias.Subset.SubPath, "/"):
+			errs = append(errs, field.Invalid(subPath, alias.Subset.SubPath, "must not end with '/'"))
+		case strings.Contains(alias.Subset.SubPath, "//"):
+			errs = append(errs, field.Invalid(subPath, alias.Subset.SubPath, "must not contain '//'"))
+		case strings.ContainsFunc(alias.Subset.SubPath, unicode.IsSpace):
+			errs = append(errs, field.Invalid(subPath, alias.Subset.SubPath, "must not contain whitespace"))
+		default:
+			for _, segment := range strings.Split(alias.Subset.SubPath, "/") {
+				if segment == "." || segment == ".." {
+					errs = append(errs, field.Invalid(subPath, alias.Subset.SubPath, "must not contain '.' or '..' segments"))
+					break
+				}
+			}
+		}
+		if name := alias.CatalogName(); seenCNames[name] {
+			errs = append(errs, field.Invalid(aliasPath.Child("subset"), name, "subset catalog names must be unique and differ from the CR's own catalog name"))
+		} else {
+			seenCNames[name] = true
 		}
 	}
 	return errs

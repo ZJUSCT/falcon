@@ -75,48 +75,107 @@ spec:
                 type: object
               publish:
                 description: |-
-                  Publish declares how the active snapshot clone is published, through
-                  the fixed keys "http" and "rsync" (see MirrorServicesSpec). With every
-                  key absent (including an entirely absent services object) the mirror
-                  is sync-only: synchronization produces a ready snapshot, without a clone
-                  PVC or publish Deployment/Service/HTTPRoute. An http key in redirect
-                  mode (no podTemplate, a redirect hostname) deploys nothing either: the
-                  publish HTTPRoute 302-redirects the public paths away while
-                  synchronization (and any rsync service) continues.
+                  Publish declares how the active snapshot clone is published: the
+                  cross-protocol declarations (aliases, redirect) plus the fixed keys
+                  "http" and "rsync" (see MirrorServicesSpec). With every key absent
+                  (and no redirect) the mirror is sync-only: synchronization produces a
+                  ready snapshot, without a clone PVC or publish
+                  Deployment/Service/HTTPRoute. An active publish-level redirect
+                  deploys nothing either: the publish HTTPRoute 302-redirects the
+                  public paths away while synchronization continues.
                 properties:
+                  aliases:
+                    description: |-
+                      Aliases are ADDITIONAL public path prefixes next to the canonical
+                      /<CR name> (e.g. /CTAN for letter-case, /debian-nonfree as a subset
+                      alias). A passive declaration consumed by the enabled publish
+                      protocols — today the http publish HTTPRoute permanently redirects
+                      each alias into the canonical tree (a subset alias into its
+                      subdirectory, and it becomes its own mirrorz entry); a future rsync
+                      publish may map them to module aliases. In redirect mode every alias
+                      path is redirected along with the canonical path, unchanged. The
+                      syntax, canonical-path, duplicate, and subset catalog-name rules are
+                      enforced by the controller (validateAliases); whether the gateway
+                      accepts the resulting routes (including precedence against other
+                      CRs' routes) is the Gateway API's own machinery, surfaced as Degraded
+                      instead of pre-filtered.
+                    items:
+                      description: |-
+                        MirrorAlias is one additional public path prefix, declared at the publish
+                        level (spec.publish.aliases) next to the protocol keys: a passive
+                        declaration that every enabled publish protocol consumes as it sees fit
+                        (today the http publish HTTPRoute). Paths are case-sensitive and uppercase
+                        is allowed ON PURPOSE: the CR name is bound by DNS rules while alias paths
+                        are not.
+                      properties:
+                        path:
+                          description: |-
+                            Path is the public path prefix, e.g. /CTAN or /git/linux.git. In
+                            serving mode the alias permanently redirects (301) into the canonical
+                            /<CR name> tree — to the canonical prefix itself, or with Subset to
+                            the canonical prefix plus the subset subpath — preserving the
+                            unmatched suffix, so backends only ever serve canonical paths. The
+                            canonical path stays the one true public path of the CR itself. In
+                            redirect mode the path is redirected along with everything else,
+                            unchanged. The syntax, canonical-path, and duplicate rules are
+                            enforced by the controller (validateAliases).
+                          maxLength: 200
+                          minLength: 1
+                          type: string
+                        subset:
+                          description: |-
+                            Subset marks the alias as a SUBSET alias: an independent catalog
+                            identity for a subdirectory of this mirror's own tree (e.g.
+                            /debian-nonfree publishing <cdimage>/unofficial/non-free). A subset
+                            alias redirects into that subdirectory and becomes its own mirrorz
+                            entry projecting this CR's status; a plain alias is invisible to the
+                            catalog.
+                          properties:
+                            cname:
+                              description: |-
+                                CName is the MirrorZ catalog name of the subset entry. It defaults to
+                                the alias path without its leading slash (/debian-nonfree ->
+                                debian-nonfree) and must not collide with the CR's own catalog name
+                                or another subset's.
+                              maxLength: 200
+                              minLength: 1
+                              type: string
+                            description:
+                              description: |-
+                                Description is plain text for the subset entry's MirrorZ desc; the
+                                field is omitted from the entry when empty.
+                              type: string
+                            subpath:
+                              description: |-
+                                SubPath is the subdirectory of the mirror's data the alias publishes,
+                                as a relative path from the mirror root. Requests to the alias path
+                                redirect to /<CR name>/<subpath>/<unmatched suffix>.
+                              maxLength: 200
+                              minLength: 1
+                              type: string
+                            upstream:
+                              description: |-
+                                Upstream is the subset entry's own upstream description (typically
+                                the rsync module of exactly that subdirectory). The field is omitted
+                                from the entry when empty; it never falls back to the CR's whole-tree
+                                upstream.
+                              type: string
+                          required:
+                          - subpath
+                          type: object
+                      required:
+                      - path
+                      type: object
+                    maxItems: 8
+                    type: array
                   http:
                     description: |-
                       HTTP is the HTTP publish service (web server, git http-backend via
-                      fastcgi, ...). It owns the publish HTTPRoute when enabled, publishing the
-                      canonical /<mirror name> path plus any declared aliases — either by
-                      forwarding to the publish Deployment (serving mode) or by 302-redirecting
-                      every public path to the configured hostname (redirect mode).
+                      fastcgi, ...). It owns the publish HTTPRoute when enabled, publishing
+                      the canonical /<mirror name> path and redirecting the publish-level
+                      aliases into it — unless a publish-level Redirect is active, in which
+                      case the key is suppressed and the route only redirects away.
                     properties:
-                      aliases:
-                        description: |-
-                          Aliases are ADDITIONAL public path prefixes served by the http service
-                          next to the canonical /<mirror name> (e.g. /linux.git and /git/linux.git
-                          for the same content). In serving mode each alias permanently redirects
-                          to the canonical /<CR name> path with its unmatched suffix preserved, so
-                          backends only serve that canonical path. The canonical path stays the one
-                          true public path (mirrorz output, portal links, documentation). Aliases
-                          share a PathPrefix rule on the publish HTTPRoute in declaration order
-                          (matches within the rule are OR). Case-sensitive, uppercase
-                          allowed; the syntax rules and the canonical-path/duplicate rules are
-                          enforced by the controller (validateHTTPAliases). Whether the gateway
-                          accepts the resulting routes (including precedence against other
-                          Mirrors' routes) is the Gateway API's own precedence and acceptance
-                          machinery; the controller surfaces an Accepted=False condition as
-                          Degraded instead of pre-filtering.
-                        items:
-                          description: |-
-                            MirrorHTTPAlias is one additional public path prefix of an http service.
-                            Paths are case-sensitive and uppercase is allowed ON PURPOSE: the CR name is
-                            bound by DNS rules while alias paths are not.
-                          maxLength: 200
-                          type: string
-                        maxItems: 8
-                        type: array
                       podTemplate:
                         description: |-
                           PodTemplate is the FULL pod template of the publish Deployment
@@ -8785,19 +8844,6 @@ spec:
                             - containers
                             type: object
                         type: object
-                      redirect:
-                        description: |-
-                          Redirect is the bare hostname every public path of the http service is
-                          302-redirected to in redirect mode (no serving podTemplate declared;
-                          a declared podTemplate ignores it). It is a lowercase DNS hostname
-                          like the gateway API's PreciseHostname — no scheme, port, or path:
-                          the redirect preserves the request scheme (http stays http,
-                          https stays https) and reuses the request path unchanged, so every
-                          public path maps to the same path on this host.
-                        maxLength: 253
-                        minLength: 1
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                        type: string
                       replicas:
                         default: 1
                         format: int32
@@ -8805,14 +8851,33 @@ spec:
                         type: integer
                     type: object
                     x-kubernetes-validations:
-                    - message: podTemplate.spec or redirect is required when the http
-                        service key is declared
-                      rule: has(self.podTemplate.spec) || has(self.redirect)
+                    - message: podTemplate.spec is required when the http service
+                        key is declared
+                      rule: has(self.podTemplate.spec)
+                  redirect:
+                    description: |-
+                      Redirect is the bare hostname every public path is 302-redirected to
+                      while it is set — a temporary-ops switch (e.g. migrating data across
+                      nodes) with the highest priority: it suppresses ALL publish workloads,
+                      so no Deployment or Service exists and the publish HTTPRoute is a
+                      single redirect rule covering the canonical path and every alias,
+                      reusing the request path unchanged (the target site is expected to
+                      serve the same layout; rsync has no redirect and is simply stopped).
+                      A lowercase DNS hostname like the gateway API's PreciseHostname — no
+                      scheme, port, or path; the redirect preserves the request scheme.
+                      Removing the field re-enables the protocol keys as declared: the
+                      retained last snapshot republishes without a new sync. Synchronization
+                      continues throughout.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
                   rsync:
                     description: |-
                       Rsync is the rsync publish service. It only gets a Deployment and a
                       ClusterIP Service — no Gateway API route (a future RsyncRoute is out
-                      of scope), and no path concept, hence no aliases.
+                      of scope). It is suppressed entirely while a publish-level Redirect
+                      is active.
                     properties:
                       podTemplate:
                         description: |-

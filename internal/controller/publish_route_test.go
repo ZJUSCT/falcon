@@ -778,9 +778,10 @@ func TestPublishTemplateWithoutPortsOrContainersIsInvalid(t *testing.T) {
 	}
 }
 
-// publishedMirrorFixture returns a published, Ready Mirror whose http service
-// carries the given aliases, plus a reconciler wired to a fake client holding it.
-func publishedMirrorFixture(t *testing.T, name string, aliases ...mirrorv1alpha1.MirrorHTTPAlias) (*mirrorv1alpha1.Mirror, *MirrorReconciler, client.Client, ctrl.Request, context.Context) {
+// publishedMirrorFixture returns a published, Ready Mirror whose publish
+// facet carries the given aliases, plus a reconciler wired to a fake client
+// holding it.
+func publishedMirrorFixture(t *testing.T, name string, aliases ...mirrorv1alpha1.MirrorAlias) (*mirrorv1alpha1.Mirror, *MirrorReconciler, client.Client, ctrl.Request, context.Context) {
 	ctx := context.Background()
 	mirror := testMirror()
 	mirror.ObjectMeta = metav1.ObjectMeta{
@@ -801,7 +802,7 @@ func publishedMirrorFixture(t *testing.T, name string, aliases ...mirrorv1alpha1
 			}},
 		},
 	}
-	mirror.Spec.Publish.HTTP.Aliases = aliases
+	mirror.Spec.Publish.Aliases = aliases
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
@@ -825,19 +826,23 @@ func publishedMirrorFixture(t *testing.T, name string, aliases ...mirrorv1alpha1
 	}, ctx
 }
 
-// TestAliasesRedirectToCanonicalPath: aliases share a second PathPrefix rule
-// that permanently redirects every matched prefix to /<name>, preserving the
-// unmatched suffix; only the canonical rule reaches the backend.
+// TestAliasesRedirectToCanonicalPath: every alias gets its own rule that
+// permanently redirects the matched prefix into the canonical tree,
+// preserving the unmatched suffix; only the canonical rule reaches the
+// backend.
 func TestAliasesRedirectToCanonicalPath(t *testing.T) {
-	mirror, reconciler, fakeClient, request, ctx := publishedMirrorFixture(t, "smoke", "/linux.git", "/git/linux.git")
+	mirror, reconciler, fakeClient, request, ctx := publishedMirrorFixture(t, "smoke",
+		mirrorv1alpha1.MirrorAlias{Path: "/linux.git"},
+		mirrorv1alpha1.MirrorAlias{Path: "/git/linux.git"},
+	)
 	reconcile(t, ctx, reconciler, request) // creates the workload (+ route attempt)
 	markDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace, "smoke-publish-http")
 	reconcile(t, ctx, reconciler, request)
 
 	route := &gatewayv1.HTTPRoute{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
-	if len(route.Spec.Rules) != 2 {
-		t.Fatalf("want canonical backend + alias redirect rules, got %#v", route.Spec.Rules)
+	if len(route.Spec.Rules) != 3 {
+		t.Fatalf("want canonical backend + one redirect rule per alias, got %#v", route.Spec.Rules)
 	}
 	canonical := route.Spec.Rules[0]
 	if len(canonical.Matches) != 1 || ptr.Deref(canonical.Matches[0].Path.Value, "") != "/smoke" {
@@ -846,64 +851,137 @@ func TestAliasesRedirectToCanonicalPath(t *testing.T) {
 	if len(canonical.BackendRefs) != 1 || string(canonical.BackendRefs[0].Name) != "smoke-publish-http" || len(canonical.Filters) != 0 {
 		t.Fatalf("canonical rule must be the only backend rule: %#v", canonical)
 	}
-	aliases := route.Spec.Rules[1]
-	if len(aliases.Matches) != 2 {
-		t.Fatalf("want 2 alias matches, got %#v", aliases.Matches)
-	}
-	wantPaths := []string{"/linux.git", "/git/linux.git"}
-	for i, want := range wantPaths {
-		if ptr.Deref(aliases.Matches[i].Path.Type, "") != gatewayv1.PathMatchPathPrefix || ptr.Deref(aliases.Matches[i].Path.Value, "") != want {
-			t.Fatalf("match %d = %#v, want PathPrefix %s", i, aliases.Matches[i], want)
+	for i, want := range []string{"/linux.git", "/git/linux.git"} {
+		alias := route.Spec.Rules[i+1]
+		if len(alias.Matches) != 1 || ptr.Deref(alias.Matches[0].Path.Type, "") != gatewayv1.PathMatchPathPrefix || ptr.Deref(alias.Matches[0].Path.Value, "") != want {
+			t.Fatalf("alias rule %d match = %#v, want PathPrefix %s", i, alias.Matches, want)
 		}
-	}
-	if len(aliases.BackendRefs) != 0 || len(aliases.Filters) != 1 || aliases.Filters[0].Type != gatewayv1.HTTPRouteFilterRequestRedirect {
-		t.Fatalf("aliases must redirect without a backend: %#v", aliases)
-	}
-	redirect := aliases.Filters[0].RequestRedirect
-	if redirect == nil || ptr.Deref(redirect.StatusCode, 0) != 301 || redirect.Path == nil ||
-		redirect.Path.Type != gatewayv1.PrefixMatchHTTPPathModifier || ptr.Deref(redirect.Path.ReplacePrefixMatch, "") != "/smoke" {
-		t.Fatalf("alias redirect must replace its matched prefix with /smoke using 301: %#v", redirect)
-	}
-	if redirect.Scheme != nil || redirect.Hostname != nil || redirect.Port != nil {
-		t.Fatalf("alias redirect must preserve scheme, hostname, and port: %#v", redirect)
+		if len(alias.BackendRefs) != 0 || len(alias.Filters) != 1 || alias.Filters[0].Type != gatewayv1.HTTPRouteFilterRequestRedirect {
+			t.Fatalf("alias rule must redirect without a backend: %#v", alias)
+		}
+		redirect := alias.Filters[0].RequestRedirect
+		if redirect == nil || ptr.Deref(redirect.StatusCode, 0) != 301 || redirect.Path == nil ||
+			redirect.Path.Type != gatewayv1.PrefixMatchHTTPPathModifier || ptr.Deref(redirect.Path.ReplacePrefixMatch, "") != "/smoke" {
+			t.Fatalf("alias redirect must replace its matched prefix with /smoke using 301: %#v", redirect)
+		}
+		if redirect.Scheme != nil || redirect.Hostname != nil || redirect.Port != nil {
+			t.Fatalf("alias redirect must preserve scheme, hostname, and port: %#v", redirect)
+		}
 	}
 	assertPublishRouteShape(t, route, mirror, "/smoke", "smoke-publish-http")
 }
 
-// TestAliasValidation: syntax rules and the canonical-path rule are enforced
-// (mirroring the admission-time CEL); case-sensitive paths and uppercase are
-// legal.
+// TestSubsetAliasRedirectsIntoSubtree: a subset alias redirects its path into
+// the canonical tree's subdirectory — /debian-nonfree/x becomes
+// /<name>/unofficial/non-free/x — while a plain alias keeps redirecting to
+// the canonical prefix.
+func TestSubsetAliasRedirectsIntoSubtree(t *testing.T) {
+	mirror, reconciler, fakeClient, request, ctx := publishedMirrorFixture(t, "debian-cdimage",
+		mirrorv1alpha1.MirrorAlias{Path: "/CTAN-like"},
+		mirrorv1alpha1.MirrorAlias{
+			Path: "/debian-nonfree",
+			Subset: &mirrorv1alpha1.MirrorAliasSubset{
+				SubPath:     "unofficial/non-free",
+				Description: "firmware-inclusive install media",
+				Upstream:    "rsync://cdimage.debian.org/cdimage/unofficial/non-free/",
+			},
+		},
+	)
+	reconcile(t, ctx, reconciler, request)
+	markDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace, "debian-cdimage-publish-http")
+	reconcile(t, ctx, reconciler, request)
+
+	route := &gatewayv1.HTTPRoute{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "debian-cdimage-publish"}, route)
+	if len(route.Spec.Rules) != 3 {
+		t.Fatalf("want canonical + one rule per alias, got %#v", route.Spec.Rules)
+	}
+	plain := route.Spec.Rules[1]
+	if got := ptr.Deref(plain.Matches[0].Path.Value, ""); got != "/CTAN-like" ||
+		ptr.Deref(plain.Filters[0].RequestRedirect.Path.ReplacePrefixMatch, "") != "/debian-cdimage" {
+		t.Fatalf("plain alias must rewrite to the canonical prefix: %#v", plain)
+	}
+	subset := route.Spec.Rules[2]
+	if got := ptr.Deref(subset.Matches[0].Path.Value, ""); got != "/debian-nonfree" {
+		t.Fatalf("subset alias match = %q, want /debian-nonfree", got)
+	}
+	if target := ptr.Deref(subset.Filters[0].RequestRedirect.Path.ReplacePrefixMatch, ""); target != "/debian-cdimage/unofficial/non-free" {
+		t.Fatalf("subset alias must rewrite into the subdirectory, got %q", target)
+	}
+}
+
+// TestAliasValidation: the path syntax, canonical-path, and subset rules are
+// enforced by the controller (mirroring the admission-time bounds); alias
+// paths are case-sensitive with uppercase allowed, and the declarations are
+// validated independently of the protocol keys (passive data).
 func TestAliasValidation(t *testing.T) {
-	// Uppercase and multi-segment aliases are the point of the mechanism.
+	// Uppercase and multi-segment aliases are the point of the mechanism; a
+	// subset alias with a nested relative subpath is the subset shape.
 	valid := testMirror()
-	valid.Spec.Publish.HTTP.Aliases = []mirrorv1alpha1.MirrorHTTPAlias{
-		"/Linux.Git", "/git/smoke.git", "/a/b/c",
+	valid.Spec.Publish.Aliases = []mirrorv1alpha1.MirrorAlias{
+		{Path: "/Linux.Git"},
+		{Path: "/git/smoke.git"},
+		{Path: "/a/b/c"},
+		{Path: "/smoke-nonfree", Subset: &mirrorv1alpha1.MirrorAliasSubset{SubPath: "unofficial/non-free"}},
 	}
 	if errs := validateMirror(valid); len(errs) != 0 {
 		t.Fatalf("valid aliases rejected: %v", errs.ToAggregate())
 	}
+	// Aliases may be declared with every protocol key absent (a future
+	// consumer picks them up); validation applies all the same.
+	passive := testMirror()
+	passive.Spec.Publish.Aliases = []mirrorv1alpha1.MirrorAlias{{Path: "/parked"}}
+	passive.Spec.Publish.HTTP = nil
+	if errs := validateMirror(passive); len(errs) != 0 {
+		t.Fatalf("passive aliases must not require an http key, got %v", errs.ToAggregate())
+	}
 
-	cases := map[string]mirrorv1alpha1.MirrorHTTPAlias{
+	paths := map[string]string{
 		"relative":       "linux.git",
 		"trailing slash": "/linux.git/",
 		"double slash":   "/git//linux.git",
 		"whitespace":     "/git linux",
 		"canonical path": "/smoke",
 	}
-	for name, alias := range cases {
+	for name, aliasPath := range paths {
 		broken := testMirror()
-		broken.Spec.Publish.HTTP.Aliases = []mirrorv1alpha1.MirrorHTTPAlias{alias}
+		broken.Spec.Publish.Aliases = []mirrorv1alpha1.MirrorAlias{{Path: aliasPath}}
 		if errs := validateMirror(broken); len(errs) == 0 {
-			t.Fatalf("%s: alias %q must be InvalidSpec", name, alias)
+			t.Fatalf("%s: alias %q must be InvalidSpec", name, aliasPath)
 		}
 	}
 
-	// An ABSENT http key is never validated — and with enable gone, aliases
-	// (which live on the key) simply cannot be parked anywhere else.
-	absent := testMirror()
-	absent.Spec.Publish.HTTP = nil
-	if errs := validateMirror(absent); len(errs) != 0 {
-		t.Fatalf("aliases of an absent http key must not be validated, got %v", errs.ToAggregate())
+	subpaths := map[string]string{
+		"empty":        "",
+		"absolute":     "/unofficial/non-free",
+		"trailing":     "unofficial/",
+		"double slash": "unofficial//non-free",
+		"whitespace":   "unofficial non-free",
+		"dot segment":  "unofficial/./non-free",
+		"dotdot":       "unofficial/../non-free",
+	}
+	for name, subpath := range subpaths {
+		broken := testMirror()
+		broken.Spec.Publish.Aliases = []mirrorv1alpha1.MirrorAlias{
+			{Path: "/subset", Subset: &mirrorv1alpha1.MirrorAliasSubset{SubPath: subpath}},
+		}
+		if errs := validateMirror(broken); len(errs) == 0 {
+			t.Fatalf("%s: subset subpath %q must be InvalidSpec", name, subpath)
+		}
+	}
+
+	// Duplicate alias paths are rejected, and subset catalog names must be
+	// unique — including against the CR's own catalog name.
+	duplicates := testMirror()
+	duplicates.Spec.Info.CName = "smoke"
+	duplicates.Spec.Publish.Aliases = []mirrorv1alpha1.MirrorAlias{
+		{Path: "/same", Subset: &mirrorv1alpha1.MirrorAliasSubset{SubPath: "a"}},
+		{Path: "/other", Subset: &mirrorv1alpha1.MirrorAliasSubset{SubPath: "b", CName: "same"}},
+		{Path: "/again", Subset: &mirrorv1alpha1.MirrorAliasSubset{SubPath: "c", CName: "smoke"}},
+	}
+	errs := validateMirror(duplicates)
+	if len(errs) != 2 {
+		t.Fatalf("want 2 catalog-name collisions (duplicate and parent cname), got %v", errs.ToAggregate())
 	}
 }
 
@@ -1060,7 +1138,10 @@ func TestGatewayRejectionDegradesMirrorWithPassthrough(t *testing.T) {
 		ActivePVC:          "git-snap-1756147200",
 	}
 
-	mirror, reconciler, fakeClient, request, ctx := publishedMirrorFixture(t, "smoke", "/linux.git", "/git/linux.git")
+	mirror, reconciler, fakeClient, request, ctx := publishedMirrorFixture(t, "smoke",
+		mirrorv1alpha1.MirrorAlias{Path: "/linux.git"},
+		mirrorv1alpha1.MirrorAlias{Path: "/git/linux.git"},
+	)
 	if err := fakeClient.Create(ctx, gitMirror); err != nil {
 		t.Fatalf("create overlapping mirror: %v", err)
 	}
@@ -1239,17 +1320,19 @@ func assertRedirectRouteShape(t *testing.T, route *gatewayv1.HTTPRoute, owner cl
 	}
 }
 
-// TestMirrorRedirectModeServesRouteWithoutWorkloads: a redirect-mode http key
-// (no podTemplate, a redirect hostname) runs no publication pipeline — no
-// clone PVC, no Deployment/Service — and its route covers the canonical path
-// plus aliases; gateway acceptance makes the mirror Ready, no snapshot
-// involved.
+// TestMirrorRedirectModeServesRouteWithoutWorkloads: a publish-level redirect
+// with no protocol keys at all runs no publication pipeline — no clone PVC, no
+// Deployment/Service — and its route covers the canonical path plus every
+// alias; gateway acceptance makes the mirror Ready, no snapshot involved.
 func TestMirrorRedirectModeServesRouteWithoutWorkloads(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
-	mirror.Spec.Publish.HTTP.Redirect = "mirrors.cernet.edu.cn"
-	mirror.Spec.Publish.HTTP.Aliases = []mirrorv1alpha1.MirrorHTTPAlias{"/debian-cd"}
+	mirror.Spec.Publish.HTTP = nil
+	mirror.Spec.Publish.Redirect = "mirrors.cernet.edu.cn"
+	mirror.Spec.Publish.Aliases = []mirrorv1alpha1.MirrorAlias{
+		{Path: "/debian-cd"},
+		{Path: "/debian-nonfree", Subset: &mirrorv1alpha1.MirrorAliasSubset{SubPath: "unofficial/non-free"}},
+	}
 	mirror.Finalizers = []string{MirrorFinalizer}
 	// A terminal last attempt keeps the bootstrap sync from preempting the
 	// readiness assertions; a redirect mirror still synchronizes like any
@@ -1275,7 +1358,7 @@ func TestMirrorRedirectModeServesRouteWithoutWorkloads(t *testing.T) {
 	reconcile(t, ctx, reconciler, request) // creates the redirect route
 	route := &gatewayv1.HTTPRoute{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
-	assertRedirectRouteShape(t, route, mirror, []string{"/smoke", "/debian-cd"}, "mirrors.cernet.edu.cn")
+	assertRedirectRouteShape(t, route, mirror, []string{"/smoke", "/debian-cd", "/debian-nonfree"}, "mirrors.cernet.edu.cn")
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &corev1.Service{})
 	pending := getMirror(t, ctx, fakeClient, request.NamespacedName)
@@ -1293,16 +1376,16 @@ func TestMirrorRedirectModeServesRouteWithoutWorkloads(t *testing.T) {
 	reconcile(t, ctx, reconciler, request) // idempotence: the shape survives
 	route = &gatewayv1.HTTPRoute{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
-	assertRedirectRouteShape(t, route, mirror, []string{"/smoke", "/debian-cd"}, "mirrors.cernet.edu.cn")
+	assertRedirectRouteShape(t, route, mirror, []string{"/smoke", "/debian-cd", "/debian-nonfree"}, "mirrors.cernet.edu.cn")
 }
 
-// TestMirrorServingModeIgnoresRedirect: a declared podTemplate wins over a
-// simultaneously declared redirect — the route forwards to the publish
-// Service and carries no redirect filter.
-func TestMirrorServingModeIgnoresRedirect(t *testing.T) {
+// TestRedirectSuppressesServingMode: a publish-level redirect wins over a
+// fully declared serving http key — no workload runs, the route redirects,
+// and the suppressed declaration stays intact for the switch back.
+func TestRedirectSuppressesServingMode(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Publish.HTTP.Redirect = "ignored.example.org"
+	mirror.Spec.Publish.Redirect = "mirrors.cernet.edu.cn"
 	mirror.Finalizers = []string{MirrorFinalizer}
 	mirror.Status = mirrorv1alpha1.MirrorStatus{
 		ObservedGeneration: mirror.Generation,
@@ -1325,27 +1408,25 @@ func TestMirrorServingModeIgnoresRedirect(t *testing.T) {
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
 
 	reconcile(t, ctx, reconciler, request)
-	markPublishDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace)
-	markRouteAccepted(t, ctx, fakeClient, mirror.Namespace, "smoke-publish")
-	reconcile(t, ctx, reconciler, request)
-
-	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if ready := findCondition(current.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionTrue {
-		t.Fatalf("serving mode must stay Ready despite the parked redirect, got %#v", current.Status.Conditions)
-	}
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &corev1.Service{})
 	route := &gatewayv1.HTTPRoute{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
-	assertPublishRouteShape(t, route, mirror, "/smoke", "smoke-publish-http")
-	if len(route.Spec.Rules[0].Filters) != 0 {
-		t.Fatalf("serving route must carry no filters: %#v", route.Spec.Rules[0].Filters)
+	assertRedirectRouteShape(t, route, mirror, []string{"/smoke"}, "mirrors.cernet.edu.cn")
+
+	markRouteAccepted(t, ctx, fakeClient, mirror.Namespace, "smoke-publish")
+	reconcile(t, ctx, reconciler, request)
+	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
+	if ready := findCondition(current.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != "RedirectActive" {
+		t.Fatalf("redirect must suppress the serving key and become Ready=True/RedirectActive, got %#v", current.Status.Conditions)
 	}
 }
 
 // TestMirrorSwitchesServingAndRedirectModes: the publish route is ONE object
-// rewritten in place when the http service switches modes — no interval with
-// two routes competing for the same paths. Switching to redirect tears the
-// serving workloads down; switching back restores them next to the same
-// ActivePVC.
+// rewritten in place when the publish-level redirect toggles — no interval with
+// two routes competing for the same paths. Enabling the redirect tears the
+// serving workloads down (podTemplate declaration untouched); removing it
+// restores them next to the same ActivePVC without a new sync.
 func TestMirrorSwitchesServingAndRedirectModes(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
@@ -1379,10 +1460,10 @@ func TestMirrorSwitchesServingAndRedirectModes(t *testing.T) {
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
 	assertPublishRouteShape(t, route, mirror, "/smoke", "smoke-publish-http")
 
-	// Switch to redirect: workloads go, the route is rewritten in place.
+	// Enable the redirect: workloads go, the route is rewritten in place,
+	// and the serving declaration survives verbatim.
 	latest := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	latest.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
-	latest.Spec.Publish.HTTP.Redirect = "mirrors.cernet.edu.cn"
+	latest.Spec.Publish.Redirect = "mirrors.cernet.edu.cn"
 	if err := fakeClient.Update(ctx, latest); err != nil {
 		t.Fatalf("switch spec to redirect: %v", err)
 	}
@@ -1393,10 +1474,10 @@ func TestMirrorSwitchesServingAndRedirectModes(t *testing.T) {
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
 	assertRedirectRouteShape(t, route, mirror, []string{"/smoke"}, "mirrors.cernet.edu.cn")
 
-	// Switch back to serving: the parked redirect stays ignored, the
-	// workloads return against the retained ActivePVC.
+	// Remove the redirect: the workloads return against the retained
+	// ActivePVC, podTemplate unchanged.
 	latest = getMirror(t, ctx, fakeClient, request.NamespacedName)
-	latest.Spec.Publish.HTTP.PodTemplate = testMirror().Spec.Publish.HTTP.PodTemplate
+	latest.Spec.Publish.Redirect = ""
 	if err := fakeClient.Update(ctx, latest); err != nil {
 		t.Fatalf("switch spec back to serving: %v", err)
 	}
@@ -1408,18 +1489,24 @@ func TestMirrorSwitchesServingAndRedirectModes(t *testing.T) {
 	assertPublishRouteShape(t, route, mirror, "/smoke", "smoke-publish-http")
 }
 
-// TestRedirectModeValidation: the controller-side mirror of the http key's
-// admission rules — the either-or between podTemplate and redirect, the
-// hostname syntax, and serving mode ignoring a parked redirect.
+// TestRedirectModeValidation: the controller-side mirror of the publish-level
+// rules — the redirect hostname syntax (validated in every mode now that the
+// field is always meaningful) and the serving podTemplate requirement of a
+// declared http key.
 func TestRedirectModeValidation(t *testing.T) {
-	// Neither a serving podTemplate nor a redirect: the key is invalid.
-	neither := testMirror()
-	neither.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
-	if errs := validateMirror(neither); len(errs) == 0 {
-		t.Fatal("an http key without podTemplate or redirect must be InvalidSpec")
+	// A declared http key without a serving podTemplate is invalid; there is
+	// no redirect-shaped http key anymore (redirect lives at the publish
+	// level), so the declaration cannot satisfy the requirement.
+	bare := testMirror()
+	bare.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
+	if errs := validateMirror(bare); len(errs) == 0 {
+		t.Fatal("an http key without a serving podTemplate must be InvalidSpec")
 	}
 
-	// The redirect is a bare lowercase DNS hostname (IPv4 literals happen to
+	// The publish-level redirect is validated in every mode — even next to a
+	// fully serving http key (unlike the old http-key redirect, which a
+	// podTemplate could park out of use).
+	// The hostname is a bare lowercase DNS hostname (IPv4 literals happen to
 	// match the shared PreciseHostname pattern and stay legal, like in the
 	// gateway API itself).
 	for _, hostname := range []string{
@@ -1427,44 +1514,41 @@ func TestRedirectModeValidation(t *testing.T) {
 		"mirrors.cernet.edu.cn:8443",    // port
 		"mirrors.cernet.edu.cn/debian",  // path
 		"Mirrors.CERNET.Edu.CN",         // uppercase
-		"",                              // empty
 	} {
 		broken := testMirror()
-		broken.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
-		broken.Spec.Publish.HTTP.Redirect = hostname
+		broken.Spec.Publish.Redirect = hostname
 		if errs := validateMirror(broken); len(errs) == 0 {
 			t.Fatalf("redirect %q must be InvalidSpec", hostname)
 		}
 	}
-
-	// Serving mode ignores the redirect entirely — even a syntactically bad one.
-	serving := testMirror()
-	serving.Spec.Publish.HTTP.Redirect = "https://ignored.example.org"
-	if errs := validateMirror(serving); len(errs) != 0 {
-		t.Fatalf("serving mode must ignore the parked redirect, got %v", errs.ToAggregate())
+	valid := testMirror()
+	valid.Spec.Publish.Redirect = "mirrors.cernet.edu.cn"
+	if errs := validateMirror(valid); len(errs) != 0 {
+		t.Fatalf("a valid publish-level redirect next to a serving key must pass, got %v", errs.ToAggregate())
 	}
 
-	// ProxyMirror shares the rules through MirrorHTTPServiceSpec.
+	// ProxyMirror shares the rules.
 	proxy := testProxyMirror()
 	proxy.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
 	if errs := validateProxyMirror(proxy); len(errs) == 0 {
-		t.Fatal("a proxy http key without podTemplate or redirect must be InvalidSpec")
+		t.Fatal("a proxy http key without a serving podTemplate must be InvalidSpec")
 	}
-	proxy.Spec.Publish.HTTP.Redirect = "mirrors.cernet.edu.cn"
+	proxy = testProxyMirror()
+	proxy.Spec.Publish.HTTP = nil
+	proxy.Spec.Publish.Redirect = "mirrors.cernet.edu.cn"
 	if errs := validateProxyMirror(proxy); len(errs) != 0 {
-		t.Fatalf("a valid redirect hostname must pass proxy validation, got %v", errs.ToAggregate())
+		t.Fatalf("a redirect-only proxy must be valid, got %v", errs.ToAggregate())
 	}
 }
 
-// TestMirrorRedirectWithRsyncServesBoth: an rsync service keeps publishing
-// next to a redirect-mode http key — the rsync workload runs against the
-// active PVC while the HTTP route redirects; the http workload is absent and
-// rsync availability alone drives readiness.
-func TestMirrorRedirectWithRsyncServesBoth(t *testing.T) {
+// TestRedirectSuppressesRsync: the publish-level redirect suppresses the rsync
+// service as thoroughly as the http one — the rsync Deployment/Service is torn
+// down and the route only redirects (rsync has no redirect; stopping it is the
+// only way "all traffic goes elsewhere" can hold).
+func TestRedirectSuppressesRsync(t *testing.T) {
 	ctx := context.Background()
 	mirror := testMirror()
-	mirror.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
-	mirror.Spec.Publish.HTTP.Redirect = "mirrors.cernet.edu.cn"
+	mirror.Spec.Publish.Redirect = "mirrors.cernet.edu.cn"
 	mirror.Spec.Publish.Rsync = &mirrorv1alpha1.MirrorServiceSpec{
 		PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
@@ -1496,18 +1580,17 @@ func TestMirrorRedirectWithRsyncServesBoth(t *testing.T) {
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}}
 
 	reconcile(t, ctx, reconciler, request)
-	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-rsync"}, &appsv1.Deployment{})
-	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-rsync"}, &corev1.Service{})
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-rsync"}, &appsv1.Deployment{})
+	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-rsync"}, &corev1.Service{})
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, &appsv1.Deployment{})
 	route := &gatewayv1.HTTPRoute{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish"}, route)
 	assertRedirectRouteShape(t, route, mirror, []string{"/smoke"}, "mirrors.cernet.edu.cn")
 
-	markDeploymentAvailable(t, ctx, fakeClient, mirror.Namespace, "smoke-publish-rsync")
 	markRouteAccepted(t, ctx, fakeClient, mirror.Namespace, "smoke-publish")
 	reconcile(t, ctx, reconciler, request)
 	current := getMirror(t, ctx, fakeClient, request.NamespacedName)
-	if ready := findCondition(current.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionTrue {
-		t.Fatalf("rsync availability plus an accepted redirect route must be Ready=True, got %#v", current.Status.Conditions)
+	if ready := findCondition(current.Status.Conditions, conditionReady); ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != "RedirectActive" {
+		t.Fatalf("an accepted redirect route with rsync suppressed must be Ready=True/RedirectActive, got %#v", current.Status.Conditions)
 	}
 }

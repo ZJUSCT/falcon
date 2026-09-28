@@ -13,7 +13,11 @@ import (
 
 func TestProxyAliasesShareMirrorValidationAndRouteBehavior(t *testing.T) {
 	p := testProxyMirror()
-	p.Spec.Publish.HTTP.Aliases = []mirrorv1alpha1.MirrorHTTPAlias{"/PyPI", "/packages/python"}
+	p.Spec.Publish.Aliases = []mirrorv1alpha1.MirrorAlias{
+		{Path: "/PyPI"},
+		{Path: "/packages/python"},
+		{Path: "/pypi-subset", Subset: &mirrorv1alpha1.MirrorAliasSubset{SubPath: "simple"}},
+	}
 	if errs := validateProxyMirror(p); len(errs) != 0 {
 		t.Fatal(errs)
 	}
@@ -24,22 +28,36 @@ func TestProxyAliasesShareMirrorValidationAndRouteBehavior(t *testing.T) {
 	}
 	route := &gatewayv1.HTTPRoute{}
 	get(t, t.Context(), c, client.ObjectKey{Namespace: p.Namespace, Name: "pypi-proxy-publish"}, route)
-	if len(route.Spec.Rules) != 2 || len(route.Spec.Rules[0].Matches) != 1 || *route.Spec.Rules[0].Matches[0].Path.Value != "/pypi-proxy" {
+	if len(route.Spec.Rules) != 4 || len(route.Spec.Rules[0].Matches) != 1 || *route.Spec.Rules[0].Matches[0].Path.Value != "/pypi-proxy" {
 		t.Fatalf("proxy canonical rule not rendered: %#v", route.Spec.Rules)
 	}
-	aliases := route.Spec.Rules[1]
-	if len(aliases.Matches) != 2 || *aliases.Matches[0].Path.Value != "/PyPI" || *aliases.Matches[1].Path.Value != "/packages/python" {
-		t.Fatalf("proxy aliases not rendered: %#v", aliases.Matches)
+	for i, want := range []string{"/PyPI", "/packages/python", "/pypi-subset"} {
+		alias := route.Spec.Rules[i+1]
+		if len(alias.Matches) != 1 || *alias.Matches[0].Path.Value != want {
+			t.Fatalf("proxy alias rule %d not rendered: %#v", i, alias)
+		}
+		if len(alias.BackendRefs) != 0 || len(alias.Filters) != 1 {
+			t.Fatalf("proxy alias must redirect without a backend: %#v", alias)
+		}
+		target := "/pypi-proxy"
+		if want == "/pypi-subset" {
+			target += "/simple"
+		}
+		redirect := alias.Filters[0].RequestRedirect
+		if redirect == nil || redirect.Path == nil || *redirect.StatusCode != 301 || *redirect.Path.ReplacePrefixMatch != target {
+			t.Fatalf("proxy alias must permanently redirect to the canonical path: %#v", alias)
+		}
 	}
-	if len(aliases.BackendRefs) != 0 || len(aliases.Filters) != 1 {
-		t.Fatalf("proxy aliases must redirect without a backend: %#v", aliases)
+	invalid := [][]mirrorv1alpha1.MirrorAlias{
+		{{Path: "/pypi-proxy"}},
+		{{Path: "/duplicate"}, {Path: "/duplicate"}},
+		{{Path: "missing-slash"}},
+		{{Path: "/trailing/"}},
+		// Subsets share the same path and catalog-name validation.
+		{{Path: "/pypi-subset", Subset: &mirrorv1alpha1.MirrorAliasSubset{SubPath: "../simple"}}},
 	}
-	redirect := aliases.Filters[0].RequestRedirect
-	if redirect == nil || redirect.Path == nil || *redirect.StatusCode != 301 || *redirect.Path.ReplacePrefixMatch != "/pypi-proxy" {
-		t.Fatalf("proxy aliases must permanently redirect to the canonical path: %#v", aliases)
-	}
-	for _, aliases := range [][]mirrorv1alpha1.MirrorHTTPAlias{{"/pypi-proxy"}, {"/duplicate", "/duplicate"}, {"missing-slash"}, {"/trailing/"}} {
-		p.Spec.Publish.HTTP.Aliases = aliases
+	for _, aliases := range invalid {
+		p.Spec.Publish.Aliases = aliases
 		if errs := validateProxyMirror(p); len(errs) == 0 {
 			t.Fatalf("invalid aliases accepted: %v", aliases)
 		}

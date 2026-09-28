@@ -42,14 +42,19 @@ spec:
             image: busybox:1.37
             command: [sh, -ec]
             args:
-              - 'date -u > /data/index.html'
+              - 'date -u > /data/index.html && mkdir -p /data/subset && date -u > /data/subset/index.html'
             volumeMounts:
               - name: sync-data
                 mountPath: /data
   publish:
+    # /DEMO is a plain alias (letter-case); /demo-subset is a subset alias
+    # exercising the subpath redirect and its own mirrorz entry.
+    aliases:
+      - path: /DEMO
+      - path: /demo-subset
+        subset:
+          subpath: subset
     http:
-      aliases:
-        - /DEMO
       podTemplate:
         metadata:
           annotations:

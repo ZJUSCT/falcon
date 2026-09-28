@@ -21,14 +21,40 @@ type ProxyMirrorCacheSpec struct {
 	PVCSpec corev1.PersistentVolumeClaimSpec `json:"pvcTemplate"`
 }
 
-// ProxyMirrorServiceSpec shares the HTTP aliases and workload shape with Mirror.
+// ProxyMirrorServiceSpec shares the serving workload shape with Mirror's
+// http service (always in serving mode; the CEL rule lives on
+// MirrorHTTPServiceSpec).
 type ProxyMirrorServiceSpec = MirrorHTTPServiceSpec
 
-// ProxyMirrorServicesSpec holds the fixed publish service keys of a
-// ProxyMirror: only "http" — a proxy is an HTTP publisher by definition. The
-// key is enabled when present and disabled when absent.
+// ProxyMirrorServicesSpec mirrors the Mirror publish declarations at the
+// proxy's publish level: the same plain and subset aliases, the same
+// publish-level redirect (suppressing the proxy workload), and the fixed
+// "http" key. Subsets share the parent's proxy backend and optional cache.
 type ProxyMirrorServicesSpec struct {
-	HTTP *ProxyMirrorServiceSpec `json:"http,omitempty"`
+	// Aliases are additional public path prefixes, consumed like Mirror's
+	// (subset paths are served by the same proxy backend and optional cache).
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	Aliases []MirrorAlias `json:"aliases,omitempty"`
+	// Redirect is the publish-level 302 switch, with the same semantics as
+	// Mirror's: while set it suppresses the proxy workload entirely and the
+	// publish HTTPRoute redirects every public path to this hostname.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +optional
+	Redirect string                  `json:"redirect,omitempty"`
+	HTTP     *ProxyMirrorServiceSpec `json:"http,omitempty"`
+}
+
+// RedirectActive reports the publish-level redirect target and whether the
+// proxy is in redirect mode, with the same presence-based semantics as
+// MirrorServicesSpec.RedirectActive.
+func (s *ProxyMirrorServicesSpec) RedirectActive() (string, bool) {
+	if s == nil || s.Redirect == "" {
+		return "", false
+	}
+	return s.Redirect, true
 }
 
 // ProxyMirrorSpec groups the proxy mirror configuration. ProxyMirror has no
@@ -39,16 +65,15 @@ type ProxyMirrorSpec struct {
 	// Cache provisions storage only; proxy behavior belongs to the workload configuration.
 	// +optional
 	Cache *ProxyMirrorCacheSpec `json:"cache,omitempty"`
-	// Publish declares the publish workload through the fixed "http" key
-	// (see ProxyMirrorServicesSpec). With the key absent (including an
-	// entirely absent services object) nothing is deployed: the proxy is not
+	// Publish declares the publish facet through the "http" key plus the
+	// cross-protocol declarations (see ProxyMirrorServicesSpec). With the key
+	// absent and no redirect nothing is deployed: the proxy is not
 	// published. A serving http key gets Deployment/Service
 	// `<name>-publish-http` (dots in the CR name map to '-': Service names
 	// are DNS-1035 labels and forbid dots) plus the publish HTTPRoute (once
-	// Ready); an http
-	// key in redirect mode (no podTemplate, a redirect hostname) deploys no
-	// workload and 302-redirects the public paths through the route instead.
-	// The optional cache PVC keeps being maintained across a temporary
+	// Ready). An active publish-level redirect deploys no workload and
+	// 302-redirects the public paths through the route instead. The
+	// optional cache PVC keeps being maintained across a temporary
 	// redirect, so switching back to serving reuses the cached data.
 	// +optional
 	Publish ProxyMirrorServicesSpec `json:"publish,omitempty"`

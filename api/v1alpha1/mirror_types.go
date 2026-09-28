@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -180,102 +182,171 @@ type MirrorServiceSpec struct {
 	PodTemplate corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
-// MirrorHTTPAlias is one additional public path prefix of an http service.
-// Paths are case-sensitive and uppercase is allowed ON PURPOSE: the CR name is
-// bound by DNS rules while alias paths are not.
-// +kubebuilder:validation:MaxLength=200
-type MirrorHTTPAlias string
+// MirrorAlias is one additional public path prefix, declared at the publish
+// level (spec.publish.aliases) next to the protocol keys: a passive
+// declaration that every enabled publish protocol consumes as it sees fit
+// (today the http publish HTTPRoute). Paths are case-sensitive and uppercase
+// is allowed ON PURPOSE: the CR name is bound by DNS rules while alias paths
+// are not.
+type MirrorAlias struct {
+	// Path is the public path prefix, e.g. /CTAN or /git/linux.git. In
+	// serving mode the alias permanently redirects (301) into the canonical
+	// /<CR name> tree — to the canonical prefix itself, or with Subset to
+	// the canonical prefix plus the subset subpath — preserving the
+	// unmatched suffix, so backends only ever serve canonical paths. The
+	// canonical path stays the one true public path of the CR itself. In
+	// redirect mode the path is redirected along with everything else,
+	// unchanged. The syntax, canonical-path, and duplicate rules are
+	// enforced by the controller (validateAliases).
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=200
+	Path string `json:"path"`
+	// Subset marks the alias as a SUBSET alias: an independent catalog
+	// identity for a subdirectory of this mirror's own tree (e.g.
+	// /debian-nonfree publishing <cdimage>/unofficial/non-free). A subset
+	// alias redirects into that subdirectory and becomes its own mirrorz
+	// entry projecting this CR's status; a plain alias is invisible to the
+	// catalog.
+	// +optional
+	Subset *MirrorAliasSubset `json:"subset,omitempty"`
+}
 
-// MirrorHTTPServiceSpec is the http publish service of a Mirror: the base
-// MirrorServiceSpec plus additional public path prefixes (Aliases) and the
-// redirect target (Redirect). The key is in SERVING mode when podTemplate.spec
-// declares containers: the canonical path is forwarded to the publish
-// Deployment through the publish HTTPRoute, aliases permanently redirect to
-// that canonical path, and Redirect is ignored.
-// When no serving podTemplate is declared, a set Redirect puts the key in
-// REDIRECT mode: no workload is deployed, and the publish HTTPRoute 302-
-// redirects every public path (canonical and aliases) to the redirect
-// hostname, preserving the request scheme and reusing the request path
-// as-is. The temporary-ops intent (e.g. migrating data across nodes) is why
-// the status code is 302 and Rsync may keep serving alongside.
-// +kubebuilder:validation:XValidation:rule="has(self.podTemplate.spec) || has(self.redirect)",message="podTemplate.spec or redirect is required when the http service key is declared"
+// MirrorAliasSubset carries the catalog identity of a subset alias. The
+// subtree is served by the parent's snapshot or proxy backend. Its existence
+// is an operator responsibility (the controller never inspects data).
+type MirrorAliasSubset struct {
+	// SubPath is the subdirectory of the mirror's data the alias publishes,
+	// as a relative path from the mirror root. Requests to the alias path
+	// redirect to /<CR name>/<subpath>/<unmatched suffix>.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=200
+	SubPath string `json:"subpath"`
+	// CName is the MirrorZ catalog name of the subset entry. It defaults to
+	// the alias path without its leading slash (/debian-nonfree ->
+	// debian-nonfree) and must not collide with the CR's own catalog name
+	// or another subset's.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=200
+	// +optional
+	CName string `json:"cname,omitempty"`
+	// Description is plain text for the subset entry's MirrorZ desc; the
+	// field is omitted from the entry when empty.
+	// +optional
+	Description string `json:"description,omitempty"`
+	// Upstream is the subset entry's own upstream description (typically
+	// the rsync module of exactly that subdirectory). The field is omitted
+	// from the entry when empty; it never falls back to the CR's whole-tree
+	// upstream.
+	// +optional
+	Upstream string `json:"upstream,omitempty"`
+}
+
+// CatalogName returns the mirrorz catalog name of a subset alias: the
+// declared cname, or the alias path without its leading slash.
+func (a MirrorAlias) CatalogName() string {
+	if a.Subset != nil && a.Subset.CName != "" {
+		return a.Subset.CName
+	}
+	return strings.TrimPrefix(a.Path, "/")
+}
+
+// MirrorHTTPServiceSpec is the http publish service of a Mirror or
+// ProxyMirror: the base MirrorServiceSpec, always in SERVING mode — the
+// declared key must carry a serving podTemplate.spec (CEL-enforced). The
+// publish HTTPRoute forwards the canonical /<CR name> path to the publish
+// Deployment, while the publish-level aliases (spec.publish.aliases)
+// permanently redirect into the canonical tree. While a publish-level
+// redirect (spec.publish.redirect) is active the whole key is suppressed: no
+// workload is deployed, and the route only redirects away.
+// +kubebuilder:validation:XValidation:rule="has(self.podTemplate.spec)",message="podTemplate.spec is required when the http service key is declared"
 type MirrorHTTPServiceSpec struct {
 	MirrorServiceSpec `json:",inline"`
-	// Aliases are ADDITIONAL public path prefixes served by the http service
-	// next to the canonical /<mirror name> (e.g. /linux.git and /git/linux.git
-	// for the same content). In serving mode each alias permanently redirects
-	// to the canonical /<CR name> path with its unmatched suffix preserved, so
-	// backends only serve that canonical path. The canonical path stays the one
-	// true public path (mirrorz output, portal links, documentation). Aliases
-	// share a PathPrefix rule on the publish HTTPRoute in declaration order
-	// (matches within the rule are OR). Case-sensitive, uppercase
-	// allowed; the syntax rules and the canonical-path/duplicate rules are
-	// enforced by the controller (validateHTTPAliases). Whether the gateway
+}
+
+// Serving reports whether the http service is in serving mode: a podTemplate
+// declaring at least one container. Nil-safe (an absent key does not serve).
+// A suppressed-but-declared key still reports serving; suppression is a
+// property of the publish-level redirect, not of this key.
+func (s *MirrorHTTPServiceSpec) Serving() bool {
+	return s != nil && len(s.PodTemplate.Spec.Containers) > 0
+}
+
+// MirrorServicesSpec is the publish facet of a Mirror: cross-protocol public
+// identity declarations plus the fixed protocol keys. An absent protocol key
+// is disabled; a present key is enabled and must carry a serving
+// podTemplate.spec (CEL-enforced on both keys). Aliases and Redirect are
+// passive declarations independent of the keys: protocols consume aliases as
+// they see fit (today the http publish HTTPRoute), and an active Redirect
+// suppresses every protocol key.
+// +kubebuilder:validation:XValidation:rule="!has(self.rsync) || has(self.rsync.podTemplate.spec)",message="podTemplate.spec is required when the rsync service key is declared"
+type MirrorServicesSpec struct {
+	// Aliases are ADDITIONAL public path prefixes next to the canonical
+	// /<CR name> (e.g. /CTAN for letter-case, /debian-nonfree as a subset
+	// alias). A passive declaration consumed by the enabled publish
+	// protocols — today the http publish HTTPRoute permanently redirects
+	// each alias into the canonical tree (a subset alias into its
+	// subdirectory, and it becomes its own mirrorz entry); a future rsync
+	// publish may map them to module aliases. In redirect mode every alias
+	// path is redirected along with the canonical path, unchanged. The
+	// syntax, canonical-path, duplicate, and subset catalog-name rules are
+	// enforced by the controller (validateAliases); whether the gateway
 	// accepts the resulting routes (including precedence against other
-	// Mirrors' routes) is the Gateway API's own precedence and acceptance
-	// machinery; the controller surfaces an Accepted=False condition as
-	// Degraded instead of pre-filtering.
+	// CRs' routes) is the Gateway API's own machinery, surfaced as Degraded
+	// instead of pre-filtered.
 	// +kubebuilder:validation:MaxItems=8
 	// +optional
-	Aliases []MirrorHTTPAlias `json:"aliases,omitempty"`
-	// Redirect is the bare hostname every public path of the http service is
-	// 302-redirected to in redirect mode (no serving podTemplate declared;
-	// a declared podTemplate ignores it). It is a lowercase DNS hostname
-	// like the gateway API's PreciseHostname — no scheme, port, or path:
-	// the redirect preserves the request scheme (http stays http,
-	// https stays https) and reuses the request path unchanged, so every
-	// public path maps to the same path on this host.
+	Aliases []MirrorAlias `json:"aliases,omitempty"`
+	// Redirect is the bare hostname every public path is 302-redirected to
+	// while it is set — a temporary-ops switch (e.g. migrating data across
+	// nodes) with the highest priority: it suppresses ALL publish workloads,
+	// so no Deployment or Service exists and the publish HTTPRoute is a
+	// single redirect rule covering the canonical path and every alias,
+	// reusing the request path unchanged (the target site is expected to
+	// serve the same layout; rsync has no redirect and is simply stopped).
+	// A lowercase DNS hostname like the gateway API's PreciseHostname — no
+	// scheme, port, or path; the redirect preserves the request scheme.
+	// Removing the field re-enables the protocol keys as declared: the
+	// retained last snapshot republishes without a new sync. Synchronization
+	// continues throughout.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	// +optional
 	Redirect string `json:"redirect,omitempty"`
+	// HTTP is the HTTP publish service (web server, git http-backend via
+	// fastcgi, ...). It owns the publish HTTPRoute when enabled, publishing
+	// the canonical /<mirror name> path and redirecting the publish-level
+	// aliases into it — unless a publish-level Redirect is active, in which
+	// case the key is suppressed and the route only redirects away.
+	HTTP *MirrorHTTPServiceSpec `json:"http,omitempty"`
+	// Rsync is the rsync publish service. It only gets a Deployment and a
+	// ClusterIP Service — no Gateway API route (a future RsyncRoute is out
+	// of scope). It is suppressed entirely while a publish-level Redirect
+	// is active.
+	Rsync *MirrorServiceSpec `json:"rsync,omitempty"`
 }
 
-// Serving reports whether the http service is in serving mode: a podTemplate
-// declaring at least one container. Nil-safe (an absent key does not serve).
-// A spec that bypassed admission may carry a containerless podTemplate.spec
-// with no redirect; validateMirror rejects it, and callers treat it as
-// non-serving.
-func (s *MirrorHTTPServiceSpec) Serving() bool {
-	return s != nil && len(s.PodTemplate.Spec.Containers) > 0
-}
-
-// RedirectActive reports the redirect target hostname and whether the http
-// service is in redirect mode (no serving podTemplate, a non-empty redirect).
-// Nil-safe like Serving.
-func (s *MirrorHTTPServiceSpec) RedirectActive() (string, bool) {
-	if s == nil || s.Serving() || s.Redirect == "" {
+// RedirectActive reports the publish-level redirect target and whether the
+// CR is in redirect mode. Presence is the only trigger — even a hostname that
+// bypassed admission validation activates the mode (validateMirror reports
+// the InvalidSpec; the mode itself is fail-safe: it serves nothing).
+// Nil-safe.
+func (s *MirrorServicesSpec) RedirectActive() (string, bool) {
+	if s == nil || s.Redirect == "" {
 		return "", false
 	}
 	return s.Redirect, true
 }
 
-// MirrorServicesSpec holds the fixed publish service keys of a Mirror. An
-// absent key is disabled; a present key is enabled — the "rsync" key must
-// carry a podTemplate.spec (CEL-enforced), the "http" key must carry either a
-// serving podTemplate.spec or a redirect (CEL-enforced on
-// MirrorHTTPServiceSpec, shared with ProxyMirror).
-// +kubebuilder:validation:XValidation:rule="!has(self.rsync) || has(self.rsync.podTemplate.spec)",message="podTemplate.spec is required when the rsync service key is declared"
-type MirrorServicesSpec struct {
-	// HTTP is the HTTP publish service (web server, git http-backend via
-	// fastcgi, ...). It owns the publish HTTPRoute when enabled, publishing the
-	// canonical /<mirror name> path plus any declared aliases — either by
-	// forwarding to the publish Deployment (serving mode) or by 302-redirecting
-	// every public path to the configured hostname (redirect mode).
-	HTTP *MirrorHTTPServiceSpec `json:"http,omitempty"`
-	// Rsync is the rsync publish service. It only gets a Deployment and a
-	// ClusterIP Service — no Gateway API route (a future RsyncRoute is out
-	// of scope), and no path concept, hence no aliases.
-	Rsync *MirrorServiceSpec `json:"rsync,omitempty"`
-}
-
-// AnyEnabled reports whether at least one publish service requests a
-// publication workload — a serving http service or rsync. A redirect-mode
-// http service routes without publishing content (no clone PVC, no
-// Deployment), so it does not count: the mirror is sync-only next to its
-// redirect route.
+// AnyEnabled reports whether at least one spec.publish key requests a
+// publication workload — a serving http service or rsync. An active
+// publish-level redirect suppresses all of them: the mirror publishes
+// nothing next to its redirect route (sync-only, like an absent services
+// object) until the redirect is removed.
 func (s MirrorServicesSpec) AnyEnabled() bool {
+	if _, redirecting := s.RedirectActive(); redirecting {
+		return false
+	}
 	return s.HTTP.Serving() || s.Rsync != nil
 }
 
@@ -283,14 +354,14 @@ type MirrorSpec struct {
 	Info    MirrorInfo        `json:"info"`
 	Sync    MirrorSyncSpec    `json:"sync"`
 	Storage MirrorStorageSpec `json:"storage"`
-	// Publish declares how the active snapshot clone is published, through
-	// the fixed keys "http" and "rsync" (see MirrorServicesSpec). With every
-	// key absent (including an entirely absent services object) the mirror
-	// is sync-only: synchronization produces a ready snapshot, without a clone
-	// PVC or publish Deployment/Service/HTTPRoute. An http key in redirect
-	// mode (no podTemplate, a redirect hostname) deploys nothing either: the
-	// publish HTTPRoute 302-redirects the public paths away while
-	// synchronization (and any rsync service) continues.
+	// Publish declares how the active snapshot clone is published: the
+	// cross-protocol declarations (aliases, redirect) plus the fixed keys
+	// "http" and "rsync" (see MirrorServicesSpec). With every key absent
+	// (and no redirect) the mirror is sync-only: synchronization produces a
+	// ready snapshot, without a clone PVC or publish
+	// Deployment/Service/HTTPRoute. An active publish-level redirect
+	// deploys nothing either: the publish HTTPRoute 302-redirects the
+	// public paths away while synchronization continues.
 	// +optional
 	Publish MirrorServicesSpec `json:"publish,omitempty"`
 }

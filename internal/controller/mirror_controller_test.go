@@ -1010,9 +1010,11 @@ func TestPublishSchemaInCRDs(t *testing.T) {
 				t.Fatal("podTemplate.spec.containers must carry the full corev1 schema")
 			}
 
-			// The declaration-time presence CEL rules: the http key admits
-			// either a serving podTemplate.spec or a redirect; the rsync key
-			// (validated at the services level) keeps requiring podTemplate.spec.
+			// The declaration-time presence CEL rule: a declared http key
+			// must carry a serving podTemplate.spec (the old either-or with
+			// a http-level redirect is gone — redirect moved to the publish
+			// level); the rsync key keeps requiring podTemplate.spec at the
+			// services level.
 			rules, _ := http["x-kubernetes-validations"].([]interface{})
 			messages := map[string]bool{}
 			for _, rule := range rules {
@@ -1022,11 +1024,11 @@ func TestPublishSchemaInCRDs(t *testing.T) {
 					}
 				}
 			}
-			if !messages["podTemplate.spec or redirect is required when the http service key is declared"] {
-				t.Fatalf("http either-or CEL rule missing, got %#v", rules)
+			if !messages["podTemplate.spec is required when the http service key is declared"] {
+				t.Fatalf("http podTemplate presence CEL rule missing, got %#v", rules)
 			}
 			// Only the Mirror CRD has an rsync key; its podTemplate presence
-			// rule moved to the services level.
+			// rule lives at the services level.
 			if crd == "mirrors.zjusct.io_mirrors.yaml" {
 				servicesRules, _ := services["x-kubernetes-validations"].([]interface{})
 				rsyncRule := false
@@ -1041,11 +1043,32 @@ func TestPublishSchemaInCRDs(t *testing.T) {
 					t.Fatalf("rsync podTemplate presence CEL rule missing, got %#v", servicesRules)
 				}
 			}
-			// The redirect field carries the PreciseHostname shape so its
-			// value maps onto the generated RequestRedirect filter verbatim.
-			redirect, _ := httpProperties["redirect"].(map[string]interface{})
+			// The publish-level declarations: the structured aliases (with
+			// the subset catalog identity) and the redirect hostname, which
+			// carries the PreciseHostname shape so its value maps onto the
+			// generated RequestRedirect filter verbatim.
+			aliases, ok := properties["aliases"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("publish.aliases schema missing, got %v", properties)
+			}
+			if maxItems, _ := aliases["maxItems"].(float64); maxItems != 8 {
+				t.Fatalf("publish.aliases maxItems = %v, want 8", aliases["maxItems"])
+			}
+			aliasItems, _ := aliases["items"].(map[string]interface{})
+			aliasProperties, _ := aliasItems["properties"].(map[string]interface{})
+			subset, ok := aliasProperties["subset"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("publish.aliases[].subset schema missing, got %v", aliasProperties)
+			}
+			subsetProperties, _ := subset["properties"].(map[string]interface{})
+			for _, field := range []string{"subpath", "cname", "description", "upstream"} {
+				if _, has := subsetProperties[field]; !has {
+					t.Fatalf("publish.aliases[].subset.%s schema missing, got %v", field, subsetProperties)
+				}
+			}
+			redirect, _ := properties["redirect"].(map[string]interface{})
 			if redirect == nil {
-				t.Fatalf("services.http.redirect schema missing, got %v", httpProperties)
+				t.Fatalf("publish.redirect schema missing, got %v", properties)
 			}
 			if pattern, _ := redirect["pattern"].(string); pattern != `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` {
 				t.Fatalf("redirect must carry the PreciseHostname pattern, got %v", redirect["pattern"])

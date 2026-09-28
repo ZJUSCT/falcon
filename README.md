@@ -338,36 +338,63 @@ spec:
     # 可选：默认 1
     # 校验（schema）：1–10
   publish:
-    # 可选；固定 key：http / rsync；key 出现 = 启用，不出现 = 禁用；
-    # 全禁用 = 纯同步镜像（保存就绪快照，跳过发布，不创建克隆 PVC）
-    # http 声明 podTemplate（服务模式）或 redirect（重定向模式），见「HTTP 重定向」
+    # 可选；协议 key（http / rsync）+ 跨协议声明（aliases、redirect）
+    # 协议 key 出现 = 启用，不出现 = 禁用；全部禁用且无 redirect = 纯同步镜像
+    # （保存就绪快照，跳过发布，不创建克隆 PVC）
+    # aliases 与 redirect 是与协议 key 无关的被动声明：协议按需消费 aliases
+    # （目前是 http 发布路由；未来 rsync 发布可映射为 module 别名）；
+    # redirect 存在时压制全部协议 key，见「别名与重定向」
+    aliases:
+      - path: /git/debian
+      # []MirrorAlias：额外公开路径前缀，用于补充 CR 名无法表达的合法路由，
+      # 例如大写字母（/AOSP）、多层路径（/git/linux.git）
+      # 只有 path 的普通别名：以 301 永久重定向至规范路径 /<CR 名>，
+      # 保留未匹配的路径后缀；发布容器只需处理规范路径。
+      # 重定向模式下则随规范路径一起重定向至目标主机，路径保持原样。
+      # 普通 alias 不进入 mirrorz.json。
+      # 带 subset 的子集别名：本镜像树内子目录的独立目录学条目——
+      # 301 至 /<CR 名>/<subpath>/<后缀>，并在 mirrorz.json 中输出独立条目
+      # （status 投影本 CR，见「映射到 MirrorZ」）。子集镜像与父镜像的
+      # 同步、存储、发布完全一体，无独立状态与生命周期。subpath 子树是否
+      # 真实存在于同步范围内由运维保证（控制器不检查数据）。
+      # 可选
+      # 校验（schema）：最多 8 项、path/subpath/cname 每项长度 1–200
+      # 校验（控制器）：path 无重复、不等于规范路径 /<CR 名>、逐项语法
+      # （/ 开头、不以 / 结尾、无 //、无空白；大小写敏感、允许大写）；
+      # subpath 为相对路径（无前导/尾随 /、无 //、无空白、无 . / .. 段）；
+      # 子集 cname（缺省取 path 去首 /）互不重复且不等于本 CR 的 cname
+      - path: /debian-nonfree
+        subset:
+          subpath: unofficial/non-free
+          # string：父镜像数据内的相对路径
+          # 必填
+          cname: debian-nonfree
+          # string：该子集条目的 MirrorZ cname
+          # 可选：缺省取 alias path 去掉首 /
+          description: Debian 含非自由固件的安装镜像
+          # string：子集条目的 desc；空则该条目省略 desc
+          # 可选
+          upstream: rsync://cdimage.debian.org/cdimage/unofficial/non-free/
+          # string：子集条目的 upstream（通常是该子目录的精确上游）；
+          # 空则该条目省略 upstream，不回退到本 CR 的全树上游
+          # 可选
+    redirect: mirrors.cernet.edu.cn
+    # string：重定向目标主机名（裸主机名，无 scheme/端口/路径）
+    # 可选；存在即进入重定向模式（优先级最高，压制全部协议 key），
+    # 见「别名与重定向」
+    # 校验（schema）：小写 DNS 主机名 1–253 字符（Gateway API PreciseHostname 同型）
+    # 校验（控制器）：镜像 schema Pattern，兜底绕过准入的 spec
     http:
-      # 形状 = MirrorServiceSpec + aliases + redirect
+      # 形状 = MirrorServiceSpec（replicas + podTemplate），恒为服务模式
       replicas: 1
       # int32：发布副本数
       # 可选：默认 1
       # 对应：发布 Deployment spec.replicas
       # 校验（schema）：≥1（不设上限）
-      aliases:
-        - /git/debian
-      # []MirrorHTTPAlias：额外路由，用于补充 CR 名无法表达的合法路由，例如：
-      # 大写字母（AOSP）、多层路径（/git/linux.git）
-      # 服务模式下以 301 永久重定向至规范路径 /<CR 名>，保留未匹配的路径后缀；
-      # 发布容器只需处理规范路径。重定向模式下则随规范路径一起重定向至目标主机，路径保持原样。
-      # 可选
-      # 校验（schema）：最多 8 项、每项 ≤200 字符
-      # 校验（控制器）：无重复、不等于规范路径 /<CR 名>、逐项语法（/ 开头、不以 / 结尾、
-      # 无 //、无空白；大小写敏感、允许大写）
-      redirect: mirrors.cernet.edu.cn
-      # string：重定向目标主机名（裸主机名，无 scheme/端口/路径）
-      # 可选；未声明 podTemplate 时启用重定向模式，见「HTTP 重定向」
-      # 校验（CEL）：podTemplate.spec 与 redirect 至少其一
-      # 校验（schema）：小写 DNS 主机名 1–253 字符（Gateway API PreciseHostname 同型）
-      # 校验（控制器）：镜像 schema Pattern，兜底绕过准入的 spec
       podTemplate:
         # PodTemplateSpec：发布 Deployment 的完整 PodTemplate，由运维人员声明全部工作负载字段
         # 对应：发布 Deployment spec.template
-        # 校验（CEL）：与 redirect 至少其一；声明后服务模式优先，redirect 被忽略
+        # 校验（CEL）：声明 http key 时 podTemplate.spec 必填
         # 校验（控制器）：至少一容器、第一容器至少一个 containerPort；volumes 不得含保留卷名 mirror-data；
         # 对其挂载必须 readOnly
         # Falcon 管理只读 mirror-data PVC 卷和控制器标签；不注入放置约束、安全设置、探针、端口、
@@ -518,15 +545,22 @@ spec:
       # 校验（控制器）：accessModes 至少一项，resources.requests.storage > 0
       # dataSource、dataSourceRef、selector、volumeName 不支持
   publish:
-    # 仅 http 一个 key（代理即 HTTP 发布者）；key 未出现 = 不部署负载，代理不对外发布
+    # http 一个协议 key（代理即 HTTP 发布者）+ 与 Mirror 相同的跨协议声明
+    # （aliases、redirect）；key 未出现且无 redirect = 不部署负载，代理不对外发布
+    aliases:
+      # []MirrorAlias：与 Mirror 相同，支持普通和子集 alias。
+      # 子集 alias 先 301 到 /<CR 名>/<subpath>，后续请求由父代理的
+      # HTTP backend 处理；复用父代理及其可选缓存，无独立工作负载。
+      - path: /PyPI
+    redirect: mirrors.cernet.edu.cn
+    # string：与 Mirror 相同的 publish 级重定向（存在即压制代理负载）
     http:
-      # 形状与 Mirror 相同（replicas、aliases、redirect、podTemplate；redirect 的
-      # 重定向模式与 CEL 规则亦同）
+      # 形状与 Mirror 相同（replicas + podTemplate，恒为服务模式）
       replicas: 1
       # 同 Mirror（略）
       podTemplate:
         # PodTemplateSpec：发布容器的完整声明
-        # 服务模式必填；校验（CEL）：podTemplate.spec 与 redirect 至少其一
+        # 声明 http key 时必填（CEL：podTemplate.spec）
         # 对应：发布 Deployment spec.template
         # 校验（控制器）：至少一容器、第一容器至少一个 containerPort
         # 以下仅示意控制器注入后的字段，不是用户输入；不得声明同名 volume。
@@ -562,7 +596,7 @@ status:
 
 Falcon 仅对 CRD 做基础校验，派生资源的校验由其他组件负责，Falcon 消费相关事件。例如：
 
-- Falcon 不对 `spec.publish.http.aliases` 与其他 Mirror 路径的重叠做校验，而是交给 Gateway 规范和具体实现。HTTPRoute 明确报告 `Accepted=False` 或 `ResolvedRefs=False` 时，Falcon 设置 `Degraded=True/HTTPRouteRejected` 并保留网关的 reason/message 上下文。
+- Falcon 不对 `spec.publish.aliases` 与其他 Mirror 路径的重叠做校验，而是交给 Gateway 规范和具体实现。HTTPRoute 明确报告 `Accepted=False` 或 `ResolvedRefs=False` 时，Falcon 设置 `Degraded=True/HTTPRouteRejected` 并保留网关的 reason/message 上下文。
 - Falcon 不预检派生资源名长度。创建或更新派生资源被 apiserver 以 `Invalid` 拒绝时，Falcon 将原始错误转述到父 CR 的 `Degraded/DerivedResourceInvalid` condition，并记录同名 Warning Event。
 
 #### 资源和术语
@@ -640,7 +674,7 @@ ProxyMirror 不存在同步和发布流程。Falcon 按照其配置创建好相�
     - Job 结束，记录 Job 结果并释放并发配额
     - 成功后创建快照，等待 `readyToUse=true`
     - 保存 `lastSnapshot`（启用发布服务时还包括 `publication.snapshot`），交付 readyToUse 的快照作为本次同步的产物
-- 发布：没有配置 `publish`（或 http 处于重定向模式）时直接跳过
+- 发布：没有配置启用的发布服务（协议 key 全部禁用，或 publish 级 redirect 处于激活状态）时直接跳过
     - 接收同步流程交付的就绪快照
     - 克隆 PVC
     - 创建/更新发布 Deployment
@@ -653,11 +687,11 @@ ProxyMirror 不存在同步和发布流程。Falcon 按照其配置创建好相�
 - 成功的同步触发发布
 - 未完成的发布阻塞下一轮同步，避免覆盖待发布的数据或积累更多代次。
 
-没有进行中的同步或发布流程时，控制器仍维护已启用的发布 Deployment、Service 和 HTTPRoute；重定向模式的 http 仅维护其路由（见「HTTP 重定向」）。
+没有进行中的同步或发布流程时，控制器仍维护已启用的发布 Deployment、Service 和 HTTPRoute；激活 publish 级 redirect 的镜像仅维护其重定向路由（见「别名与重定向」）。
 
 其他边边角角的 case：
 
-- 添加发布服务：直接使用 `lastSnapshot` 启动发布，无需先做一次同步，不受同步暂停影响。
+- 添加发布服务：直接使用 `lastSnapshot` 启动发布，无需先做一次同步，不受同步暂停影响。移除 redirect 同样走此路径——被压制的服务声明原样恢复。
 - 移除发布服务：尚未完成的旧 Pod 清理仍阻塞下一轮同步。
 
 #### 镜像的状态
@@ -713,24 +747,28 @@ Falcon 不负责监控 Workload 的 ConfigMap/Secret 变更并进行重启。Fal
 
 #### 别名与重定向
 
-`publish.http.aliases` 的路径将被 301 重定向至 CR 名规范路径。
+`publish.aliases` 是与协议无关的公开路径声明（历史上位于 `publish.http.aliases`，为将来 rsync 等协议复用而提升至 publish 层）。每个 alias 在服务模式下由网关以 301 `RequestRedirect`（`ReplacePrefixMatch`）改写：
 
-`publish.http.redirect` 是 http 服务的另一种启用方式，设计用于**临时运维**：例如在节点间迁移镜像数据时，把该镜像的全部 HTTP 流量临时导向另一个镜像站，迁完再切回服务模式。声明一个裸主机名即可启用：
+- 普通 alias：`/<alias>/<后缀>` → `/<CR 名>/<后缀>`。用于 CR 名无法表达的路径：大写字母（/AOSP）、多层路径（/git/linux.git）。普通 alias 不进入 mirrorz.json。
+- 子集 alias（带 `subset`）：`/<alias>/<后缀>` → `/<CR 名>/<subpath>/<后缀>`。它是本镜像树内一个子目录的独立目录学条目——典型例子是同步了完整 `debian-cdimage` 的同时以 `debian-nonfree` 这个 MirrorZ cname 对外提供 `unofficial/non-free` 子树。子集条目与父镜像的同步、存储、发布完全一体（无独立数据、无独立状态），在 mirrorz.json 中投影父镜像的 status，详见「映射到 MirrorZ」。`subpath` 指向的子树是否真实存在于同步范围内由运维保证（控制器不检查数据内容；例如父镜像同步参数 exclude 了该子树时，子集条目会 404）。
+
+ProxyMirror 同样支持子集 alias：例如代理 `debian-cdimage` 声明 `/debian-nonfree`、`subpath: unofficial/non-free` 后，网关先 301 到 `/debian-cdimage/unofficial/non-free`，后续请求由父代理的 HTTP backend 处理。子集复用父代理和可选缓存，不创建独立工作负载或 PVC；运维需确保上游和代理路径配置能够提供该子树。MirrorZ 中子集条目继承父代理的 `C`（有缓存）或 `R`（无缓存）状态、就绪条件，不输出 size。
+
+`publish.redirect` 是 publish 级的重定向开关，设计用于**临时运维**：例如在节点间迁移镜像数据时，把该镜像的全部流量临时导向另一个镜像站，迁完再切回。声明一个裸主机名即激活：
 
 ```yaml
 publish:
-  http:
-    redirect: mirrors.cernet.edu.cn
+  redirect: mirrors.cernet.edu.cn
 ```
 
-重定向模式的镜像不会被 mirroz.json 收录。重定向包括 `aliases` 指定的路径。
+redirect 的优先级最高：**存在即生效**，压制全部协议 key——`publish.http`（含已声明的 podTemplate）与 `publish.rsync` 的 Deployment/Service 视同被移除而删除，不保留热备 Pod；rsync 协议无法跟随重定向，停服是「流量全部导向别站」的唯一实现。被压制的声明原样保留，GitOps 下的临时导流因此只是加/删一个字段的 diff。同步照旧进行，`status.activeSnapshot`/`activePVC` 等数据代次记录不动；移除 redirect 后复用「添加发布服务」路径，直接用 `lastSnapshot` 恢复发布，无需重新同步。
 
-如果 `publish.http.podTemplate` 也存在，则 redirect 不生效。
+重定向模式的镜像（含其全部子集条目）不会被 mirrorz.json 收录：302 导向别站不是本站在提供该镜像。
 
 工作方式：
 
-- 控制器不部署任何工作负载，只把发布 HTTPRoute（`<base>-publish`）的规则改写为 Gateway API 的 `RequestRedirect` 过滤器。
-- 过滤器只设置 `hostname` 和固定的 `statusCode: 302`，scheme 与 path 留空：网关按规范保持请求协议（http→http，https→https），并原样复用请求路径。`/debian/pool/x` 因此重定向到 `http(s)://mirrors.cernet.edu.cn/debian/pool/x`。
+- 控制器不部署任何工作负载，只把发布 HTTPRoute（`<base>-publish`）的规则改写为 Gateway API 的 `RequestRedirect` 过滤器，匹配规范路径与全部 aliases。
+- 过滤器只设置 `hostname` 和固定的 `statusCode: 302`，scheme 与 path 留空：网关按规范保持请求协议（http→http，https→https），并原样复用请求路径。`/debian/pool/x`（含 `/debian-nonfree/pool/x` 这类子集路径）因此重定向到 `http(s)://mirrors.cernet.edu.cn` 上的同路径。目标站需提供相同的路径布局，这是选择 redirect 目标时的运维责任。
 
 #### 镜像的删除与数据保留
 
@@ -759,9 +797,9 @@ Falcon 不直接管理 PV 或后端数据；PVC 消失不表示后端卷已完�
 MirrorZ 字段与 Falcon 字段的映射：
 
 ```jsonc
-// 收录条件：spec.publish.http 处于服务模式（声明了 podTemplate），且当前
-// metadata.generation 对应的 Ready condition 为 True。
-// 重定向模式的条目不收录：302 导向别站不是本站在提供该镜像。
+// 收录条件：spec.publish.http 处于服务模式（声明了 podTemplate）且未被
+// publish.redirect 压制，且当前 metadata.generation 对应的 Ready condition 为 True。
+// 重定向（含被压制的服务声明）不收录：302 导向别站不是本站在提供该镜像。
 // 排序：按 cname 字典序。
 {
   "version": 1.7,
@@ -774,7 +812,7 @@ MirrorZ 字段与 Falcon 字段的映射：
   },
   "info": [],   // 分类视图，Falcon 恒为空数组
   "mirrors": [
-    // 一个 Mirror 或 ProxyMirror 对应一个条目：
+    // 一个 Mirror 或 ProxyMirror 对应一个条目；其每个子集 alias 再展开一个条目：
     {
       "cname": "spec.info.cname（未设置时使用 metadata.name）",
       "desc": "spec.info.description", // 普通字符串，为空则省略
@@ -782,6 +820,15 @@ MirrorZ 字段与 Falcon 字段的映射：
       "status": "", // 见下表
       "upstream": "spec.info.upstream",
       "size": "status.sizeBytes" // 字节转可读格式（1024 进制，两位小数）；未知则省略
+    },
+    {
+      // 子集 alias 的条目（Mirror / ProxyMirror 均支持）：
+      "cname": "subset.cname（未设置时取 alias path 去首 /）",
+      "desc": "subset.description", // 为空则省略
+      "url": "site.url + alias path（如 .../debian-nonfree）",
+      "status": "与父条目逐字相同", // Mirror 投影同步状态，ProxyMirror 投影 C/R 状态
+      "upstream": "subset.upstream" // 为空则省略，不回退父条目
+      // 无 size：父条目的 sizeBytes 是整树用量，对子集不成立
     }
     // "help" 与 "disable" 字段 Falcon 暂不输出（TODO）
   ]
@@ -800,7 +847,7 @@ MirrorZ 字段与 Falcon 字段的映射：
 
 其他：
 
-- 条目 url 恒为 CR 名，`publish.http.aliases` 别名不出现在 mirrorz 输出中。
+- CR 条目 url 恒为 CR 名。普通 alias 不出现在 mirrorz 输出中；子集 alias 以自己的 cname/path 出现为独立条目（见上）。子集条目的收录与消失完全跟随父条目。
 
 ### zfs-agent
 
@@ -896,7 +943,7 @@ pre-commit 为可选的提交入口：安装后运行 `pre-commit install`，提
 make e2e
 ```
 
-`make e2e` 在本地 Docker 上创建一个单节点 [kind](https://kind.sigs.k8s.io/) 集群：Envoy Gateway（v1.9.0，helm chart——其 release `install.yaml` 不含 GatewayClass）与 volume snapshot（v8.6.0）、hostpath CSI（v1.18.0，上游 URL 由 `scripts/e2e/cluster` kustomization 引用并钉版本）一键装齐后，用本地构建的 `falcon:e2e` 镜像部署 Chart，然后以 demo Mirror 断言完整链路：同步 → 快照 → 发布 → 路由就绪（`Ready`）→ 网关取回内容 → `mirrorz.json` 收录。装配由 `scripts/e2e/run.sh` 负责，断言用 [chainsaw](https://kyverno.github.io/chainsaw/) 声明式编写（`tests/e2e/`：apply → 断言资源状态 → 校验命令输出），经 NodePort 直连 Envoy 数据面；测试结束的清理会删除 demo Mirror，顺带验证删除流程。宿主机需求与检查相同（Git、Make、Docker；kind、kubectl、chainsaw 等钉在 `scripts/checks/Dockerfile` 的 `e2e-tools` target 中，经 Docker socket 操作宿主 daemon）。镜像不推送 registry，直接 `kind load` 进节点。首次运行需拉取基础镜像，约需数分钟。
+`make e2e` 在本地 Docker 上创建一个单节点 [kind](https://kind.sigs.k8s.io/) 集群：Envoy Gateway（v1.9.0，helm chart——其 release `install.yaml` 不含 GatewayClass）与 volume snapshot（v8.6.0）、hostpath CSI（v1.18.0，上游 URL 由 `scripts/e2e/cluster` kustomization 引用并钉版本）一键装齐后，用本地构建的 `falcon:e2e` 镜像部署 Chart，然后以 demo Mirror 断言完整链路：同步 → 快照 → 发布 → 路由就绪（`Ready`）→ 网关取回内容 → `mirrorz.json` 收录。场景还验证普通及子集 alias 的 301、ProxyMirror 子集经真实代理 backend 获取内容、Reloader 配置更新，以及启用 302 重定向期间继续同步、移除重定向后发布最新快照。装配由 `scripts/e2e/run.sh` 负责，断言用 [chainsaw](https://kyverno.github.io/chainsaw/) 声明式编写（`tests/e2e/`：apply → 断言资源状态 → 校验命令输出），经 NodePort 直连 Envoy 数据面；测试结束的清理会删除 demo Mirror，顺带验证删除流程。宿主机需求与检查相同（Git、Make、Docker；kind、kubectl、chainsaw 等钉在 `scripts/checks/Dockerfile` 的 `e2e-tools` target 中，经 Docker socket 操作宿主 daemon）。镜像不推送 registry，直接 `kind load` 进节点。首次运行需拉取基础镜像，约需数分钟。
 
 e2e 是独立入口，不并入 `make check`；CI 中亦为独立 job，失败时诊断（集群对象、控制器与同步 Job 日志、kind 节点日志）导出到 `.e2e-dump/` 并作为 artifact 上传。
 

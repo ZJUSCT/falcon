@@ -72,9 +72,10 @@ func (r *ProxyMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if errs := validateProxyMirror(proxy); len(errs) > 0 {
 		message := errs.ToAggregate().Error()
 		logger.Info("ProxyMirror specification is invalid", "errors", message)
+		_, redirecting := proxy.Spec.Publish.RedirectActive()
 		return r.patchStatus(ctx, proxy, func() {
 			proxy.Status.ObservedGeneration = proxy.Generation
-			setProxyCondition(proxy, conditionReady, conditionStatus(proxy.Spec.Publish.HTTP != nil && proxyWasReady(proxy)), "InvalidSpec", message)
+			setProxyCondition(proxy, conditionReady, conditionStatus((proxy.Spec.Publish.HTTP != nil || redirecting) && proxyWasReady(proxy)), "InvalidSpec", message)
 			setProxyCondition(proxy, conditionProgressing, metav1.ConditionFalse, "InvalidSpec", message)
 			setProxyCondition(proxy, conditionDegraded, metav1.ConditionTrue, "InvalidSpec", message)
 		})
@@ -82,7 +83,11 @@ func (r *ProxyMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.ensureCachePVC(ctx, proxy); err != nil {
 		return ctrl.Result{}, err
 	}
-	if proxy.Spec.Publish.HTTP == nil {
+	// An absent http key disables the endpoint — unless a publish-level
+	// redirect is active: its route is the entire endpoint then, with or
+	// without any protocol key.
+	_, redirecting := proxy.Spec.Publish.RedirectActive()
+	if proxy.Spec.Publish.HTTP == nil && !redirecting {
 		drained, err := publishPodsDrained(ctx, r.Client, proxy)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -107,21 +112,15 @@ func (r *ProxyMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		})
 	}
 
-	// A redirect-mode http key deploys no workload: the redirect route is the
-	// entire endpoint. The optional cache PVC stays maintained above, so a
-	// temporary redirect back to serving reuses the cached data.
-	if hostname, redirecting := proxy.Spec.Publish.HTTP.RedirectActive(); redirecting {
+	// An active publish-level redirect deploys no workload: the redirect
+	// route is the entire endpoint. The optional cache PVC stays maintained
+	// above, so a temporary redirect back to serving reuses the cached data.
+	if hostname, ok := proxy.Spec.Publish.RedirectActive(); ok {
 		return r.reconcileProxyRedirect(ctx, proxy, hostname)
 	}
 
 	// A ProxyMirror has no paused concept: the reconciler always ensures the
-	// declared HTTP service; removing services.http takes it offline.
-	// A parked redirect next to a serving podTemplate is legal but inert:
-	// say so, so a stale field cannot confuse an operator mid-incident.
-	if http := proxy.Spec.Publish.HTTP; r.Recorder != nil && http.Serving() && http.Redirect != "" {
-		r.Recorder.Event(proxy, corev1.EventTypeNormal, "RedirectIgnored",
-			"publish.http.redirect is ignored while podTemplate serves")
-	}
+	// declared HTTP service; removing publish.http takes it offline.
 	deploymentReady, err := r.ensureProxyPublish(ctx, proxy)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -189,11 +188,16 @@ func (r *ProxyMirrorReconciler) patchStatus(ctx context.Context, proxy *mirrorv1
 	return r.patchStatusWithResult(ctx, proxy, ctrl.Result{}, mutate)
 }
 
-// reconcileProxyRedirect drives a redirect-mode ProxyMirror: no Deployment or
-// Service exists, so the redirect publish HTTPRoute is the entire endpoint.
-// Its gateway acceptance (plus draining of any removed serving workloads)
-// becomes Ready; rejections become Degraded, like the serving path.
+// reconcileProxyRedirect drives a ProxyMirror under an active publish-level
+// redirect: no Deployment or Service exists, so the redirect publish
+// HTTPRoute is the entire endpoint. Its gateway acceptance (plus draining of
+// the suppressed workloads) becomes Ready; rejections become Degraded, like
+// the serving path.
 func (r *ProxyMirrorReconciler) reconcileProxyRedirect(ctx context.Context, proxy *mirrorv1alpha1.ProxyMirror, hostname string) (ctrl.Result, error) {
+	if r.Recorder != nil && proxy.Spec.Publish.HTTP.Serving() {
+		r.Recorder.Event(proxy, corev1.EventTypeNormal, "PublishSuppressed",
+			"spec.publish.redirect is active: the proxy workload is suppressed")
+	}
 	if err := ensureReadyProxyRoute(ctx, r, proxy); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -260,23 +264,21 @@ func setProxyCondition(proxy *mirrorv1alpha1.ProxyMirror, conditionType string, 
 func validateProxyMirror(proxy *mirrorv1alpha1.ProxyMirror) field.ErrorList {
 	path := field.NewPath("spec")
 	var errs field.ErrorList
-	// Only a DECLARED http service is validated (an absent key may park
-	// nothing — absent = disabled). It either serves or redirects; the CRD
-	// enforces the either-or at admission (CEL on the shared
-	// MirrorHTTPServiceSpec), these checks keep the InvalidSpec path complete
-	// for specs that bypassed it.
-	if http := proxy.Spec.Publish.HTTP; http != nil {
-		httpPath := path.Child("publish", "http")
-		switch {
-		case http.Serving():
-			errs = append(errs, validatePublishPodTemplate(&http.PodTemplate,
-				httpPath.Child("podTemplate"), ProxyCacheVolumeName)...)
-		case http.Redirect == "":
-			errs = append(errs, field.Required(httpPath, "must declare a serving podTemplate (spec.containers) or a redirect"))
-		default:
-			errs = append(errs, validateRedirectHostname(http.Redirect, httpPath.Child("redirect"))...)
-		}
-		errs = append(errs, validateHTTPAliases(http, proxy.Name, httpPath.Child("aliases"))...)
+	publish := proxy.Spec.Publish
+	publishPath := path.Child("publish")
+	// Aliases share the Mirror rules: subsets select a subtree served by
+	// the proxy backend, with or without a local cache.
+	if publish.Redirect != "" {
+		errs = append(errs, validateRedirectHostname(publish.Redirect, publishPath.Child("redirect"))...)
+	}
+	errs = append(errs, validateAliases(publish.Aliases, proxy.Name, proxy.Spec.Info.CName, publishPath.Child("aliases"))...)
+	// Only a DECLARED http service is validated (an absent key is disabled).
+	// The CRD enforces the serving podTemplate.spec presence at admission;
+	// these checks keep the InvalidSpec path complete for specs that
+	// bypassed it.
+	if publish.HTTP != nil {
+		errs = append(errs, validatePublishPodTemplate(&publish.HTTP.PodTemplate,
+			publishPath.Child("http", "podTemplate"), ProxyCacheVolumeName)...)
 	}
 	if proxyCacheEnabled(proxy) {
 		cachePath := path.Child("cache", "pvcTemplate")

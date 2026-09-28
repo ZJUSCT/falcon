@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-proxy-config
+  namespace: mirror
+data:
+  default.conf: |
+    proxy_cache_path /var/cache/proxy levels=1:2 keys_zone=demo:1m;
+    server {
+      listen 80;
+      location /proxy-demo/ {
+        proxy_pass http://demo-publish-http/demo/;
+        proxy_cache demo;
+        proxy_cache_valid 200 1m;
+        add_header X-Falcon-E2E-Proxy true always;
+      }
+    }
+---
+apiVersion: mirrors.zjusct.io/v1alpha1
+kind: ProxyMirror
+metadata:
+  name: proxy-demo
+  namespace: mirror
+spec:
+  info:
+    upstream: http://demo-publish-http/demo/
+  cache:
+    pvcTemplate:
+      storageClassName: falcon-e2e-publish
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: 1Gi
+  publish:
+    aliases:
+      - path: /proxy-subset
+        subset:
+          subpath: subset
+    http:
+      podTemplate:
+        spec:
+          containers:
+            - name: nginx
+              image: nginx:stable-alpine
+              ports:
+                - containerPort: 80
+              volumeMounts:
+                - name: config
+                  mountPath: /etc/nginx/conf.d
+                  readOnly: true
+                - name: proxy-cache
+                  mountPath: /var/cache/proxy
+              readinessProbe:
+                httpGet:
+                  path: /proxy-demo/index.html
+                  port: 80
+          volumes:
+            - name: config
+              configMap:
+                name: demo-proxy-config

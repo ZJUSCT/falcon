@@ -245,6 +245,32 @@ func entryURL(baseURL, name string) string {
 	return strings.TrimRight(baseURL, "/") + "/" + name
 }
 
+// subsetEntryURL builds a subset alias entry URL. The alias path already
+// carries its leading slash, so it replaces the name join of entryURL.
+func subsetEntryURL(baseURL, path string) string {
+	return strings.TrimRight(baseURL, "/") + path
+}
+
+// subsetEntries projects the parent's status onto each subset's catalog
+// identity. A subset shares its parent's publication or proxy backend; it
+// has no separately measured size.
+func subsetEntries(baseURL, status string, aliases []mirrorv1alpha1.MirrorAlias) []mirrorzMirror {
+	var entries []mirrorzMirror
+	for _, alias := range aliases {
+		if alias.Subset == nil {
+			continue
+		}
+		entries = append(entries, mirrorzMirror{
+			CName:    alias.CatalogName(),
+			URL:      subsetEntryURL(baseURL, alias.Path),
+			Status:   status,
+			Desc:     alias.Subset.Description,
+			Upstream: alias.Subset.Upstream,
+		})
+	}
+	return entries
+}
+
 // mirrorzSize renders a byte count as the human-readable string the MirrorZ
 // format expects for mirrors[].size (the spec shows "size": "596G" and its
 // frontend schema types the field as string — it is not a byte integer).
@@ -309,6 +335,9 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 		// generation. Sync-only, disabled, stale, unhealthy and redirect-mode
 		// endpoints are omitted so MirrorZ consumers are never directed to
 		// them — a 302 away from this site is not this site serving.
+		if _, redirecting := m.Spec.Publish.RedirectActive(); redirecting {
+			continue
+		}
 		if !m.Spec.Publish.HTTP.Serving() || !readyForCurrentGeneration(m.Status.Conditions, m.Generation) {
 			continue
 		}
@@ -324,9 +353,13 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 			Upstream: m.Spec.Info.Upstream,
 			Size:     mirrorzSize(m.Status.SizeBytes),
 		})
+		entries = append(entries, subsetEntries(baseURL, status, m.Spec.Publish.Aliases)...)
 	}
 	for i := range proxies.Items {
 		p := &proxies.Items[i]
+		if _, redirecting := p.Spec.Publish.RedirectActive(); redirecting {
+			continue
+		}
 		if !p.Spec.Publish.HTTP.Serving() || !readyForCurrentGeneration(p.Status.Conditions, p.Generation) {
 			continue
 		}
@@ -341,6 +374,7 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 			Desc:     p.Spec.Info.Description,
 			Upstream: p.Spec.Info.Upstream,
 		})
+		entries = append(entries, subsetEntries(baseURL, status, p.Spec.Publish.Aliases)...)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].CName < entries[j].CName })
 
