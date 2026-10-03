@@ -444,7 +444,10 @@ type MirrorStatus struct {
 	// ActiveSnapshot is the VolumeSnapshot the ActivePVC was cloned from.
 	ActiveSnapshot string                   `json:"activeSnapshot,omitempty"`
 	CurrentSync    *MirrorCurrentSyncStatus `json:"currentSync,omitempty"`
-	NextSyncAt     *metav1.Time             `json:"nextSyncAt,omitempty"`
+	// NextSyncAt is the next automatic synchronization occurrence. Its phase
+	// is assigned from the fleet's aggregate interval rate and remains stable
+	// across periodic runs; manual requests do not move it.
+	NextSyncAt *metav1.Time `json:"nextSyncAt,omitempty"`
 	// ConsecutiveFailures counts failed synchronization Jobs since the last
 	// successful Job. It drives the failure retry cadence (retryInterval
 	// below failureRetryLimit, interval afterwards) and resets to zero on

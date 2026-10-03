@@ -158,8 +158,12 @@ func TestCancellationDrainsWritersAndRetainsPublication(t *testing.T) {
 			if m.Status.CurrentSync != nil || m.Status.ActivePVC != "old-publication" || !m.Status.LastSuccessfulSyncAt.Equal(&previous) || m.Status.ConsecutiveFailures != 2 || r.SyncLimiter.Held() != 0 {
 				t.Fatalf("cancellation damaged state: %#v", m.Status)
 			}
-			if m.Status.LastAttempt.Phase != mirrorv1alpha1.SyncPhaseCancelled || !m.Status.NextSyncAt.Equal(timePtr(now.Add(time.Minute+m.Spec.Sync.Interval.Duration))) {
-				t.Fatal("cancellation must acknowledge request and use regular interval")
+			if m.Status.LastAttempt.Phase != mirrorv1alpha1.SyncPhaseCancelled {
+				t.Fatal("cancellation must acknowledge request")
+			}
+			expected, err := r.planAutomaticSync(t.Context(), m, now.Add(time.Minute))
+			if err != nil || !m.Status.NextSyncAt.Equal(timePtr(expected)) {
+				t.Fatalf("cancellation must preserve the automatic phase: got %v want %v (err %v)", m.Status.NextSyncAt, expected, err)
 			}
 			want := mirrorv1alpha1.SyncPhaseSucceeded
 			if started {
@@ -249,8 +253,11 @@ func TestInvalidRequestDoesNotTurnScheduledWorkIntoManualWork(t *testing.T) {
 	reconcile(t, t.Context(), r, req) // discard invalid request
 	reconcile(t, t.Context(), r, req)
 	m = getMirror(t, t.Context(), c, req.NamespacedName)
-	if m.Status.CurrentSync == nil || m.Status.CurrentSync.Manual {
+	if m.Status.CurrentSync != nil && m.Status.CurrentSync.Manual {
 		t.Fatal("invalid annotation incorrectly made bootstrap manual")
+	}
+	if m.Status.NextSyncAt == nil {
+		t.Fatal("bootstrap automatic synchronization was not scheduled")
 	}
 	m.SetSyncPaused(true)
 	if err := c.Update(t.Context(), m); err != nil {
@@ -501,11 +508,11 @@ func TestResumeHonorsScheduleAndRetainsPausedSpecEdits(t *testing.T) {
 			r = &MirrorReconciler{Client: c, Scheme: testScheme(t), Config: testConfig(), Now: func() time.Time { return now }}
 			reconcile(t, t.Context(), r, req)
 			m = getMirror(t, t.Context(), c, req.NamespacedName)
-			wantStart := tc.editSpec || tc.due
+			wantStart := tc.due
 			if (m.Status.CurrentSync != nil) != wantStart {
 				t.Fatalf("resume should start=%v: %#v", wantStart, m.Status)
 			}
-			if !wantStart && (!m.Status.NextSyncAt.Equal(initialNext) || m.Status.LastAcceptedSpecHash != initialHash) {
+			if !wantStart && !tc.editSpec && (!m.Status.NextSyncAt.Equal(initialNext) || m.Status.LastAcceptedSpecHash != initialHash) {
 				t.Fatal("resume changed schedule or accepted configuration")
 			}
 			if tc.editSpec && m.Status.LastAcceptedSpecHash == initialHash {

@@ -106,6 +106,7 @@ func assertMirrorZLifecycleStatus(t *testing.T, c client.Client, want string) {
 
 func TestSuccessfulJobRequiresCompletionBeforeSnapshot(t *testing.T) {
 	mirror := testMirror()
+	mirror.Annotations = map[string]string{SyncRequestAnnotation: "true"}
 	scheme := testScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &batchv1.Job{}).WithObjects(mirror).Build()
 	r := &MirrorReconciler{Client: c, Scheme: scheme, Config: testConfig(), SyncLimiter: NewSyncLimiter(0)}

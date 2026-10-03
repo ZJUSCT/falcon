@@ -223,6 +223,7 @@ func TestPublishActivationRecordsSizeBytes(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 31, 18, 0, 0, 0, time.UTC)
 	mirror := testMirror()
+	mirror.Annotations = map[string]string{SyncRequestAnnotation: "true"}
 	scheme := testScheme(t)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).

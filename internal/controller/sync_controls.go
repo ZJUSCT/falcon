@@ -73,6 +73,15 @@ func (r *MirrorReconciler) reconcileCancellation(ctx context.Context, mirror *mi
 		}
 	}
 	now := r.now()
+	var next time.Time
+	if mirror.Status.NextSyncAt != nil {
+		next = advanceAutomaticSync(mirror.Status.NextSyncAt.Time, mirror.Spec.Sync.Interval.Duration, now)
+	} else {
+		next, err = r.planAutomaticSync(ctx, mirror, now)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	_, err = r.patchStatusWithResult(ctx, mirror, ctrl.Result{}, func() {
 		message := "synchronization cancelled by operator"
 		mirror.Status.LastAttempt = &mirrorv1alpha1.MirrorSyncStatus{JobName: jobName, Phase: mirrorv1alpha1.SyncPhaseCancelled, StartedAt: current.QueuedAt.DeepCopy(), FinishedAt: timePtr(now), Message: message}
@@ -81,7 +90,7 @@ func (r *MirrorReconciler) reconcileCancellation(ctx context.Context, mirror *mi
 		}
 		queueRequestCleanup(mirror, current.Manual, true)
 		mirror.Status.CurrentSync = nil
-		mirror.Status.NextSyncAt = timePtr(now.Add(mirror.Spec.Sync.Interval.Duration))
+		mirror.Status.NextSyncAt = timePtr(next)
 		if mirror.SyncPaused() && (current.StartedAt != nil || mirror.Status.PausedAt == nil) {
 			mirror.Status.PausedAt = timePtr(now)
 		}
@@ -95,7 +104,7 @@ func (r *MirrorReconciler) reconcileCancellation(ctx context.Context, mirror *mi
 	if mirror.Status.RequestCleanup != nil {
 		return r.reconcileRequestCleanup(ctx, mirror)
 	}
-	return ctrl.Result{RequeueAfter: mirror.Spec.Sync.Interval.Duration}, nil
+	return ctrl.Result{RequeueAfter: next.Sub(now)}, nil
 }
 
 // Rebuild occupied slots from live Jobs before admitting work, including Jobs

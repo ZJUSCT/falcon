@@ -35,6 +35,7 @@ func TestAtomicPublicationUsesStableSyncPVCAndSnapshotClone(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 25, 18, 0, 0, 0, time.UTC)
 	mirror := testMirror()
+	mirror.Annotations = map[string]string{SyncRequestAnnotation: "true"}
 	mirror.CreationTimestamp = metav1.NewTime(now.Add(-time.Hour))
 	scheme := testScheme(t)
 	fakeClient := fake.NewClientBuilder().
@@ -898,6 +899,7 @@ func TestSyncPVCPrebindsVolumeNameButPublishCloneDropsIt(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
 	mirror := testMirror()
+	mirror.Annotations = map[string]string{SyncRequestAnnotation: "true"}
 	mirror.Spec.Storage.PVCSpec.VolumeName = "pvc-migrated-from-old-instance"
 	scheme := testScheme(t)
 	fakeClient := fake.NewClientBuilder().
@@ -1168,6 +1170,7 @@ func TestSyncPodTemplateDefaultsAndInjection(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
 	mirror := testMirror()
+	mirror.Annotations = map[string]string{SyncRequestAnnotation: "true"}
 	mirror.Finalizers = []string{MirrorFinalizer}
 	scheme := testScheme(t)
 	fakeClient := fake.NewClientBuilder().

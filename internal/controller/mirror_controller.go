@@ -246,10 +246,44 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 
 	now := r.now()
 	specDue := mirror.Status.LastAcceptedSpecHash != "" && mirror.Status.LastAcceptedSpecHash != acceptedSpecHash
-	bootstrapDue := mirror.Status.ActivePVC == "" && mirror.Status.LastAttempt == nil
+	// A missing occurrence also covers Mirrors created before nextSyncAt was
+	// introduced. They may already have a published snapshot or failed
+	// attempts, but still need one stable automatic phase after an upgrade.
+	scheduleMissing := mirror.Status.NextSyncAt == nil
 	scheduleDue := mirror.Status.NextSyncAt != nil && !mirror.Status.NextSyncAt.After(now)
 
-	if manualDue || specDue || bootstrapDue || scheduleDue {
+	// Automatic work is planned before it is started. Accepting the hash here
+	// records that the new configuration has been scheduled, rather than
+	// treating a configuration update as an immediate synchronization request.
+	if !manualDue && (specDue || scheduleMissing) {
+		planned, err := r.planAutomaticSync(ctx, mirror, now)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		planned = planned.Truncate(time.Second)
+		if !planned.After(now) {
+			planned = planned.Add(mirror.Spec.Sync.Interval.Duration)
+		}
+		return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: planned.Sub(now)}, func() {
+			mirror.Status.ObservedGeneration = mirror.Generation
+			mirror.Status.LastAcceptedSpecHash = acceptedSpecHash
+			mirror.Status.NextSyncAt = timePtr(planned)
+			applyMirrorConditions(mirror, publication, "SynchronizationScheduled", "automatic synchronization has been scheduled", nil)
+		})
+	}
+
+	// Do not launch a stale automatic occurrence immediately after a long
+	// pause, publication rollout, or controller outage. One missed period is
+	// represented by the next future occurrence instead of a catch-up burst.
+	if !manualDue && scheduleDue && now.Sub(mirror.Status.NextSyncAt.Time) > automaticScheduleGrace {
+		planned := advanceAutomaticSync(mirror.Status.NextSyncAt.Time, mirror.Spec.Sync.Interval.Duration, now)
+		return r.patchStatusWithResult(ctx, mirror, ctrl.Result{RequeueAfter: planned.Sub(now)}, func() {
+			mirror.Status.NextSyncAt = timePtr(planned)
+			applyMirrorConditions(mirror, publication, "SynchronizationRescheduled", "skipping missed automatic synchronization periods", nil)
+		})
+	}
+
+	if manualDue || scheduleDue {
 		return r.startSync(ctx, mirror, manualDue, publication)
 	}
 
@@ -321,7 +355,6 @@ func (r *MirrorReconciler) startSync(ctx context.Context, mirror *mirrorv1alpha1
 			Manual:   manual,
 		}
 		mirror.Status.PausedAt = nil
-		mirror.Status.NextSyncAt = nil
 		applyMirrorConditions(mirror, publication, "SynchronizationStarted", "preparing synchronization run", nil)
 	})
 }
@@ -477,7 +510,11 @@ func (r *MirrorReconciler) observeSyncJob(ctx context.Context, mirror *mirrorv1a
 			mirror.Status.LastAttempt = mirror.Status.LastSync.DeepCopy()
 			mirror.Status.LastAttempt.StartedAt = current.QueuedAt.DeepCopy()
 		}
-		mirror.Status.NextSyncAt = timePtr(now.Add(mirror.Spec.Sync.Interval.Duration))
+		if mirror.Status.NextSyncAt != nil {
+			mirror.Status.NextSyncAt = timePtr(advanceAutomaticSync(mirror.Status.NextSyncAt.Time, mirror.Spec.Sync.Interval.Duration, now))
+		} else {
+			mirror.Status.NextSyncAt = timePtr(now.Add(mirror.Spec.Sync.Interval.Duration))
+		}
 		mirror.Status.Sync.Phase = mirrorv1alpha1.SyncStateWaiting
 		if phase == mirrorv1alpha1.SyncPhaseSucceeded {
 			mirror.Status.LastSuccessfulSyncAt = finished.DeepCopy()
