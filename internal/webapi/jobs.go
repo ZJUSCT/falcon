@@ -44,7 +44,7 @@ type JobEntry struct {
 	// New fields.
 	Conditions     []metav1.Condition `json:"conditions"`
 	SyncPhase      string             `json:"sync_phase,omitempty"`
-	Kind           string             `json:"kind"` // "Mirror" or "ProxyMirror"
+	Kind           string             `json:"kind"` // "Mirror", "CacheMirror", or "ProxyMirror"
 	Namespace      string             `json:"namespace,omitempty"`
 	Phase          string             `json:"phase"` // presentation state derived from conditions/currentSync
 	ActivePVC      string             `json:"active_pvc,omitempty"`
@@ -107,14 +107,24 @@ func mirrorPresentationPhase(m *mirrorv1alpha1.Mirror) string {
 	return mirrorv1alpha1.PhasePending
 }
 
-func proxyPresentationPhase(p *mirrorv1alpha1.ProxyMirror) string {
-	if condition := meta.FindStatusCondition(p.Status.Conditions, "Degraded"); condition != nil && condition.Status == metav1.ConditionTrue {
+func mirrorModeKind(m *mirrorv1alpha1.Mirror) string {
+	if m.IsCacheMirror() {
+		return "CacheMirror"
+	}
+	if m.IsProxyMirror() {
+		return "ProxyMirror"
+	}
+	return "Mirror"
+}
+
+func proxyPresentationPhaseMirror(m *mirrorv1alpha1.Mirror) string {
+	if condition := meta.FindStatusCondition(m.Status.Conditions, "Degraded"); condition != nil && condition.Status == metav1.ConditionTrue {
 		return mirrorv1alpha1.PhaseDegraded
 	}
-	if condition := meta.FindStatusCondition(p.Status.Conditions, "Progressing"); condition != nil && condition.Status == metav1.ConditionTrue {
+	if condition := meta.FindStatusCondition(m.Status.Conditions, "Progressing"); condition != nil && condition.Status == metav1.ConditionTrue {
 		return mirrorv1alpha1.PhasePublishing
 	}
-	if readyForCurrentGeneration(p.Status.Conditions, p.Generation) {
+	if readyForCurrentGeneration(m.Status.Conditions, m.Generation) {
 		return mirrorv1alpha1.PhaseReady
 	}
 	return mirrorv1alpha1.PhasePending
@@ -134,18 +144,12 @@ func (s *Server) listJobs(ctx context.Context) ([]JobEntry, error) {
 	if err := s.Client.List(ctx, &mirrors); err != nil {
 		return nil, err
 	}
-	var proxies mirrorv1alpha1.ProxyMirrorList
-	if err := s.Client.List(ctx, &proxies); err != nil {
-		return nil, err
-	}
 
-	entries := make([]JobEntry, 0, len(mirrors.Items)+len(proxies.Items))
+	entries := make([]JobEntry, 0, len(mirrors.Items))
 	for i := range mirrors.Items {
 		entries = append(entries, mirrorJobEntry(&mirrors.Items[i]))
 	}
-	for i := range proxies.Items {
-		entries = append(entries, proxyJobEntry(&proxies.Items[i]))
-	}
+
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Kind != entries[j].Kind {
 			return entries[i].Kind < entries[j].Kind
@@ -160,6 +164,18 @@ func (s *Server) listJobs(ctx context.Context) ([]JobEntry, error) {
 
 // mirrorJobEntry maps a Mirror CR onto the legacy job shape.
 func mirrorJobEntry(m *mirrorv1alpha1.Mirror) JobEntry {
+	if m.IsProxyMirror() {
+		phase := proxyPresentationPhaseMirror(m)
+		return JobEntry{
+			ID:         m.Name,
+			Conditions: append([]metav1.Condition{}, m.Status.Conditions...),
+			Status:     phase,
+			Kind:       mirrorModeKind(m),
+			Namespace:  m.Namespace,
+			Phase:      phase,
+			Actions:    []string{},
+		}
+	}
 	phase := mirrorPresentationPhase(m)
 	entry := JobEntry{
 		ID:            m.Name,
@@ -209,24 +225,6 @@ func mirrorJobEntry(m *mirrorv1alpha1.Mirror) JobEntry {
 		}
 	}
 	return entry
-}
-
-// proxyJobEntry maps a ProxyMirror CR onto the job shape. ProxyMirror is a new
-// concept with no legacy equivalent: there is no sync job, so every timestamp
-// is zero and `status` carries the derived Ready/Pending/Degraded presentation
-// state instead of the legacy sync vocabulary — the frontend can branch on
-// `kind`.
-func proxyJobEntry(p *mirrorv1alpha1.ProxyMirror) JobEntry {
-	phase := proxyPresentationPhase(p)
-	return JobEntry{
-		ID:         p.Name,
-		Conditions: append([]metav1.Condition{}, p.Status.Conditions...),
-		Status:     phase,
-		Kind:       "ProxyMirror",
-		Namespace:  p.Namespace,
-		Phase:      phase,
-		Actions:    []string{},
-	}
 }
 
 func timeOrZero(t *metav1.Time) time.Time {

@@ -90,6 +90,7 @@ func TestListJobsMirrorEntry(t *testing.T) {
 
 	m := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors"},
+		Spec:       mirrorv1alpha1.MirrorSpec{Storage: &mirrorv1alpha1.MirrorStorageSpec{SyncStorageClassName: "sync"}},
 		Status: mirrorv1alpha1.MirrorStatus{
 			ActivePVC:  "debian-sync-1756521600",
 			NextSyncAt: &metav1.Time{Time: finished.Add(6 * time.Hour)},
@@ -134,6 +135,7 @@ func TestListJobsFailedSyncMapsLastFailure(t *testing.T) {
 	finished := started.Add(5 * time.Minute)
 	m := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "arch", Namespace: "mirrors"},
+		Spec:       mirrorv1alpha1.MirrorSpec{Storage: &mirrorv1alpha1.MirrorStorageSpec{SyncStorageClassName: "sync"}},
 		Status: mirrorv1alpha1.MirrorStatus{
 			LastSync:   mirrorPhase(t, &started, &finished, mirrorv1alpha1.SyncPhaseFailed),
 			Conditions: []metav1.Condition{testCondition("Degraded", metav1.ConditionTrue)},
@@ -183,9 +185,9 @@ func TestListJobsUnsyncedMirrorHasZeroTimestamps(t *testing.T) {
 }
 
 func TestListJobsIncludesProxyMirror(t *testing.T) {
-	p := &mirrorv1alpha1.ProxyMirror{
+	p := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "pypi-proxy", Namespace: "mirrors"},
-		Status: mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{
+		Status: mirrorv1alpha1.MirrorStatus{Conditions: []metav1.Condition{
 			testCondition("Ready", metav1.ConditionTrue),
 		}},
 	}
@@ -206,11 +208,39 @@ func TestListJobsIncludesProxyMirror(t *testing.T) {
 	}
 }
 
+func TestListJobsProxyModesUseModeKinds(t *testing.T) {
+	cache := &mirrorv1alpha1.Mirror{
+		ObjectMeta: metav1.ObjectMeta{Name: "cache", Namespace: "mirrors"},
+		Spec:       mirrorv1alpha1.MirrorSpec{Storage: &mirrorv1alpha1.MirrorStorageSpec{CacheStorageClassName: "cache"}},
+		Status:     mirrorv1alpha1.MirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
+	}
+	proxy := &mirrorv1alpha1.Mirror{
+		ObjectMeta: metav1.ObjectMeta{Name: "proxy", Namespace: "mirrors"},
+		Status:     mirrorv1alpha1.MirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(cache, proxy).Build()
+	entries, err := (&Server{Client: c}).listJobs(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]JobEntry{}
+	for _, entry := range entries {
+		got[entry.ID] = entry
+	}
+	if got["cache"].Kind != "CacheMirror" || got["proxy"].Kind != "ProxyMirror" {
+		t.Fatalf("unexpected mode kinds: %+v", got)
+	}
+	if got["cache"].Status != "Ready" || !got["cache"].NextAttemptAt.IsZero() {
+		t.Fatalf("cache mirror should have proxy presentation fields: %+v", got["cache"])
+	}
+}
+
 // TestHandleJobsLegacyFieldNames pins the wire field names to the legacy
 // (pre-Kubernetes, Docker/SQLite) /api/jobs response shape.
 func TestHandleJobsLegacyFieldNames(t *testing.T) {
 	m := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirrors"},
+		Spec:       mirrorv1alpha1.MirrorSpec{Storage: &mirrorv1alpha1.MirrorStorageSpec{SyncStorageClassName: "sync"}},
 		Status: mirrorv1alpha1.MirrorStatus{
 			CurrentSync: &mirrorv1alpha1.MirrorCurrentSyncStatus{},
 			ActivePVC:   "debian-sync-1",

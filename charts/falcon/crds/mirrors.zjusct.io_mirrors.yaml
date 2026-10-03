@@ -17559,13 +17559,28 @@ spec:
                     is declared
                   rule: '!has(self.rsync) || has(self.rsync.podTemplate.spec)'
               storage:
+                description: |-
+                  Storage is required for synchronized Mirrors, optional for proxy mode,
+                  and carries the optional cache PVC configuration for Cache Mirrors.
                 properties:
+                  cacheStorageClassName:
+                    description: |-
+                      CacheStorageClassName provisions the stable writable cache PVC named
+                      <base>-cache for a Cache Mirror. It is only valid when
+                      SyncStorageClassName is absent; its presence selects Cache Mirror mode
+                      rather than Proxy Mirror mode. The PVC properties come from pvcTemplate;
+                      the proxy workload mounts this claim and the controller periodically
+                      reports its kubelet-observed usage in MirrorZ. This field is immutable
+                      after creation; omit it for a Proxy Mirror.
+                    maxLength: 253
+                    type: string
                   publishStorageClassName:
                     description: |-
-                      PublishStorageClassName provisions disposable snapshot-derived
-                      publish PVCs. Required: the publish PVC (a snapshot clone) explicitly
-                      uses this StorageClass, an operational choice that is never inherited
-                      from SyncStorageClassName. An Immediate-binding class is recommended:
+                      PublishStorageClassName provisions disposable snapshot-derived publish
+                      PVCs for a synchronized Mirror. It is absent in proxy mode. The publish
+                      PVC (a snapshot clone) explicitly uses this StorageClass, an operational
+                      choice that is never inherited from SyncStorageClassName. An
+                      Immediate-binding class is recommended:
                       under WaitForFirstConsumer the scheduler cannot see the snapshot
                       clone's locality while placing the publish pod (Kubernetes <= 1.36),
                       so the pod may be scheduled to a node where the clone cannot be
@@ -17575,6 +17590,7 @@ spec:
                       node), otherwise the VolumeSnapshot `dataSource` clone cannot be
                       provisioned, and it normally uses reclaimPolicy: Delete so snapshot
                       pruning reclaims the underlying backend volumes.
+                    maxLength: 253
                     minLength: 1
                     type: string
                   pvcTemplate:
@@ -17793,32 +17809,27 @@ spec:
                     minimum: 1
                     type: integer
                   syncStorageClassName:
-                    description: SyncStorageClassName provisions the stable writable
-                      synchronization PVC.
+                    description: |-
+                      SyncStorageClassName provisions the stable writable synchronization PVC.
+                      It is required for a periodically synchronized Mirror and absent for a
+                      Cache Mirror or Proxy Mirror.
+                    maxLength: 253
                     type: string
                   volumeSnapshotClassName:
                     description: |-
                       VolumeSnapshotClassName snapshots the sync PVC after every successful
                       sync; it must be served by the same storage backend as the
-                      StorageClasses above. Required: atomic publication depends on it.
-                    minLength: 1
+                      StorageClasses above. It is required for a synchronized Mirror and
+                      absent in proxy mode because proxies never create snapshots.
+                    maxLength: 253
                     type: string
                 required:
-                - publishStorageClassName
                 - pvcTemplate
-                - syncStorageClassName
-                - volumeSnapshotClassName
                 type: object
               sync:
                 description: |-
-                  MirrorSyncSpec describes one synchronization run. The Job-level knobs
-                  (interval/retry/timeout/limits) are CR fields; everything else about the
-                  sync container lives in PodTemplate — the full pod template of the sync
-                  Job, symmetric to the publish services' podTemplate. There are no placement
-                  fields: sync pods reference the sync PVC, so the scheduler handles locality
-                  natively (WaitForFirstConsumer decides the volume's node on first supply;
-                  the bound PV's nodeAffinity pins every later sync pod) — see the
-                  "存储的局部性" (storage locality) section of the documentation.
+                  Sync is required when storage.syncStorageClassName is set and forbidden
+                  in Cache Mirror and Proxy Mirror modes.
                 properties:
                   failureRetryLimit:
                     default: 3
@@ -26443,9 +26454,32 @@ spec:
                 type: object
             required:
             - info
-            - storage
-            - sync
             type: object
+            x-kubernetes-validations:
+            - message: syncStorageClassName is immutable; delete and recreate the
+                Mirror to change it
+              rule: '(has(self.storage) && has(self.storage.syncStorageClassName)
+                ? self.storage.syncStorageClassName : "") == (has(oldSelf.storage)
+                && has(oldSelf.storage.syncStorageClassName) ? oldSelf.storage.syncStorageClassName
+                : "")'
+            - message: publishStorageClassName is immutable; delete and recreate the
+                Mirror to change it
+              rule: '(has(self.storage) && has(self.storage.publishStorageClassName)
+                ? self.storage.publishStorageClassName : "") == (has(oldSelf.storage)
+                && has(oldSelf.storage.publishStorageClassName) ? oldSelf.storage.publishStorageClassName
+                : "")'
+            - message: cacheStorageClassName is immutable; delete and recreate the
+                Mirror to change it
+              rule: '(has(self.storage) && has(self.storage.cacheStorageClassName)
+                ? self.storage.cacheStorageClassName : "") == (has(oldSelf.storage)
+                && has(oldSelf.storage.cacheStorageClassName) ? oldSelf.storage.cacheStorageClassName
+                : "")'
+            - message: volumeSnapshotClassName is immutable; delete and recreate the
+                Mirror to change it
+              rule: '(has(self.storage) && has(self.storage.volumeSnapshotClassName)
+                ? self.storage.volumeSnapshotClassName : "") == (has(oldSelf.storage)
+                && has(oldSelf.storage.volumeSnapshotClassName) ? oldSelf.storage.volumeSnapshotClassName
+                : "")'
           status:
             properties:
               activePVC:
@@ -26459,6 +26493,13 @@ spec:
               activeSnapshot:
                 description: ActiveSnapshot is the VolumeSnapshot the ActivePVC was
                   cloned from.
+                type: string
+              cacheSizeUpdatedAt:
+                description: |-
+                  CacheSizeUpdatedAt is when sizeBytes was last measured for a Cache
+                  Mirror's writable cache PVC. Cache usage is refreshed periodically and
+                  remains absent when no running proxy pod exposes the PVC to a kubelet.
+                format: date-time
                 type: string
               conditions:
                 items:
@@ -26697,6 +26738,12 @@ spec:
               sizeBytes:
                 format: int64
                 type: integer
+              storageClassFingerprint:
+                description: |-
+                  StorageClassFingerprint records the accepted mode and StorageClass fields.
+                  They are immutable for the lifetime of a Mirror; changing mode requires
+                  deleting and recreating the object.
+                type: string
               sync:
                 description: MirrorSyncState describes scheduling/execution independently
                   of publication.

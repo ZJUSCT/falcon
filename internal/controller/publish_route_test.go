@@ -1530,13 +1530,13 @@ func TestRedirectModeValidation(t *testing.T) {
 	// ProxyMirror shares the rules.
 	proxy := testProxyMirror()
 	proxy.Spec.Publish.HTTP.PodTemplate = corev1.PodTemplateSpec{}
-	if errs := validateProxyMirror(proxy); len(errs) == 0 {
+	if errs := validateMirror(proxy); len(errs) == 0 {
 		t.Fatal("a proxy http key without a serving podTemplate must be InvalidSpec")
 	}
 	proxy = testProxyMirror()
 	proxy.Spec.Publish.HTTP = nil
 	proxy.Spec.Publish.Redirect = "mirrors.cernet.edu.cn"
-	if errs := validateProxyMirror(proxy); len(errs) != 0 {
+	if errs := validateMirror(proxy); len(errs) != 0 {
 		t.Fatalf("a redirect-only proxy must be valid, got %v", errs.ToAggregate())
 	}
 }

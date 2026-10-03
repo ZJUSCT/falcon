@@ -178,12 +178,13 @@ func mirrorzStatusForMirror(m *mirrorv1alpha1.Mirror) (string, error) {
 	return b.result(m.CreationTimestamp)
 }
 
-func mirrorzStatusForProxyMirror(p *mirrorv1alpha1.ProxyMirror) (string, error) {
-	b := mirrorzStatusBuilder{value: mirrorzProxyNoCache}
-	if p.Spec.Cache != nil {
-		b.value = mirrorzProxyCache
+func mirrorzStatusForProxy(m *mirrorv1alpha1.Mirror) (string, error) {
+	status := mirrorzProxyNoCache
+	if m.IsCacheMirror() {
+		status = mirrorzProxyCache
 	}
-	return b.result(p.CreationTimestamp)
+	b := mirrorzStatusBuilder{value: status}
+	return b.result(m.CreationTimestamp)
 }
 
 func readyForCurrentGeneration(conditions []metav1.Condition, generation int64) bool {
@@ -303,31 +304,18 @@ func (s *Server) handleMirrorZ(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, doc)
 }
 
-// listAll lists every Mirror and ProxyMirror across all namespaces.
-func (s *Server) listAll(ctx context.Context) (*mirrorv1alpha1.MirrorList, *mirrorv1alpha1.ProxyMirrorList, error) {
-	var mirrors mirrorv1alpha1.MirrorList
-	if err := s.Client.List(ctx, &mirrors); err != nil {
-		return nil, nil, err
-	}
-	var proxies mirrorv1alpha1.ProxyMirrorList
-	if err := s.Client.List(ctx, &proxies); err != nil {
-		return nil, nil, err
-	}
-	return &mirrors, &proxies, nil
-}
-
 // buildMirrorZ assembles the catalog. requestHost is the raw Host header of
 // the HTTP request (may be empty in tests): when it matches one of the
 // publish hostnames, the site section and every entry URL are reflected with
 // that host, otherwise the configured site URL is used.
 func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorzDocument, error) {
-	mirrors, proxies, err := s.listAll(ctx)
-	if err != nil {
+	var mirrors mirrorv1alpha1.MirrorList
+	if err := s.Client.List(ctx, &mirrors); err != nil {
 		return nil, err
 	}
 	baseURL := s.siteURLForRequest(requestHost)
 
-	entries := make([]mirrorzMirror, 0, len(mirrors.Items)+len(proxies.Items))
+	entries := make([]mirrorzMirror, 0, len(mirrors.Items))
 	for i := range mirrors.Items {
 		m := &mirrors.Items[i]
 		// The catalog contains only an explicitly requested SERVING http
@@ -341,7 +329,13 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 		if !m.Spec.Publish.HTTP.Serving() || !readyForCurrentGeneration(m.Status.Conditions, m.Generation) {
 			continue
 		}
-		status, err := mirrorzStatusForMirror(m)
+		var status string
+		var err error
+		if m.IsProxyMirror() {
+			status, err = mirrorzStatusForProxy(m)
+		} else {
+			status, err = mirrorzStatusForMirror(m)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("mirrorz catalog: Mirror %s/%s: %w", m.Namespace, m.Name, err)
 		}
@@ -354,27 +348,6 @@ func (s *Server) buildMirrorZ(ctx context.Context, requestHost string) (*mirrorz
 			Size:     mirrorzSize(m.Status.SizeBytes),
 		})
 		entries = append(entries, subsetEntries(baseURL, status, m.Spec.Publish.Aliases)...)
-	}
-	for i := range proxies.Items {
-		p := &proxies.Items[i]
-		if _, redirecting := p.Spec.Publish.RedirectActive(); redirecting {
-			continue
-		}
-		if !p.Spec.Publish.HTTP.Serving() || !readyForCurrentGeneration(p.Status.Conditions, p.Generation) {
-			continue
-		}
-		status, err := mirrorzStatusForProxyMirror(p)
-		if err != nil {
-			return nil, fmt.Errorf("mirrorz catalog: ProxyMirror %s/%s: %w", p.Namespace, p.Name, err)
-		}
-		entries = append(entries, mirrorzMirror{
-			CName:    mirrorzCName(p.Spec.Info.CName, p.Name),
-			URL:      entryURL(baseURL, p.Name),
-			Status:   status,
-			Desc:     p.Spec.Info.Description,
-			Upstream: p.Spec.Info.Upstream,
-		})
-		entries = append(entries, subsetEntries(baseURL, status, p.Spec.Publish.Aliases)...)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].CName < entries[j].CName })
 

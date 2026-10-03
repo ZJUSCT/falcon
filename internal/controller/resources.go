@@ -543,7 +543,7 @@ func (r *MirrorReconciler) ensurePublishEntry(ctx context.Context, mirror *mirro
 
 // ensurePublishServiceAndDeployment maintains the Service/Deployment pair of
 // one enabled publish service key ("http"/"rsync") for owner (a Mirror or a
-// ProxyMirror): Service `<base>-publish-<key>` with dots in <base> mapped to
+// Mirror): Service `<base>-publish-<key>` with dots in <base> mapped to
 // '-' (Service names are DNS-1035; the Deployment shares the name so all
 // references stay consistent), port 80 -> the first declared port on the
 // operator-owned template. It reports the Deployment rollout readiness.

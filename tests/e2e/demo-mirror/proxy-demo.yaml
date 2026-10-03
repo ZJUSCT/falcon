@@ -17,16 +17,16 @@ data:
     }
 ---
 apiVersion: mirrors.zjusct.io/v1alpha1
-kind: ProxyMirror
+kind: Mirror
 metadata:
   name: proxy-demo
   namespace: mirror
 spec:
   info:
     upstream: http://demo-publish-http/demo/
-  cache:
+  storage:
+    cacheStorageClassName: falcon-e2e-publish
     pvcTemplate:
-      storageClassName: falcon-e2e-publish
       accessModes: [ReadWriteOnce]
       resources:
         requests:

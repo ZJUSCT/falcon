@@ -205,6 +205,10 @@ func publishPodsDrained(ctx context.Context, c client.Client, owner client.Objec
 }
 
 func (r *MirrorReconciler) updateSyncPhase(m *mirrorv1alpha1.Mirror) {
+	if !m.IsSynchronized() {
+		m.Status.Sync = mirrorv1alpha1.MirrorSyncState{}
+		return
+	}
 	if current := m.Status.CurrentSync; current != nil {
 		switch {
 		case current.Phase == mirrorv1alpha1.SyncPhaseSnapshotting:

@@ -98,6 +98,21 @@ func (r *KubeletUsageReader) summary(ctx context.Context, nodeName string) (*sta
 // sync-only mirrors never have one, the summary not reporting the PVC yet) is
 // logged and reported as unknown.
 func (r *MirrorReconciler) publishPVCUsage(ctx context.Context, mirror *mirrorv1alpha1.Mirror, pvcName string) (int64, bool) {
+	return r.mountedPVCUsage(ctx, mirror, pvcName, func(pod *corev1.Pod) bool {
+		return strings.HasPrefix(pod.Labels[ComponentLabel], publishRolePrefix) && podUsesPublishPVC(pod, pvcName)
+	})
+}
+
+// proxyCachePVCUsage computes the kubelet-reported usage of a Cache Mirror's
+// writable cache PVC. Unlike a synchronized publish PVC, the cache is mounted
+// by the proxy workload under the reserved proxy-cache volume name.
+func (r *MirrorReconciler) proxyCachePVCUsage(ctx context.Context, mirror *mirrorv1alpha1.Mirror, pvcName string) (int64, bool) {
+	return r.mountedPVCUsage(ctx, mirror, pvcName, func(pod *corev1.Pod) bool {
+		return pod.Labels[ComponentLabel] == publishRole(PublishProtocolHTTP) && podUsesPVC(pod, ProxyCacheVolumeName, pvcName)
+	})
+}
+
+func (r *MirrorReconciler) mountedPVCUsage(ctx context.Context, mirror *mirrorv1alpha1.Mirror, pvcName string, eligible func(*corev1.Pod) bool) (int64, bool) {
 	if r.UsageReader == nil {
 		return 0, false
 	}
@@ -105,15 +120,13 @@ func (r *MirrorReconciler) publishPVCUsage(ctx context.Context, mirror *mirrorv1
 	base := childBase(mirror.Name)
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods, client.InNamespace(mirror.Namespace), client.MatchingLabels{MirrorLabel: base}); err != nil {
-		logger.Info("publish PVC usage accounting skipped: cannot list publish pods", "mirror", mirror.Name, "error", err.Error())
+		logger.Info("PVC usage accounting skipped: cannot list workload pods", "mirror", mirror.Name, "error", err.Error())
 		return 0, false
 	}
 	nodes := map[string]struct{}{}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if !strings.HasPrefix(pod.Labels[ComponentLabel], publishRolePrefix) ||
-			pod.Status.Phase != corev1.PodRunning || pod.Spec.NodeName == "" ||
-			!podUsesPublishPVC(pod, pvcName) {
+		if pod.Status.Phase != corev1.PodRunning || pod.Spec.NodeName == "" || !eligible(pod) {
 			continue
 		}
 		if _, seen := nodes[pod.Spec.NodeName]; seen {
@@ -122,7 +135,7 @@ func (r *MirrorReconciler) publishPVCUsage(ctx context.Context, mirror *mirrorv1
 		nodes[pod.Spec.NodeName] = struct{}{}
 		size, ok, err := r.UsageReader.PVCUsedBytes(ctx, pod.Spec.NodeName, mirror.Namespace, pvcName)
 		if err != nil {
-			logger.Info("publish PVC usage accounting failed on candidate node", "mirror", mirror.Name, "pvc", pvcName, "node", pod.Spec.NodeName, "error", err.Error())
+			logger.Info("PVC usage accounting failed on candidate node", "mirror", mirror.Name, "pvc", pvcName, "node", pod.Spec.NodeName, "error", err.Error())
 			continue
 		}
 		if ok {
@@ -131,13 +144,17 @@ func (r *MirrorReconciler) publishPVCUsage(ctx context.Context, mirror *mirrorv1
 	}
 	// Expected for sync-only mirrors (no publish workload at all) and while a
 	// fresh publish rollout or kubelet volume stats has not appeared yet.
-	logger.V(1).Info("publish PVC usage accounting unavailable: no eligible node reports the PVC", "mirror", mirror.Name, "pvc", pvcName)
+	logger.V(1).Info("PVC usage accounting unavailable: no eligible node reports the PVC", "mirror", mirror.Name, "pvc", pvcName)
 	return 0, false
 }
 
 func podUsesPublishPVC(pod *corev1.Pod, pvcName string) bool {
+	return podUsesPVC(pod, PublishDataVolumeName, pvcName)
+}
+
+func podUsesPVC(pod *corev1.Pod, volumeName, pvcName string) bool {
 	for _, volume := range pod.Spec.Volumes {
-		if volume.Name == PublishDataVolumeName && volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == pvcName {
+		if volume.Name == volumeName && volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == pvcName {
 			return true
 		}
 	}

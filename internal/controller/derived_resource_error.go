@@ -18,7 +18,7 @@ import (
 const derivedResourceInvalid = "DerivedResourceInvalid"
 
 // derivedNameConflictError reports a derived publish workload whose name is
-// already taken by the same-named child of another Mirror/ProxyMirror. Names
+// already taken by the same-named child of another Mirror. Names
 // are derived deterministically from the CR name (dots mapped to '-' for the
 // DNS-1035 publish pair), so `crates.io-index` and `crates-io-index` collide;
 // Falcon refuses to adopt or overwrite the foreign child and projects the
@@ -84,21 +84,5 @@ func (r *MirrorReconciler) handleDerivedResourceInvalid(ctx context.Context, mir
 		setCondition(mirror, conditionReady, conditionStatus(mirrorWasReady(mirror)), derivedResourceInvalid, message)
 		setCondition(mirror, conditionProgressing, conditionStatus(mirror.Status.Publication != nil), derivedResourceInvalid, message)
 		setCondition(mirror, conditionDegraded, metav1.ConditionTrue, derivedResourceInvalid, message)
-	})
-}
-
-func (r *ProxyMirrorReconciler) handleDerivedResourceInvalid(ctx context.Context, proxy *mirrorv1alpha1.ProxyMirror, result ctrl.Result, err error) (ctrl.Result, error) {
-	message, ok := derivedResourceInvalidMessage(err, "ProxyMirror", proxy.Name)
-	if !ok {
-		return result, err
-	}
-	if r.Recorder != nil {
-		r.Recorder.Event(proxy, corev1.EventTypeWarning, derivedResourceInvalid, message)
-	}
-	return r.patchStatus(ctx, proxy, func() {
-		proxy.Status.ObservedGeneration = proxy.Generation
-		setProxyCondition(proxy, conditionReady, conditionStatus(proxyWasReady(proxy)), derivedResourceInvalid, message)
-		setProxyCondition(proxy, conditionProgressing, metav1.ConditionFalse, derivedResourceInvalid, message)
-		setProxyCondition(proxy, conditionDegraded, metav1.ConditionTrue, derivedResourceInvalid, message)
 	})
 }

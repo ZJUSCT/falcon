@@ -142,7 +142,7 @@ spec:
         - assert:
             resource:
               apiVersion: mirrors.zjusct.io/v1alpha1
-              kind: ProxyMirror
+              kind: Mirror
               metadata:
                 name: proxy-demo
               (status.conditions[?type == 'Ready']):

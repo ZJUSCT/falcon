@@ -46,9 +46,10 @@ const (
 	// its own pods.
 	ComponentLabel = "app.kubernetes.io/component"
 
-	conditionReady       = "Ready"
-	conditionProgressing = "Progressing"
-	conditionDegraded    = "Degraded"
+	conditionReady        = "Ready"
+	conditionProgressing  = "Progressing"
+	conditionDegraded     = "Degraded"
+	conditionHTTPDisabled = "HTTPDisabled"
 )
 
 type MirrorReconciler struct {
@@ -77,8 +78,6 @@ type MirrorReconciler struct {
 // +kubebuilder:rbac:groups=mirrors.zjusct.io,resources=mirrors,verbs=get;list;watch;patch;update
 // +kubebuilder:rbac:groups=mirrors.zjusct.io,resources=mirrors/status,verbs=get;patch;update
 // +kubebuilder:rbac:groups=mirrors.zjusct.io,resources=mirrors/finalizers,verbs=get;patch;update
-// +kubebuilder:rbac:groups=mirrors.zjusct.io,resources=proxymirrors,verbs=get;list;watch;patch;update
-// +kubebuilder:rbac:groups=mirrors.zjusct.io,resources=proxymirrors/status,verbs=get;patch;update
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;patch;update;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;patch;update;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
@@ -135,6 +134,9 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	defer func() {
 		result, reconcileErr = r.handleDerivedResourceInvalid(ctx, mirror, result, reconcileErr)
 	}()
+	if mirror.IsProxyMirror() {
+		return r.reconcileProxyMode(ctx, mirror)
+	}
 
 	// Removing a service is an operational request, not merely a validation
 	// concern. Honour it even when another part of the new spec is invalid or cancellation is
@@ -181,6 +183,9 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 			setCondition(mirror, conditionProgressing, conditionStatus(mirror.Status.Publication != nil), "InvalidSpec", message)
 			setCondition(mirror, conditionDegraded, metav1.ConditionTrue, "InvalidSpec", message)
 		})
+	}
+	if handled, err := r.enforceStorageClassFingerprint(ctx, mirror); err != nil || handled {
+		return ctrl.Result{RequeueAfter: time.Second}, err
 	}
 
 	publication, err := r.reconcileActivePublication(ctx, mirror)
@@ -687,11 +692,6 @@ func mirrorWasReady(mirror *mirrorv1alpha1.Mirror) bool {
 	return condition != nil && condition.Status == metav1.ConditionTrue
 }
 
-func proxyWasReady(proxy *mirrorv1alpha1.ProxyMirror) bool {
-	condition := meta.FindStatusCondition(proxy.Status.Conditions, conditionReady)
-	return condition != nil && condition.Status == metav1.ConditionTrue
-}
-
 type conditionFailure struct {
 	reason  string
 	message string
@@ -725,7 +725,7 @@ func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirro
 		if hostname, redirecting := mirror.Spec.Publish.RedirectActive(); redirecting {
 			return r.redirectPublicationHealth(ctx, mirror, hostname, drained)
 		}
-		return publicationHealth{progressing: !drained, reason: "HTTPDisabled", message: "no HTTP endpoint is configured; waiting for any removed workloads to drain"}, nil
+		return publicationHealth{progressing: !drained, reason: conditionHTTPDisabled, message: "no HTTP endpoint is configured; waiting for any removed workloads to drain"}, nil
 	}
 
 	if mirror.Status.ActivePVC == "" && mirror.Status.Publication == nil {
@@ -780,7 +780,7 @@ func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirro
 
 	if !publishHTTPEnabled(mirror) {
 		health.ready = false
-		health.reason = "HTTPDisabled"
+		health.reason = conditionHTTPDisabled
 		health.message = "no HTTP endpoint is configured"
 		return health, nil
 	}
@@ -878,7 +878,7 @@ func applyMirrorConditions(mirror *mirrorv1alpha1.Mirror, publication publicatio
 		publication.reason = "PublicationObserved"
 	}
 	setCondition(mirror, conditionReady, conditionStatus(publication.ready), publication.reason, publication.message)
-	if progressReason != "" {
+	if mirror.IsSynchronized() && progressReason != "" {
 		mirror.Status.Sync.Reason, mirror.Status.Sync.Message = progressReason, progressMessage
 	}
 	if mirror.Status.Publication != nil || publication.progressing {
@@ -903,7 +903,16 @@ func applyMirrorConditions(mirror *mirrorv1alpha1.Mirror, publication publicatio
 
 func validateMirror(mirror *mirrorv1alpha1.Mirror) field.ErrorList {
 	path := field.NewPath("spec")
+	if mirror.IsProxyMirror() {
+		return validateProxyMode(mirror)
+	}
 	var errs field.ErrorList
+	if mirror.Spec.Sync == nil {
+		return append(errs, field.Required(path.Child("sync"), "must be present for a synchronized Mirror"))
+	}
+	if mirror.Spec.Storage == nil {
+		return append(errs, field.Required(path.Child("storage"), "must be present for a synchronized Mirror"))
+	}
 	if mirror.Spec.Sync.Interval.Duration <= 0 {
 		errs = append(errs, field.Invalid(path.Child("sync", "interval"), mirror.Spec.Sync.Interval.Duration.String(), "must be greater than zero"))
 	}
@@ -951,6 +960,9 @@ func validateMirror(mirror *mirrorv1alpha1.Mirror) field.ErrorList {
 	}
 	if mirror.Spec.Storage.VolumeSnapshotClassName == "" {
 		errs = append(errs, field.Required(path.Child("storage", "volumeSnapshotClassName"), "is required for atomic publication"))
+	}
+	if mirror.Spec.Storage.CacheStorageClassName != "" {
+		errs = append(errs, field.Forbidden(path.Child("storage", "cacheStorageClassName"), "is only valid for Cache Mirror mode"))
 	}
 	publish := mirror.Spec.Publish
 	publishPath := path.Child("publish")

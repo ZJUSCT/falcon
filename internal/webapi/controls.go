@@ -63,6 +63,10 @@ func (s *Server) handleMirrorAction(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 409, "mirror is being deleted")
 		return
 	}
+	if !m.IsSynchronized() {
+		writeJSONError(w, 409, "synchronization actions are unavailable for Cache Mirror and Proxy Mirror")
+		return
+	}
 	before := m.DeepCopy()
 	patch := client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})
 	switch action.Action {

@@ -13,14 +13,13 @@ metadata:
     {{- include "falcon.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller
 rules:
-  # Mirror / ProxyMirror CRs and their status (all in the controller's own
+  # Mirror CRs and their status (all in the controller's own
   # namespace; the CRDs themselves are cluster-scoped but a Role suffices for
   # namespaced instances).
   - apiGroups:
       - mirrors.zjusct.io
     resources:
       - mirrors
-      - proxymirrors
     verbs:
       - get
       - list
@@ -32,7 +31,6 @@ rules:
     resources:
       - mirrors/status
       - mirrors/finalizers
-      - proxymirrors/status
     verbs:
       - get
       - patch

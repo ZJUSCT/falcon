@@ -10,11 +10,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -23,29 +20,30 @@ import (
 	mirrorv1alpha1 "github.com/ZJUSCT/falcon/api/v1alpha1"
 )
 
-func testProxyMirror() *mirrorv1alpha1.ProxyMirror {
-	return &mirrorv1alpha1.ProxyMirror{
-		TypeMeta: metav1.TypeMeta{APIVersion: mirrorv1alpha1.GroupVersion.String(), Kind: "ProxyMirror"},
+func testProxyMirror() *mirrorv1alpha1.Mirror {
+	return &mirrorv1alpha1.Mirror{
+		TypeMeta: metav1.TypeMeta{APIVersion: mirrorv1alpha1.GroupVersion.String(), Kind: "Mirror"},
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:  "mirrors",
 			Name:       "pypi-proxy",
 			UID:        types.UID("test-proxymirror-uid"),
 			Generation: 1,
+			Finalizers: []string{MirrorFinalizer},
 		},
-		Spec: mirrorv1alpha1.ProxyMirrorSpec{
-			Info: mirrorv1alpha1.ProxyMirrorInfo{
+		Spec: mirrorv1alpha1.MirrorSpec{
+			Info: mirrorv1alpha1.MirrorInfo{
 				Description: "Caching proxy in front of PyPI",
 				Upstream:    "https://pypi.org/simple/",
 			},
-			Cache: &mirrorv1alpha1.ProxyMirrorCacheSpec{
+			Storage: &mirrorv1alpha1.MirrorStorageSpec{
+				CacheStorageClassName: "delete-class",
 				PVCSpec: corev1.PersistentVolumeClaimSpec{
-					StorageClassName: ptr.To("delete-class"),
-					AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-					Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("100Gi")}},
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("100Gi")}},
 				},
 			},
-			Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{
-				HTTP: &mirrorv1alpha1.ProxyMirrorServiceSpec{MirrorServiceSpec: mirrorv1alpha1.MirrorServiceSpec{
+			Publish: mirrorv1alpha1.MirrorServicesSpec{
+				HTTP: &mirrorv1alpha1.MirrorHTTPServiceSpec{MirrorServiceSpec: mirrorv1alpha1.MirrorServiceSpec{
 					PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
 							Name:  "proxy",
@@ -59,31 +57,16 @@ func testProxyMirror() *mirrorv1alpha1.ProxyMirror {
 	}
 }
 
-func testProxyScheme(t *testing.T) *runtime.Scheme {
-	t.Helper()
-	scheme := runtime.NewScheme()
-	if err := clientgoscheme.AddToScheme(scheme); err != nil {
-		t.Fatalf("add core scheme: %v", err)
-	}
-	if err := gatewayv1.Install(scheme); err != nil {
-		t.Fatalf("add gateway scheme: %v", err)
-	}
-	if err := mirrorv1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add mirror scheme: %v", err)
-	}
-	return scheme
-}
-
-func reconcileProxy(t *testing.T, ctx context.Context, reconciler *ProxyMirrorReconciler, request ctrl.Request) {
+func reconcileProxy(t *testing.T, ctx context.Context, reconciler *MirrorReconciler, request ctrl.Request) {
 	t.Helper()
 	if _, err := reconciler.Reconcile(ctx, request); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 }
 
-func getProxyMirror(t *testing.T, ctx context.Context, c client.Client, key client.ObjectKey) *mirrorv1alpha1.ProxyMirror {
+func getProxyMirror(t *testing.T, ctx context.Context, c client.Client, key client.ObjectKey) *mirrorv1alpha1.Mirror {
 	t.Helper()
-	value := &mirrorv1alpha1.ProxyMirror{}
+	value := &mirrorv1alpha1.Mirror{}
 	get(t, ctx, c, key, value)
 	return value
 }
@@ -91,13 +74,13 @@ func getProxyMirror(t *testing.T, ctx context.Context, c client.Client, key clie
 func TestProxyMirrorHappyPathPublishesAndProvisionsCache(t *testing.T) {
 	ctx := context.Background()
 	proxy := testProxyMirror()
-	scheme := testProxyScheme(t)
+	scheme := testScheme(t)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&mirrorv1alpha1.ProxyMirror{}, &appsv1.Deployment{}).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(proxy).
 		Build()
-	reconciler := &ProxyMirrorReconciler{
+	reconciler := &MirrorReconciler{
 		Client:   fakeClient,
 		Scheme:   scheme,
 		Recorder: record.NewFakeRecorder(20),
@@ -115,7 +98,7 @@ func TestProxyMirrorHappyPathPublishesAndProvisionsCache(t *testing.T) {
 	if got := claim.Spec.Resources.Requests[corev1.ResourceStorage]; got.Cmp(resource.MustParse("100Gi")) != 0 {
 		t.Fatalf("cache PVC capacity = %s; expected 100Gi", got.String())
 	}
-	if len(claim.OwnerReferences) != 1 || claim.OwnerReferences[0].Kind != "ProxyMirror" {
+	if len(claim.OwnerReferences) != 1 || claim.OwnerReferences[0].Kind != "Mirror" {
 		t.Fatalf("cache PVC must be owned by the ProxyMirror: %#v", claim.OwnerReferences)
 	}
 
@@ -197,14 +180,14 @@ func TestProxyMirrorHappyPathPublishesAndProvisionsCache(t *testing.T) {
 func TestProxyMirrorInvalidCacheSpecIsDegraded(t *testing.T) {
 	ctx := context.Background()
 	proxy := testProxyMirror()
-	proxy.Spec.Cache.PVCSpec.AccessModes = nil
-	scheme := testProxyScheme(t)
+	proxy.Spec.Storage.PVCSpec.AccessModes = nil
+	scheme := testScheme(t)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&mirrorv1alpha1.ProxyMirror{}).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}).
 		WithObjects(proxy).
 		Build()
-	reconciler := &ProxyMirrorReconciler{
+	reconciler := &MirrorReconciler{
 		Client: fakeClient,
 		Scheme: scheme,
 		Now:    func() time.Time { return time.Now().UTC() },
@@ -226,21 +209,21 @@ func TestProxyMirrorInvalidCacheSpecIsDegraded(t *testing.T) {
 // whether the whole services object or just the key (absent = disabled) —
 // no publish workload or cache is retained.
 func TestProxyMirrorDisabledHTTPDeploysNothing(t *testing.T) {
-	for name, mutate := range map[string]func(*mirrorv1alpha1.ProxyMirror){
-		"absent-services": func(p *mirrorv1alpha1.ProxyMirror) { p.Spec.Publish = mirrorv1alpha1.ProxyMirrorServicesSpec{} },
-		"absent-http-key": func(p *mirrorv1alpha1.ProxyMirror) { p.Spec.Publish.HTTP = nil },
+	for name, mutate := range map[string]func(*mirrorv1alpha1.Mirror){
+		"absent-services": func(p *mirrorv1alpha1.Mirror) { p.Spec.Publish = mirrorv1alpha1.MirrorServicesSpec{} },
+		"absent-http-key": func(p *mirrorv1alpha1.Mirror) { p.Spec.Publish.HTTP = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			proxy := testProxyMirror()
 			mutate(proxy)
-			scheme := testProxyScheme(t)
+			scheme := testScheme(t)
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
-				WithStatusSubresource(&mirrorv1alpha1.ProxyMirror{}, &appsv1.Deployment{}).
+				WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 				WithObjects(proxy).
 				Build()
-			reconciler := &ProxyMirrorReconciler{
+			reconciler := &MirrorReconciler{
 				Client:   fakeClient,
 				Scheme:   scheme,
 				Recorder: record.NewFakeRecorder(20),
@@ -271,7 +254,7 @@ func TestProxyMirrorReservedCacheVolumeRejected(t *testing.T) {
 		Name:         "proxy-cache",
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	}}
-	errs := validateProxyMirror(proxy)
+	errs := validateMirror(proxy)
 	if len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "reserved") {
 		t.Fatalf("a user volume named proxy-cache must be rejected as reserved, got %v", errs)
 	}
@@ -296,13 +279,13 @@ func TestProxyMirrorRedirectModeRedirectsWithoutWorkload(t *testing.T) {
 	proxy := testProxyMirror()
 	proxy.Spec.Publish.Redirect = "mirrors.cernet.edu.cn"
 	proxy.Spec.Publish.Aliases = []mirrorv1alpha1.MirrorAlias{{Path: "/pypi-files"}}
-	scheme := testProxyScheme(t)
+	scheme := testScheme(t)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&mirrorv1alpha1.ProxyMirror{}, &appsv1.Deployment{}).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}, &appsv1.Deployment{}).
 		WithObjects(proxy).
 		Build()
-	reconciler := &ProxyMirrorReconciler{
+	reconciler := &MirrorReconciler{
 		Client:   fakeClient,
 		Scheme:   scheme,
 		Recorder: record.NewFakeRecorder(20),
@@ -314,7 +297,7 @@ func TestProxyMirrorRedirectModeRedirectsWithoutWorkload(t *testing.T) {
 	reconcileProxy(t, ctx, reconciler, request) // cache PVC + redirect route
 	claim := &corev1.PersistentVolumeClaim{}
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-cache"}, claim)
-	if len(claim.OwnerReferences) != 1 || claim.OwnerReferences[0].Kind != "ProxyMirror" {
+	if len(claim.OwnerReferences) != 1 || claim.OwnerReferences[0].Kind != "Mirror" {
 		t.Fatalf("the cache PVC must stay owned and maintained across a redirect: %#v", claim.OwnerReferences)
 	}
 	assertNotFound(t, ctx, fakeClient, client.ObjectKey{Namespace: proxy.Namespace, Name: "pypi-proxy-publish-http"}, &appsv1.Deployment{})

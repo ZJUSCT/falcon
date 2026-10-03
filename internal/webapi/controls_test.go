@@ -18,6 +18,7 @@ import (
 
 func controlServer(t *testing.T, m *mirrorv1alpha1.Mirror) (*Server, client.Client) {
 	t.Helper()
+	m.Spec.Storage = &mirrorv1alpha1.MirrorStorageSpec{SyncStorageClassName: "sync"}
 	if m.UID == "" {
 		m.UID = "mirror-uid"
 	}

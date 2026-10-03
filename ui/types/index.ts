@@ -14,7 +14,7 @@ export interface Job {
   sync_phase?: 'Waiting' | 'Pending' | 'Syncing' | 'Snapshotting' | 'Retrying' | 'Cancelling';
   // Legacy-compatible fields.
   id: string;
-  status: 'Waiting' | 'Running' | 'Paused' | string; // ProxyMirror: raw phase (Ready/Pending/Degraded)
+  status: 'Waiting' | 'Running' | 'Paused' | string; // proxy modes: raw phase (Ready/Pending/Degraded)
   updated_at: string;
   last_success_at: string;
   last_failure_at: string;
@@ -24,7 +24,7 @@ export interface Job {
   actions: string[]; // legacy field, always empty
 
   // New fields.
-  kind: 'Mirror' | 'ProxyMirror';
+  kind: 'Mirror' | 'CacheMirror' | 'ProxyMirror';
   namespace?: string;
   phase: string; // raw CR status.phase
   active_pvc?: string;
@@ -44,7 +44,8 @@ export function isZeroTime(value: string | undefined): boolean {
 // replies 404 ({"error": "usage aggregation is disabled"}) when the usage
 // feature is not deployed; the UI degrades silently to "no data".
 // `MirrorUsage.name` matches the `id` of a /api/jobs entry (Mirror CR name).
-// ProxyMirror resources never appear (no sync/snapshot concept).
+// Proxy modes have no sync/snapshot usage row; Cache Mirror cache PVCs are
+// shown by the storage inventory attribution endpoint.
 export interface MirrorUsageSync {
   pvc: string; // ZFS dataset backing PVC
   referencedBytes: number;
@@ -99,7 +100,7 @@ export interface StorageSnapshot {
 export interface StorageDataset {
   name: string; // full dataset path, e.g. "tank/pvc-xxxx"
   pvc: StorageObjectRef | null; // from the openebs.io:pvc-* properties; null when unset
-  mirror?: string; // Mirror (or ProxyMirror) CR the dataset belongs to, resolved by the controller's join; absent when unattributed
+  mirror?: string; // Mirror CR the dataset belongs to, resolved by the controller's join; absent when unattributed
   usedBytes: number; // on-disk footprint, including snapshot-held space
   referencedBytes: number;
   writtenBytes: number; // incremental bytes since the latest snapshot

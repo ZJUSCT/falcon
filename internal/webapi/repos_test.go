@@ -105,26 +105,8 @@ func TestHandleRepoUnknown(t *testing.T) {
 	}
 }
 
-// TestHandleRepoAmbiguous: a Mirror and a ProxyMirror are distinct resources,
-// so the same name may exist for both (even in one namespace) — the request
-// must be rejected with 409 instead of guessing. The same applies to the same
-// name in two namespaces of the same kind.
+// TestHandleRepoAmbiguous rejects same-name Mirrors across namespaces.
 func TestHandleRepoAmbiguous(t *testing.T) {
-	mirror := &mirrorv1alpha1.Mirror{
-		ObjectMeta: metav1.ObjectMeta{Name: "pypi", Namespace: "mirrors"},
-	}
-	proxy := &mirrorv1alpha1.ProxyMirror{
-		ObjectMeta: metav1.ObjectMeta{Name: "pypi", Namespace: "mirrors"},
-	}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(mirror, proxy).Build()
-	srv := httptest.NewServer((&Server{Client: c}).AdminHandler())
-	defer srv.Close()
-
-	resp, _ := get(t, srv.URL+"/api/repos/pypi")
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("cross-kind collision: status = %d, want 409", resp.StatusCode)
-	}
-
 	otherNS := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "other"},
 	}
@@ -135,7 +117,7 @@ func TestHandleRepoAmbiguous(t *testing.T) {
 	srv2 := httptest.NewServer((&Server{Client: c2}).AdminHandler())
 	defer srv2.Close()
 
-	resp, _ = get(t, srv2.URL+"/api/repos/debian")
+	resp, _ := get(t, srv2.URL+"/api/repos/debian")
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("cross-namespace collision: status = %d, want 409", resp.StatusCode)
 	}
@@ -144,10 +126,10 @@ func TestHandleRepoAmbiguous(t *testing.T) {
 // TestHandleRepoProxyMirrorSpec: ProxyMirror specs are served from the same
 // endpoint (new concept — the legacy API had no analog; documented extension).
 func TestHandleRepoProxyMirrorSpec(t *testing.T) {
-	p := &mirrorv1alpha1.ProxyMirror{
+	p := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "pypi-proxy", Namespace: "mirrors"},
-		Spec: mirrorv1alpha1.ProxyMirrorSpec{
-			Info: mirrorv1alpha1.ProxyMirrorInfo{Upstream: "https://pypi.org/simple/"},
+		Spec: mirrorv1alpha1.MirrorSpec{
+			Info: mirrorv1alpha1.MirrorInfo{Upstream: "https://pypi.org/simple/"},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(p).Build()

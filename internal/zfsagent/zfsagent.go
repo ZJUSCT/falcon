@@ -52,7 +52,7 @@ type Dataset struct {
 	// PVC is the PersistentVolumeClaim the dataset backs (from the
 	// openebs.io:pvc-* properties); null when unset.
 	PVC *ObjectRef `json:"pvc"`
-	// Mirror is the Mirror (or ProxyMirror) CR the dataset belongs to, as
+	// Mirror is the Mirror CR the dataset belongs to, as
 	// resolved by the controller's /api/storage join. The agent never sets
 	// it; empty means the dataset is not (or could not be) attributed to a
 	// Mirror of the controller's namespace.

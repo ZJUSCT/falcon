@@ -352,7 +352,7 @@ func testMirror() *mirrorv1alpha1.Mirror {
 				Description: "Controller smoke test",
 				Upstream:    "generated locally",
 			},
-			Sync: mirrorv1alpha1.MirrorSyncSpec{
+			Sync: &mirrorv1alpha1.MirrorSyncSpec{
 				Interval:          metav1.Duration{Duration: time.Hour},
 				RetryInterval:     metav1.Duration{Duration: 15 * time.Minute},
 				Timeout:           metav1.Duration{Duration: 10 * time.Minute},
@@ -387,7 +387,7 @@ func testMirror() *mirrorv1alpha1.Mirror {
 					}},
 				}},
 			},
-			Storage: mirrorv1alpha1.MirrorStorageSpec{
+			Storage: &mirrorv1alpha1.MirrorStorageSpec{
 				PVCSpec: corev1.PersistentVolumeClaimSpec{
 					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 					Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
@@ -965,14 +965,13 @@ func TestSyncPVCPrebindsVolumeNameButPublishCloneDropsIt(t *testing.T) {
 // fake-client test cannot exercise: the fixed services keys with the
 // replicas/podTemplate shape (no enable, no mirrorMountPath), the
 // declaration-time podTemplate.spec presence CEL rule, and the absence of the
-// old array shape (per-entry name/image/ports) — in both the Mirror and the
-// ProxyMirror CRD.
+// old array shape (per-entry name/image/ports) in the Mirror CRD.
 func TestPublishSchemaInCRDs(t *testing.T) {
 	// The committed chart CRDs are installed manually (helm does not upgrade
 	// crds/), so this test only guards the realistic drift: the committed
 	// YAML lagging behind a type change. It pins the fixed-key services shape,
 	// the embedded corev1 pod template schema, and the CEL rule.
-	for _, crd := range []string{"mirrors.zjusct.io_mirrors.yaml", "mirrors.zjusct.io_proxymirrors.yaml"} {
+	for _, crd := range []string{"mirrors.zjusct.io_mirrors.yaml"} {
 		t.Run(crd, func(t *testing.T) {
 			raw, err := os.ReadFile(filepath.Join("..", "..", "charts", "falcon", "crds", crd))
 			if err != nil {

@@ -140,7 +140,7 @@ func pathPrefixMatches(pathPrefixes []string) []gatewayv1.HTTPRouteMatch {
 }
 
 // ensureRouteWithRules idempotently maintains the publish HTTPRoute
-// (<base>-publish) of one published Mirror or ProxyMirror in the owner's
+// (<base>-publish) of one published Mirror in the owner's
 // namespace:
 //
 //   - ownerReference -> the CR (controller=true), so deleting the CR
@@ -322,21 +322,6 @@ func ensurePublishedMirrorRoute(ctx context.Context, r *MirrorReconciler, mirror
 	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, mirror, mirror.Spec.Publish.Aliases)
 }
 
-// ensureReadyProxyRoute is the ProxyMirror-specific invocation, serving or
-// redirect mode like ensurePublishedMirrorRoute. In serving mode the route is
-// created while the Deployment converges so both resources can become ready
-// in parallel. The canonical path and aliases have the same semantics as
-// Mirror, including subset aliases handled by the proxy backend.
-func ensureReadyProxyRoute(ctx context.Context, r *ProxyMirrorReconciler, proxy *mirrorv1alpha1.ProxyMirror) error {
-	if !r.Config.PublishEnabled() {
-		return nil
-	}
-	if hostname, ok := proxy.Spec.Publish.RedirectActive(); ok {
-		return ensureRedirectRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, proxy, proxyRoutePaths(proxy), hostname)
-	}
-	return ensurePublishRouteFor(ctx, r.Client, r.Recorder, r.Scheme, r.Config, proxy, proxy.Spec.Publish.Aliases)
-}
-
 // deletePublishRouteFor removes the deterministic route when HTTP publishing
 // is no longer desired. NotFound is the steady state.
 func deletePublishRouteFor(ctx context.Context, c client.Client, owner client.Object) error {
@@ -363,15 +348,6 @@ func deletePublishRouteFor(ctx context.Context, c client.Client, owner client.Ob
 func mirrorRoutePaths(mirror *mirrorv1alpha1.Mirror) []string {
 	paths := []string{"/" + mirror.Name}
 	for _, alias := range mirror.Spec.Publish.Aliases {
-		paths = append(paths, alias.Path)
-	}
-	return paths
-}
-
-// proxyRoutePaths is mirrorRoutePaths for a ProxyMirror.
-func proxyRoutePaths(proxy *mirrorv1alpha1.ProxyMirror) []string {
-	paths := []string{"/" + proxy.Name}
-	for _, alias := range proxy.Spec.Publish.Aliases {
 		paths = append(paths, alias.Path)
 	}
 	return paths

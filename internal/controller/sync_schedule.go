@@ -37,11 +37,13 @@ func (r *MirrorReconciler) planAutomaticSync(ctx context.Context, mirror *mirror
 		if item.Name == mirror.Name {
 			seen = true
 		}
-		if interval := item.Spec.Sync.Interval.Duration; interval > 0 {
-			rate += 1 / interval.Seconds()
+		if item.Spec.Sync != nil {
+			if interval := item.Spec.Sync.Interval.Duration; interval > 0 {
+				rate += 1 / interval.Seconds()
+			}
 		}
 	}
-	if !seen && mirror.Spec.Sync.Interval.Duration > 0 {
+	if !seen && mirror.Spec.Sync != nil && mirror.Spec.Sync.Interval.Duration > 0 {
 		rate += 1 / mirror.Spec.Sync.Interval.Seconds()
 	}
 	if rate <= 0 {

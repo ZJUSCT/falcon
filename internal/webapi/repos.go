@@ -17,12 +17,11 @@ import (
 // intentionally never exposed here — and defaults to YAML, with the extension
 // of the request selecting the serialization (see splitNameExtension).
 //
-//   - 200: exactly one Mirror or ProxyMirror matches <name> (across all
-//     namespaces and both kinds); the body is its spec.
+//   - 200: exactly one Mirror matches <name> across all namespaces; the body
+//     is its spec.
 //   - 404: no object with that name exists.
-//   - 409: the name is ambiguous — more than one CR matches (same name in
-//     different namespaces, or a Mirror and a ProxyMirror sharing a name; the
-//     kinds are separate resources, so the apiserver permits that).
+//   - 409: the name is ambiguous — more than one Mirror matches in different
+//     namespaces.
 func (s *Server) handleRepo(w http.ResponseWriter, r *http.Request) {
 	name, asYAML := splitNameExtension(r.URL.Path)
 	name = strings.TrimSpace(name)
@@ -57,21 +56,14 @@ func (s *Server) lookupSpecs(r *http.Request, name string) ([]interface{}, error
 	if err := s.Client.List(r.Context(), &mirrors); err != nil {
 		return nil, err
 	}
-	var proxies mirrorv1alpha1.ProxyMirrorList
-	if err := s.Client.List(r.Context(), &proxies); err != nil {
-		return nil, err
-	}
+
 	var specs []interface{}
 	for i := range mirrors.Items {
 		if mirrors.Items[i].Name == name {
 			specs = append(specs, &mirrors.Items[i].Spec)
 		}
 	}
-	for i := range proxies.Items {
-		if proxies.Items[i].Name == name {
-			specs = append(specs, &proxies.Items[i].Spec)
-		}
-	}
+
 	return specs, nil
 }
 

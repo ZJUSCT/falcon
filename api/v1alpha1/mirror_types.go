@@ -125,11 +125,15 @@ type MirrorStorageSpec struct {
 	// dynamically provisions a claim whose volumeName is empty).
 	PVCSpec corev1.PersistentVolumeClaimSpec `json:"pvcTemplate"`
 	// SyncStorageClassName provisions the stable writable synchronization PVC.
-	SyncStorageClassName string `json:"syncStorageClassName"`
-	// PublishStorageClassName provisions disposable snapshot-derived
-	// publish PVCs. Required: the publish PVC (a snapshot clone) explicitly
-	// uses this StorageClass, an operational choice that is never inherited
-	// from SyncStorageClassName. An Immediate-binding class is recommended:
+	// It is required for a periodically synchronized Mirror and absent for a
+	// Cache Mirror or Proxy Mirror.
+	// +kubebuilder:validation:MaxLength=253
+	SyncStorageClassName string `json:"syncStorageClassName,omitempty"`
+	// PublishStorageClassName provisions disposable snapshot-derived publish
+	// PVCs for a synchronized Mirror. It is absent in proxy mode. The publish
+	// PVC (a snapshot clone) explicitly uses this StorageClass, an operational
+	// choice that is never inherited from SyncStorageClassName. An
+	// Immediate-binding class is recommended:
 	// under WaitForFirstConsumer the scheduler cannot see the snapshot
 	// clone's locality while placing the publish pod (Kubernetes <= 1.36),
 	// so the pod may be scheduled to a node where the clone cannot be
@@ -140,12 +144,24 @@ type MirrorStorageSpec struct {
 	// provisioned, and it normally uses reclaimPolicy: Delete so snapshot
 	// pruning reclaims the underlying backend volumes.
 	// +kubebuilder:validation:MinLength=1
-	PublishStorageClassName string `json:"publishStorageClassName"`
+	// +kubebuilder:validation:MaxLength=253
+	PublishStorageClassName string `json:"publishStorageClassName,omitempty"`
+	// CacheStorageClassName provisions the stable writable cache PVC named
+	// <base>-cache for a Cache Mirror. It is only valid when
+	// SyncStorageClassName is absent; its presence selects Cache Mirror mode
+	// rather than Proxy Mirror mode. The PVC properties come from pvcTemplate;
+	// the proxy workload mounts this claim and the controller periodically
+	// reports its kubelet-observed usage in MirrorZ. This field is immutable
+	// after creation; omit it for a Proxy Mirror.
+	// +kubebuilder:validation:MaxLength=253
+	CacheStorageClassName string `json:"cacheStorageClassName,omitempty"`
 	// VolumeSnapshotClassName snapshots the sync PVC after every successful
 	// sync; it must be served by the same storage backend as the
-	// StorageClasses above. Required: atomic publication depends on it.
-	// +kubebuilder:validation:MinLength=1
-	VolumeSnapshotClassName string `json:"volumeSnapshotClassName"`
+	// StorageClasses above. It is required for a synchronized Mirror and
+	// absent in proxy mode because proxies never create snapshots.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	VolumeSnapshotClassName string `json:"volumeSnapshotClassName,omitempty"`
 	// Retention counts historical ready snapshots in addition to the latest one,
 	// including sync-only generations. Live publication inputs are protected.
 	// +kubebuilder:default=1
@@ -250,8 +266,8 @@ func (a MirrorAlias) CatalogName() string {
 	return strings.TrimPrefix(a.Path, "/")
 }
 
-// MirrorHTTPServiceSpec is the http publish service of a Mirror or
-// ProxyMirror: the base MirrorServiceSpec, always in SERVING mode — the
+// MirrorHTTPServiceSpec is the http publish service of a Mirror, including
+// proxy modes: the base MirrorServiceSpec, always in SERVING mode — the
 // declared key must carry a serving podTemplate.spec (CEL-enforced). The
 // publish HTTPRoute forwards the canonical /<CR name> path to the publish
 // Deployment, while the publish-level aliases (spec.publish.aliases)
@@ -350,10 +366,20 @@ func (s MirrorServicesSpec) AnyEnabled() bool {
 	return s.HTTP.Serving() || s.Rsync != nil
 }
 
+// +kubebuilder:validation:XValidation:rule="(has(self.storage) && has(self.storage.syncStorageClassName) ? self.storage.syncStorageClassName : \"\") == (has(oldSelf.storage) && has(oldSelf.storage.syncStorageClassName) ? oldSelf.storage.syncStorageClassName : \"\")",message="syncStorageClassName is immutable; delete and recreate the Mirror to change it"
+// +kubebuilder:validation:XValidation:rule="(has(self.storage) && has(self.storage.publishStorageClassName) ? self.storage.publishStorageClassName : \"\") == (has(oldSelf.storage) && has(oldSelf.storage.publishStorageClassName) ? oldSelf.storage.publishStorageClassName : \"\")",message="publishStorageClassName is immutable; delete and recreate the Mirror to change it"
+// +kubebuilder:validation:XValidation:rule="(has(self.storage) && has(self.storage.cacheStorageClassName) ? self.storage.cacheStorageClassName : \"\") == (has(oldSelf.storage) && has(oldSelf.storage.cacheStorageClassName) ? oldSelf.storage.cacheStorageClassName : \"\")",message="cacheStorageClassName is immutable; delete and recreate the Mirror to change it"
+// +kubebuilder:validation:XValidation:rule="(has(self.storage) && has(self.storage.volumeSnapshotClassName) ? self.storage.volumeSnapshotClassName : \"\") == (has(oldSelf.storage) && has(oldSelf.storage.volumeSnapshotClassName) ? oldSelf.storage.volumeSnapshotClassName : \"\")",message="volumeSnapshotClassName is immutable; delete and recreate the Mirror to change it"
 type MirrorSpec struct {
-	Info    MirrorInfo        `json:"info"`
-	Sync    MirrorSyncSpec    `json:"sync"`
-	Storage MirrorStorageSpec `json:"storage"`
+	Info MirrorInfo `json:"info"`
+	// Sync is required when storage.syncStorageClassName is set and forbidden
+	// in Cache Mirror and Proxy Mirror modes.
+	// +optional
+	Sync *MirrorSyncSpec `json:"sync,omitempty"`
+	// Storage is required for synchronized Mirrors, optional for proxy mode,
+	// and carries the optional cache PVC configuration for Cache Mirrors.
+	// +optional
+	Storage *MirrorStorageSpec `json:"storage,omitempty"`
 	// Publish declares how the active snapshot clone is published: the
 	// cross-protocol declarations (aliases, redirect) plus the fixed keys
 	// "http" and "rsync" (see MirrorServicesSpec). With every key absent
@@ -431,6 +457,10 @@ type MirrorStatus struct {
 	Sync               MirrorSyncState          `json:"sync,omitempty"`
 	Publication        *MirrorPublicationStatus `json:"publication,omitempty"`
 	ObservedGeneration int64                    `json:"observedGeneration,omitempty"`
+	// StorageClassFingerprint records the accepted mode and StorageClass fields.
+	// They are immutable for the lifetime of a Mirror; changing mode requires
+	// deleting and recreating the object.
+	StorageClassFingerprint string `json:"storageClassFingerprint,omitempty"`
 	// LastAcceptedSpecHash identifies the spec.sync accepted for the last
 	// synchronization.
 	LastAcceptedSpecHash string `json:"lastAcceptedSpecHash,omitempty"`
@@ -464,11 +494,15 @@ type MirrorStatus struct {
 	// LastAttempt records the last accepted synchronization request outcome,
 	// including cancellation before a Job starts. Success means a ready snapshot
 	// was delivered; LastSync separately records the Job result.
-	LastAttempt     *MirrorSyncStatus  `json:"lastAttempt,omitempty"`
-	LastPublishedAt *metav1.Time       `json:"lastPublishedAt,omitempty"`
-	SizeBytes       int64              `json:"sizeBytes,omitempty"`
-	LastSync        *MirrorSyncStatus  `json:"lastSync,omitempty"`
-	Conditions      []metav1.Condition `json:"conditions,omitempty"`
+	LastAttempt     *MirrorSyncStatus `json:"lastAttempt,omitempty"`
+	LastPublishedAt *metav1.Time      `json:"lastPublishedAt,omitempty"`
+	SizeBytes       int64             `json:"sizeBytes,omitempty"`
+	// CacheSizeUpdatedAt is when sizeBytes was last measured for a Cache
+	// Mirror's writable cache PVC. Cache usage is refreshed periodically and
+	// remains absent when no running proxy pod exposes the PVC to a kubelet.
+	CacheSizeUpdatedAt *metav1.Time       `json:"cacheSizeUpdatedAt,omitempty"`
+	LastSync           *MirrorSyncStatus  `json:"lastSync,omitempty"`
+	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -483,6 +517,24 @@ type Mirror struct {
 
 	Spec   MirrorSpec   `json:"spec"`
 	Status MirrorStatus `json:"status,omitempty"`
+}
+
+// IsSynchronized reports whether this Mirror owns a periodic synchronization
+// pipeline. The presence of syncStorageClassName is the mode discriminator;
+// validation requires spec.sync to agree with it.
+func (m *Mirror) IsSynchronized() bool {
+	return m != nil && m.Spec.Storage != nil && m.Spec.Storage.SyncStorageClassName != ""
+}
+
+// IsCacheMirror reports the proxy mode with a writable cache PVC.
+func (m *Mirror) IsCacheMirror() bool {
+	return m != nil && !m.IsSynchronized() && m.Spec.Storage != nil && m.Spec.Storage.CacheStorageClassName != ""
+}
+
+// IsProxyMirror reports either proxy mode. IsCacheMirror distinguishes the
+// cached variant.
+func (m *Mirror) IsProxyMirror() bool {
+	return m != nil && !m.IsSynchronized()
 }
 
 // +kubebuilder:object:root=true

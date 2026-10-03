@@ -391,7 +391,7 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                         <td className="px-3 py-2 text-center align-top whitespace-nowrap">
                           <span
                             className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
-                              job.kind === 'ProxyMirror'
+                              (job.kind === 'ProxyMirror' || job.kind === 'CacheMirror')
                                 ? 'bg-violet-500/15 text-violet-400'
                                 : 'bg-primary/10 text-primary'
                             }`}

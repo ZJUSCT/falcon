@@ -30,7 +30,7 @@ type SiteConfig struct {
 
 // Server serves the HTTP API on top of controller-runtime clients.
 type Server struct {
-	// Client reads Mirror and ProxyMirror objects. It is expected to be the
+	// Client reads Mirror objects. It is expected to be the
 	// manager's cached client so the handlers never hit the API server
 	// directly (and, with the namespace-scoped cache, only see objects from
 	// the controller's own namespace).

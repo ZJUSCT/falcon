@@ -19,7 +19,7 @@ var (
 )
 
 func addKnownTypes(scheme *runtime.Scheme) error {
-	scheme.AddKnownTypes(GroupVersion, &Mirror{}, &MirrorList{}, &ProxyMirror{}, &ProxyMirrorList{})
+	scheme.AddKnownTypes(GroupVersion, &Mirror{}, &MirrorList{})
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil
 }

@@ -73,7 +73,7 @@ func (a *UsageAggregator) Storage(ctx context.Context, reader client.Reader) (*S
 	}, nil
 }
 
-// mirrorsByDataset maps a ZFS dataset name to the Mirror (or ProxyMirror)
+// mirrorsByDataset maps a ZFS dataset name to the Mirror
 // that owns it. The join goes dataset → PVC → Mirror: a dataset's leaf is the
 // CSI volume name, which is claim.Spec.VolumeName (OpenEBS <= 2.11 without
 // user properties) or the claim the openebs.io:pvc-* properties name (newer
@@ -85,10 +85,7 @@ func mirrorsByDataset(ctx context.Context, reader client.Reader, agg *usageAggre
 	if err := reader.List(ctx, &mirrors); err != nil {
 		return nil, err
 	}
-	var proxies mirrorv1alpha1.ProxyMirrorList
-	if err := reader.List(ctx, &proxies); err != nil {
-		return nil, err
-	}
+
 	var claims corev1.PersistentVolumeClaimList
 	if err := reader.List(ctx, &claims); err != nil {
 		return nil, err
@@ -111,11 +108,10 @@ func mirrorsByDataset(ctx context.Context, reader client.Reader, agg *usageAggre
 		if m.Status.ActivePVC != "" {
 			exact[m.Status.ActivePVC] = m.Name
 		}
+		if m.IsCacheMirror() {
+			exact[strings.TrimSuffix(deriveSyncPVCName(m.Name), "-sync")+"-cache"] = m.Name
+		}
 		addMirror(m.Name, m.Name)
-	}
-	for i := range proxies.Items {
-		p := &proxies.Items[i]
-		exact[strings.TrimSuffix(deriveSyncPVCName(p.Name), "-sync")+"-cache"] = p.Name
 	}
 
 	claimByVolume := map[string]*corev1.PersistentVolumeClaim{}

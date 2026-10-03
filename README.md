@@ -5,7 +5,7 @@
 
 Falcon 是一个运行在 [Kubernetes](https://kubernetes.io/) 上的软件源镜像编排器。第三代 [浙江大学镜像站（ZJU Mirror）](https://mirrors.zju.edu.cn/) 由 Falcon 强力驱动。
 
-- **镜像编排**：用 `Mirror` 声明镜像的存储、同步任务和发布服务，用 `ProxyMirror` 声明代理及其可选缓存。Falcon 创建并维护相应的 Kubernetes 资源。
+- **镜像编排**：用 `Mirror` CRD 描述镜像。Falcon 创建并维护相应的 Kubernetes 资源。
 - **原子化发布**：同步任务写入独立的可写 PV；同步成功后，Falcon 创建 VolumeSnapshot 并从中克隆只读 PV 用于提供服务。同步的中间状态不对用户暴露。
 - **滚动更新**：借助 K8s Deployment 滚动更新机制，在新旧的镜像版本平滑切换，现有请求在 grace period 内不被打断。
 - **`mirrorz.json`**：符合 [教育网联合镜像站（MirrorZ）](https://github.com/mirrorz-org/mirrorz) 标准。
@@ -219,11 +219,23 @@ publish:
 - 怎么服务
 - 其他信息
 
-自然产生了 `spec` 中的 `storage`、`sync`、`publish`、`info` 四个 map。并且这些内容 K8s 已经有了对应的抽象：PVC、VolumeSnapshot、Job、Deployment、Service、Route 等，只需要把这些内容组合起来，再加上控制镜像同步周期的字段，就形成了可以描述镜像的 CRD。
+自然产生了 `spec` 中的 `storage`、`sync`、`publish`、`info` 四个 map。并且这些内容 K8s 已经有了对应的抽象：PVC、VolumeSnapshot、Job、Deployment、Service、Route 等，只需要把这些内容组合起来，再加上控制镜像同步周期的字段，就形成了可以描述镜像的 CRD `Mirror`。API 组 `mirrors.zjusct.io`，版本 `v1alpha1`，只有 kind `Mirror`（复数 `mirrors`，无短名），为 namespaced 资源。
 
-API 组 `mirrors.zjusct.io`，版本 `v1alpha1`，kind `Mirror`（复数 `mirrors`，无短名）和 `ProxyMirror`（复数 `proxymirrors`，无短名），均为 namespaced。
+#### Mirror 的三种模式
 
-本 spec 中 CRD 的备注格式：
+三种模式共用同一个 `Mirror` kind；模式由 StorageClass 字段的存在性决定，创建后不可变：
+
+| 模式 | `storage.syncStorageClassName` | `storage.cacheStorageClassName` | 同步与快照 | 缓存 PVC |
+| --- | --- | --- | --- | --- |
+| Mirror | 有 | 无 | 定期同步、快照和发布 | 无 |
+| Cache Mirror | 无 | 有 | 无 | `<base>-cache` |
+| Proxy Mirror | 无 | 无 | 无 | 无 |
+
+模式和所有 StorageClass 字段一旦被控制器接受就不能修改，如需切换模式应删除并重新创建 Mirror。
+
+#### Mirror
+
+CRD 的备注格式：
 
 ```yaml
 field:
@@ -233,7 +245,7 @@ field:
 # 备注：<其他说明>
 ```
 
-#### Mirror
+CRD 定义：
 
 ```yaml
 metadata:
@@ -319,14 +331,17 @@ spec:
       # 校验（控制器）：accessModes 至少一项，resources.requests.storage > 0
     syncStorageClassName: ...
     # string：同步 PVC 使用的 StorageClass
-    # 必填；对应同步 PVC spec.storageClassName
+    # 可选
     publishStorageClassName: ...
     # string：快照克隆得到的发布 PVC 用的 SC，须与快照/StorageClass 同后端同拓扑
-    # 必填；对应发布 PVC spec.storageClassName
+    # 可选
     # 校验（schema、控制器）：非空
     # 发布 PVC 复用 pvcTemplate，覆盖 storageClassName、清除 volumeName 并设置 dataSource
     # 备注：建议 reclaimPolicy: Delete 以及时清理快照
     # （本地 PV 语义下即同节点）
+    cacheStorageClassName: ...
+    # string：Cache Mirror 的缓存 PVC 用的 SC
+    # 可选
     volumeSnapshotClassName: ...
     # string：快照用的 VolumeSnapshotClass（原子发布依赖），须由同一存储后端提供
     # 必填，无默认值
@@ -522,70 +537,6 @@ status:
 
 打印列：Ready condition、Active PVC、Last Sync（`.status.lastSync.finishedAt`）、Age。
 
-#### ProxyMirror
-
-- `spec.info`、`spec.publish.http` 与 Mirror 相同
-- 没有 `sync` 或 `storage`，可通过 `cache` 配置缓存存储
-- 没有 finalizer，删除 CR 时靠 owner-reference GC 回收全部子资源
-
-```yaml
-spec:
-  cache:
-    # 可选；出现即启用缓存存储，移除则删除缓存 PVC；与 HTTP 发布开关独立
-    # 仅控制 PVC；nginx 等代理行为由发布 Pod 的配置文件声明
-    pvcTemplate:
-      # PersistentVolumeClaimSpec：必填
-      accessModes:
-        - ReadWriteOnce
-      resources:
-        requests:
-          storage: 20Gi
-      storageClassName: ...
-      volumeMode: Filesystem
-      # 校验（控制器）：accessModes 至少一项，resources.requests.storage > 0
-      # dataSource、dataSourceRef、selector、volumeName 不支持
-  publish:
-    # http 一个协议 key（代理即 HTTP 发布者）+ 与 Mirror 相同的跨协议声明
-    # （aliases、redirect）；key 未出现且无 redirect = 不部署负载，代理不对外发布
-    aliases:
-      # []MirrorAlias：与 Mirror 相同，支持普通和子集 alias。
-      # 子集 alias 先 301 到 /<CR 名>/<subpath>，后续请求由父代理的
-      # HTTP backend 处理；复用父代理及其可选缓存，无独立工作负载。
-      - path: /PyPI
-    redirect: mirrors.cernet.edu.cn
-    # string：与 Mirror 相同的 publish 级重定向（存在即压制代理负载）
-    http:
-      # 形状与 Mirror 相同（replicas + podTemplate，恒为服务模式）
-      replicas: 1
-      # 同 Mirror（略）
-      podTemplate:
-        # PodTemplateSpec：发布容器的完整声明
-        # 声明 http key 时必填（CEL：podTemplate.spec）
-        # 对应：发布 Deployment spec.template
-        # 校验（控制器）：至少一容器、第一容器至少一个 containerPort
-        # 以下仅示意控制器注入后的字段，不是用户输入；不得声明同名 volume。
-        spec:
-          volumes:
-            - name: proxy-cache
-              persistentVolumeClaim:
-                claimName: <base>-cache
-        #   （仅缓存启用时管理；可写卷源——缓存本身就是写入目标；保留卷名，
-        #   用户不得声明同名 volume；挂载与否、挂载路径由用户自行声明）
-        # 代理 Deployment/Pod 的其他字段同样完全来自运维人员的 PodTemplate；Falcon 只注入上述缓存卷和控制器标签。
-        # 唯一保留的外部注解键：reloader.stakater.com/last-reloaded-from，见「发布工作负载的配置热更新」。
-        # 模板 labels 叠加 mirrors.zjusct.io/mirror: <base>、app.kubernetes.io/component: publish-http
-        # 节点放置不注入（代理无数据卷，局部性无从推导，调度由用户决定）
-        # 无工作负载默认注入；安全策略由集群准入策略或用户 PodTemplate 管理。
-        # 备注：nginx proxy_cache 惯用缓存目录 /var/cache/nginx/proxy，
-        #   由用户在 template 中自行挂载，控制器不注入挂载
-status:
-  observedGeneration: 1
-  conditions: []
-  # Ready / Progressing / Degraded；派生资源名均可由 CR 名与 spec 确定，不重复写入 status
-```
-
-打印列：Ready condition、Age。
-
 #### 校验
 
 各字段的校验规则已在上文 YAML 注释中描述，这里对相关机制和设计意图进行说明：
@@ -610,7 +561,7 @@ Falcon 仅对 CRD 做基础校验，派生资源的校验由其他组件负责�
 | VolumeSnapshot | `<base>-snap-<Unix秒>` | 同步成功后保存的快照 |
 | 发布 PVC | `<base>-snap-<Unix秒>` | 从快照克隆的只读数据卷，挂载到发布容器 |
 | 发布 Deployment、Service、Route 等 | `<base>-publish-<protocol>` | 提供内容服务的相关资源 |
-| 缓存 PVC | `<base>-cache` | ProxyMirror 镜像的缓存数据卷 |
+| 缓存 PVC | `<base>-cache` | Cache Mirror 的缓存数据卷 |
 | 发布代次 | UNIX 时间戳 | 以同步事务开始时分配的时间戳标识 |
 | 活跃发布 | `status.activeSnapshot`、`status.activePVC` | 控制器最近确认激活的代次 |
 
@@ -629,7 +580,6 @@ K8s 对对象名定义了三档约束：
 
 - 当且仅当 CR 名含点号时，将名字中的点号替换为 `-`：例如 `crates.io-index` 的发布 Deployment 和 Service 名为 `crates-io-index-publish-http`。Deployment 与 Service 始终同名，HTTPRoute 的 `backendRef`、停服删除、发布健康检查、旧 Pod 排空判定等引用随之一致。
 - 转换不做进一步消歧（不加 hash、不截断）。若转换后的名字与其他镜像冲突（例如 `crates.io-index` 与 `crates-io-index` 并存），Falcon 不接管对方对象，向父 CR 报告 `Degraded=True/DerivedResourceInvalid`；由 CR 名点号以外的非法性（如超长）导致的 apiserver 拒绝同样按该语义转述。
-- Mirror 与 ProxyMirror 适用相同规则。
 
 > 参考文献：
 >
@@ -649,10 +599,6 @@ K8s 对对象名定义了三档约束：
 发布 Pod 模板不注入代次注解。发布 PVC 名内嵌时间戳，代次信息由其唯一承载；切换发布代次时，`mirror-data` 卷的 `claimName` 变化会改变 Pod 模板并触发 Deployment 滚动。
 
 ### 镜像的生命周期
-
-#### 首次创建
-
-ProxyMirror 不存在同步和发布流程。Falcon 按照其配置创建好相关资源、确认就绪后就完事了。
 
 #### 同步和发布流程
 
@@ -709,7 +655,7 @@ ProxyMirror 不存在同步和发布流程。Falcon 按照其配置创建好相�
 
 举例：镜像的 HTTP 服务正常（`Ready`），同时出现了其他错误（`Degraded`）
 
-`status.sync.phase` 描述同步调度与执行的阶段。ProxyMirror 没有同步状态。
+`status.sync.phase` 描述同步调度与执行的阶段。
 
 | Phase | 含义 |
 | --- | --- |
@@ -736,11 +682,7 @@ ProxyMirror 不存在同步和发布流程。Falcon 按照其配置创建好相�
 
 #### 停止服务
 
-移除 `spec.publish.http` 或 `spec.publish.rsync` 会删除对应的发布 Deployment 和 Service。移除 HTTP 服务还会删除所属 HTTPRoute。
-
-停服不关闭自动同步，存储仍按保留策略管理。ProxyMirror 移除 HTTP 服务时，只要 `spec.cache` 仍存在，就保留缓存 PVC。
-
-K8s 已接受的停服配置不会被其他字段的控制器校验错误或尚未完成的同步取消所阻塞；移除 HTTP 后 `Ready=False`。
+移除 `spec.publish` 下的字段会删除对应的发布 Deployment、Service 和 Route 等资源。
 
 #### 配置更新
 
@@ -755,7 +697,7 @@ Falcon 不负责监控 Workload 的 ConfigMap/Secret 变更并进行重启。Fal
 - 普通 alias：`/<alias>/<后缀>` → `/<CR 名>/<后缀>`。用于 CR 名无法表达的路径：大写字母（/AOSP）、多层路径（/git/linux.git）。普通 alias 不进入 mirrorz.json。
 - 子集 alias（带 `subset`）：`/<alias>/<后缀>` → `/<CR 名>/<subpath>/<后缀>`。它是本镜像树内一个子目录的独立目录学条目——典型例子是同步了完整 `debian-cdimage` 的同时以 `debian-nonfree` 这个 MirrorZ cname 对外提供 `unofficial/non-free` 子树。子集条目与父镜像的同步、存储、发布完全一体（无独立数据、无独立状态），在 mirrorz.json 中投影父镜像的 status，详见「映射到 MirrorZ」。`subpath` 指向的子树是否真实存在于同步范围内由运维保证（控制器不检查数据内容；例如父镜像同步参数 exclude 了该子树时，子集条目会 404）。
 
-ProxyMirror 同样支持子集 alias：例如代理 `debian-cdimage` 声明 `/debian-nonfree`、`subpath: unofficial/non-free` 后，网关先 301 到 `/debian-cdimage/unofficial/non-free`，后续请求由父代理的 HTTP backend 处理。子集复用父代理和可选缓存，不创建独立工作负载或 PVC；运维需确保上游和代理路径配置能够提供该子树。MirrorZ 中子集条目继承父代理的 `C`（有缓存）或 `R`（无缓存）状态、就绪条件，不输出 size。
+Cache Mirror 和 Proxy Mirror 同样支持子集 alias：例如代理 `debian-cdimage` 声明 `/debian-nonfree`、`subpath: unofficial/non-free` 后，网关先 301 到 `/debian-cdimage/unofficial/non-free`，后续请求由父代理的 HTTP backend 处理。子集复用父代理和可选缓存，不创建独立工作负载或 PVC；运维需确保上游和代理路径配置能够提供该子树。MirrorZ 中子集条目继承父代理的 `C`（有缓存）或 `R`（无缓存）状态、就绪条件，不输出 size。
 
 `publish.redirect` 是 publish 级的重定向开关，设计用于**临时运维**：例如在节点间迁移镜像数据时，把该镜像的全部流量临时导向另一个镜像站，迁完再切回。声明一个裸主机名即激活：
 
@@ -776,8 +718,6 @@ redirect 的优先级最高：**存在即生效**，压制全部协议 key——
 #### 镜像的删除与数据保留
 
 删除 Mirror 时，Falcon 按「同步 Job 和发布 Deployment → PVC → VolumeSnapshot」的顺序删除属于该 Mirror 的资源，各阶段等待对应资源消失后再继续，最后移除 finalizer。工作负载使用 foreground deletion，等待其 Pod 正常终止；Service 和 HTTPRoute 由 owner-reference GC 回收。
-
-ProxyMirror 无此 finalizer，其子资源统一由 owner-reference GC 回收。
 
 Falcon 不直接管理 PV 或后端数据；PVC 消失不表示后端卷已完成删除。数据是否保留由各资源自身的策略决定：
 
@@ -815,7 +755,7 @@ MirrorZ 字段与 Falcon 字段的映射：
   },
   "info": [],   // 分类视图，Falcon 恒为空数组
   "mirrors": [
-    // 一个 Mirror 或 ProxyMirror 对应一个条目；其每个子集 alias 再展开一个条目：
+    // 一个 Mirror 对应一个条目；其每个子集 alias 再展开一个条目：
     {
       "cname": "spec.info.cname（未设置时使用 metadata.name）",
       "desc": "spec.info.description", // 普通字符串，为空则省略
@@ -825,11 +765,11 @@ MirrorZ 字段与 Falcon 字段的映射：
       "size": "status.sizeBytes" // 字节转可读格式（1024 进制，两位小数）；未知则省略
     },
     {
-      // 子集 alias 的条目（Mirror / ProxyMirror 均支持）：
+      // 子集 alias 的条目（三种 Mirror 模式均支持）：
       "cname": "subset.cname（未设置时取 alias path 去首 /）",
       "desc": "subset.description", // 为空则省略
       "url": "site.url + alias path（如 .../debian-nonfree）",
-      "status": "与父条目逐字相同", // Mirror 投影同步状态，ProxyMirror 投影 C/R 状态
+      "status": "与父条目逐字相同",
       "upstream": "subset.upstream" // 为空则省略，不回退父条目
       // 无 size：父条目的 sizeBytes 是整树用量，对子集不成立
     }
@@ -845,8 +785,8 @@ MirrorZ 字段与 Falcon 字段的映射：
 | 正在同步／等待运行中的同步终止 | `currentSync.phase == "Running"`，或 `currentSync.phase == "Cancelling" && currentSync.startedAt != nil` | `Y<currentSync.startedAt>O<lastSuccessfulSyncAt>N<creationTimestamp>` |
 | 最近同步成功 | `lastSync.phase == "Succeeded"` | `S<lastSync.finishedAt>[X<nextSyncAt>]N<creationTimestamp>` |
 | 最近同步失败／已中止 | `lastSync.phase` 为 `Failed` 或 `Cancelled` | `F<lastSync.startedAt>O<lastSuccessfulSyncAt>[X<nextSyncAt>]N<creationTimestamp>` |
-| ProxyMirror：缓存启用 | `spec.cache` 存在 | `CN<creationTimestamp>` |
-| ProxyMirror：无缓存 | `spec.cache` 未设置 | `RN<creationTimestamp>` |
+| Cache Mirror：缓存启用 | `storage.cacheStorageClassName` 存在 | `CN<creationTimestamp>` |
+| Proxy Mirror：无缓存 | `storage.cacheStorageClassName` 未设置 | `RN<creationTimestamp>` |
 
 其他：
 
@@ -871,7 +811,7 @@ Falcon 的 `/api` 仅供 WebUI 使用。
 页面：
 
 - Overview：时钟轮盘表示的 24 小时镜像同步状态。
-- Mirrors：详细的镜像列表，Conditions 列展示所有为 True 的条件，Sync phase 列独立展示同步状态（ProxyMirror 不适用）。
+- Mirrors：详细的镜像列表，Conditions 列展示所有为 True 的条件，Sync phase 列独立展示同步状态。
     - 列表提供的控制操作：
         - Pause/Resume：暂停或恢复镜像的周期同步。
         - Sync Now：立即发起一次同步。
@@ -946,7 +886,7 @@ pre-commit 为可选的提交入口：安装后运行 `pre-commit install`，提
 make e2e
 ```
 
-`make e2e` 在本地 Docker 上创建一个单节点 [kind](https://kind.sigs.k8s.io/) 集群：Envoy Gateway（v1.9.0，helm chart——其 release `install.yaml` 不含 GatewayClass）与 volume snapshot（v8.6.0）、hostpath CSI（v1.18.0，上游 URL 由 `scripts/e2e/cluster` kustomization 引用并钉版本）一键装齐后，用本地构建的 `falcon:e2e` 镜像部署 Chart，然后以 demo Mirror 断言完整链路：同步 → 快照 → 发布 → 路由就绪（`Ready`）→ 网关取回内容 → `mirrorz.json` 收录。场景还验证普通及子集 alias 的 301、ProxyMirror 子集经真实代理 backend 获取内容、Reloader 配置更新，以及启用 302 重定向期间继续同步、移除重定向后发布最新快照。装配由 `scripts/e2e/run.sh` 负责，断言用 [chainsaw](https://kyverno.github.io/chainsaw/) 声明式编写（`tests/e2e/`：apply → 断言资源状态 → 校验命令输出），经 NodePort 直连 Envoy 数据面；测试结束的清理会删除 demo Mirror，顺带验证删除流程。宿主机需求与检查相同（Git、Make、Docker；kind、kubectl、chainsaw 等钉在 `scripts/checks/Dockerfile` 的 `e2e-tools` target 中，经 Docker socket 操作宿主 daemon）。镜像不推送 registry，直接 `kind load` 进节点。首次运行需拉取基础镜像，约需数分钟。
+`make e2e` 在本地 Docker 上创建一个单节点 [kind](https://kind.sigs.k8s.io/) 集群：Envoy Gateway（v1.9.0，helm chart——其 release `install.yaml` 不含 GatewayClass）与 volume snapshot（v8.6.0）、hostpath CSI（v1.18.0，上游 URL 由 `scripts/e2e/cluster` kustomization 引用并钉版本）一键装齐后，用本地构建的 `falcon:e2e` 镜像部署 Chart，然后以 demo Mirror 断言完整链路：同步 → 快照 → 发布 → 路由就绪（`Ready`）→ 网关取回内容 → `mirrorz.json` 收录。场景还验证普通及子集 alias 的 301、Cache Mirror 子集经真实代理 backend 获取内容、Reloader 配置更新，以及启用 302 重定向期间继续同步、移除重定向后发布最新快照。装配由 `scripts/e2e/run.sh` 负责，断言用 [chainsaw](https://kyverno.github.io/chainsaw/) 声明式编写（`tests/e2e/`：apply → 断言资源状态 → 校验命令输出），经 NodePort 直连 Envoy 数据面；测试结束的清理会删除 demo Mirror，顺带验证删除流程。宿主机需求与检查相同（Git、Make、Docker；kind、kubectl、chainsaw 等钉在 `scripts/checks/Dockerfile` 的 `e2e-tools` target 中，经 Docker socket 操作宿主 daemon）。镜像不推送 registry，直接 `kind load` 进节点。首次运行需拉取基础镜像，约需数分钟。
 
 e2e 是独立入口，不并入 `make check`；CI 中亦为独立 job，失败时诊断（集群对象、控制器与同步 Job 日志、kind 节点日志）导出到 `.e2e-dump/` 并作为 artifact 上传。
 

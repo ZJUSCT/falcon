@@ -173,6 +173,26 @@ func runningPublishPod(mirror *mirrorv1alpha1.Mirror, protocol, nodeName, pvcNam
 	}
 }
 
+func runningProxyCachePod(mirror *mirrorv1alpha1.Mirror, nodeName, pvcName string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: mirror.Namespace,
+			Name:      "pypi-proxy-cache-abcde",
+			Labels:    map[string]string{MirrorLabel: childBase(mirror.Name), ComponentLabel: publishRole(PublishProtocolHTTP)},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: nodeName,
+			Volumes: []corev1.Volume{{
+				Name: ProxyCacheVolumeName,
+				VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvcName,
+				}},
+			}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+}
+
 // TestPublishPVCUsageBestEffort: usage accounting resolves the node from a
 // running publish pod; without one (sync-only mirror, pod pending) or with
 // no UsageReader it reports unknown and never errors.
@@ -211,6 +231,48 @@ func TestPublishPVCUsageBestEffort(t *testing.T) {
 	reconciler.UsageReader = nil
 	if _, ok := reconciler.publishPVCUsage(ctx, mirror, "smoke-snap-1"); ok {
 		t.Fatal("usage without a reader must be unknown")
+	}
+}
+
+func TestCacheUsageRefreshesHourly(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	mirror := testProxyMirror()
+	scheme := testScheme(t)
+	pvcName := resourceName(childBase(mirror.Name), "cache")
+	usage := &stubUsageReader{node: "cache-node", namespace: mirror.Namespace, pvc: pvcName, size: 1234}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&mirrorv1alpha1.Mirror{}).
+		WithObjects(mirror, runningProxyCachePod(mirror, "cache-node", pvcName)).Build()
+	reconciler := &MirrorReconciler{Client: fakeClient, Scheme: scheme, Now: func() time.Time { return now }, UsageReader: usage}
+
+	if got, err := reconciler.refreshProxyCacheUsage(ctx, mirror); err != nil || got != cacheUsageRefreshInterval {
+		t.Fatalf("first refresh = %v, err=%v; want one hour", got, err)
+	}
+	current := getProxyMirror(t, ctx, fakeClient, client.ObjectKeyFromObject(mirror))
+	if current.Status.SizeBytes != 1234 || current.Status.CacheSizeUpdatedAt == nil {
+		t.Fatalf("first cache measurement was not persisted: %#v", current.Status)
+	}
+	if usage.calls != 1 {
+		t.Fatalf("usage calls after first refresh = %d, want 1", usage.calls)
+	}
+
+	now = now.Add(30 * time.Minute)
+	if got, err := reconciler.refreshProxyCacheUsage(ctx, current); err != nil || got != 30*time.Minute {
+		t.Fatalf("early refresh = %v, err=%v; want remaining half hour", got, err)
+	}
+	if usage.calls != 1 {
+		t.Fatalf("usage calls before hourly deadline = %d, want 1", usage.calls)
+	}
+
+	now = now.Add(30 * time.Minute)
+	usage.size = 5678
+	if got, err := reconciler.refreshProxyCacheUsage(ctx, current); err != nil || got != cacheUsageRefreshInterval {
+		t.Fatalf("hourly refresh = %v, err=%v; want one hour", got, err)
+	}
+	current = getProxyMirror(t, ctx, fakeClient, client.ObjectKeyFromObject(mirror))
+	if current.Status.SizeBytes != 5678 || usage.calls != 2 {
+		t.Fatalf("hourly cache measurement = size %d calls %d, want 5678/2", current.Status.SizeBytes, usage.calls)
 	}
 }
 

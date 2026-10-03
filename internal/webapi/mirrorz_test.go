@@ -28,6 +28,7 @@ func parseMirrorZBody(body []byte) (map[string]any, error) {
 // Fake clients do not populate apiserver timestamps. Valid catalog fixtures
 // explicitly carry the creation and successful completion persisted in reality.
 func catalogMirrorTimes(m *mirrorv1alpha1.Mirror) {
+	m.Spec.Storage = &mirrorv1alpha1.MirrorStorageSpec{SyncStorageClassName: "sync"}
 	m.CreationTimestamp = metav1.Unix(1788000000, 0)
 	success := metav1.Unix(1788300000, 0)
 	m.Status.LastSuccessfulSyncAt = &success
@@ -115,13 +116,36 @@ func TestMirrorzStatusForProxyMirror(t *testing.T) {
 		{false, "RN1788000000"},
 	}
 	for _, tc := range cases {
-		proxy := &mirrorv1alpha1.ProxyMirror{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.Unix(1788000000, 0)}}
+		proxy := &mirrorv1alpha1.Mirror{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.Unix(1788000000, 0)}}
 		if tc.cache {
-			proxy.Spec.Cache = &mirrorv1alpha1.ProxyMirrorCacheSpec{}
+			proxy.Spec.Storage = &mirrorv1alpha1.MirrorStorageSpec{CacheStorageClassName: "cache"}
 		}
-		if got, err := mirrorzStatusForProxyMirror(proxy); err != nil || got != tc.want {
-			t.Errorf("mirrorzStatusForProxyMirror(cache=%t) = %q, want %q", tc.cache, got, tc.want)
+		if got, err := mirrorzStatusForProxy(proxy); err != nil || got != tc.want {
+			t.Errorf("mirrorzStatusForProxy(cache=%t) = %q, want %q", tc.cache, got, tc.want)
 		}
+	}
+}
+
+func TestMirrorzCacheMirrorReportsCacheSize(t *testing.T) {
+	proxy := &mirrorv1alpha1.Mirror{
+		ObjectMeta: metav1.ObjectMeta{Name: "cache", Namespace: "mirrors", Generation: 1, CreationTimestamp: metav1.Unix(1788000000, 0)},
+		Spec: mirrorv1alpha1.MirrorSpec{
+			Info:    mirrorv1alpha1.MirrorInfo{Upstream: "https://upstream.example.org/"},
+			Storage: &mirrorv1alpha1.MirrorStorageSpec{CacheStorageClassName: "cache"},
+			Publish: mirrorv1alpha1.MirrorServicesSpec{HTTP: httpService().HTTP},
+		},
+		Status: mirrorv1alpha1.MirrorStatus{
+			SizeBytes:  2048,
+			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: 1}},
+		},
+	}
+	s := &Server{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(proxy).Build(), Site: SiteConfig{URL: "https://example.org"}}
+	doc, err := s.buildMirrorZ(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Mirrors) != 1 || doc.Mirrors[0].Size != "2.00K" {
+		t.Fatalf("cache size was not rendered in mirrorz: %+v", doc.Mirrors)
 	}
 }
 
@@ -207,16 +231,16 @@ func mirrorzTestServer(t *testing.T, hostnames []string) *Server {
 			Conditions:  []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)},
 		},
 	}
-	proxy := &mirrorv1alpha1.ProxyMirror{
+	proxy := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "pypi-proxy", Namespace: "mirrors"},
-		Spec: mirrorv1alpha1.ProxyMirrorSpec{
-			Info: mirrorv1alpha1.ProxyMirrorInfo{
+		Spec: mirrorv1alpha1.MirrorSpec{
+			Info: mirrorv1alpha1.MirrorInfo{
 				Description: "PyPI 缓存代理",
 				Upstream:    "https://pypi.org/simple/",
 			},
-			Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: httpService().HTTP},
+			Publish: mirrorv1alpha1.MirrorServicesSpec{HTTP: httpService().HTTP},
 		},
-		Status: mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
+		Status: mirrorv1alpha1.MirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
 	}
 
 	catalogMirrorTimes(published)
@@ -468,13 +492,13 @@ func TestMirrorZCanonicalNamesKeepCRPaths(t *testing.T) {
 		Spec:       mirrorv1alpha1.MirrorSpec{Info: mirrorv1alpha1.MirrorInfo{CName: "AOSP"}, Publish: httpService()},
 		Status:     mirrorv1alpha1.MirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
 	}
-	proxy := &mirrorv1alpha1.ProxyMirror{
+	proxy := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "aur", Namespace: "mirrors"},
-		Spec: mirrorv1alpha1.ProxyMirrorSpec{
-			Info:    mirrorv1alpha1.ProxyMirrorInfo{CName: "AUR"},
-			Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: httpService().HTTP},
+		Spec: mirrorv1alpha1.MirrorSpec{
+			Info:    mirrorv1alpha1.MirrorInfo{CName: "AUR"},
+			Publish: mirrorv1alpha1.MirrorServicesSpec{HTTP: httpService().HTTP},
 		},
-		Status: mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
+		Status: mirrorv1alpha1.MirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
 	}
 	catalogMirrorTimes(mirror)
 	proxy.CreationTimestamp = metav1.Unix(1788000000, 0)
@@ -548,15 +572,15 @@ func TestHandleMirrorZTimestampInvariants(t *testing.T) {
 }
 
 func TestMirrorZRejectsProxyWithoutCreationTime(t *testing.T) {
-	p := &mirrorv1alpha1.ProxyMirror{
+	p := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "pypi", Namespace: "mirrors"},
-		Spec:       mirrorv1alpha1.ProxyMirrorSpec{Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: httpService().HTTP}},
-		Status:     mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
+		Spec:       mirrorv1alpha1.MirrorSpec{Publish: mirrorv1alpha1.MirrorServicesSpec{HTTP: httpService().HTTP}},
+		Status:     mirrorv1alpha1.MirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
 	}
 	s := &Server{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(p).Build(), MirrorzEnabled: true}
 	w := httptest.NewRecorder()
 	s.MirrorzHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/mirrorz.json", nil))
-	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "ProxyMirror mirrors/pypi") || !strings.Contains(w.Body.String(), "metadata.creationTimestamp") {
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Mirror mirrors/pypi") || !strings.Contains(w.Body.String(), "metadata.creationTimestamp") {
 		t.Fatalf("expected explicit proxy timestamp error: %d %s", w.Code, w.Body.String())
 	}
 }
@@ -625,12 +649,12 @@ func TestMirrorZExcludesRedirectMode(t *testing.T) {
 	mirror.Spec.Publish.Aliases = []mirrorv1alpha1.MirrorAlias{
 		{Path: "/debian-nonfree", Subset: &mirrorv1alpha1.MirrorAliasSubset{SubPath: "unofficial/non-free"}},
 	}
-	proxy := &mirrorv1alpha1.ProxyMirror{
+	proxy := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "pypi", Namespace: "mirrors", CreationTimestamp: metav1.Unix(1788000000, 0)},
-		Spec: mirrorv1alpha1.ProxyMirrorSpec{
-			Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{HTTP: httpService().HTTP},
+		Spec: mirrorv1alpha1.MirrorSpec{
+			Publish: mirrorv1alpha1.MirrorServicesSpec{HTTP: httpService().HTTP},
 		},
-		Status: mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
+		Status: mirrorv1alpha1.MirrorStatus{Conditions: []metav1.Condition{testCondition("Ready", metav1.ConditionTrue)}},
 	}
 	proxy.Spec.Publish.Redirect = "mirrors.cernet.edu.cn"
 	s := &Server{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(mirror, proxy).Build(), Site: SiteConfig{URL: "https://example.org"}}
@@ -719,11 +743,11 @@ func TestMirrorZProxySubsetAliases(t *testing.T) {
 	for _, cached := range []bool{false, true} {
 		for _, state := range []string{"ready", "unready", "stale", "redirect", "disabled"} {
 			t.Run(fmt.Sprintf("cached=%t/%s", cached, state), func(t *testing.T) {
-				proxy := &mirrorv1alpha1.ProxyMirror{
+				proxy := &mirrorv1alpha1.Mirror{
 					ObjectMeta: metav1.ObjectMeta{Name: "debian-cdimage", Namespace: "mirrors", Generation: 1, CreationTimestamp: metav1.Unix(1788000000, 0)},
-					Spec: mirrorv1alpha1.ProxyMirrorSpec{
+					Spec: mirrorv1alpha1.MirrorSpec{
 						Info: mirrorv1alpha1.MirrorInfo{Upstream: "https://upstream.example.org/"},
-						Publish: mirrorv1alpha1.ProxyMirrorServicesSpec{
+						Publish: mirrorv1alpha1.MirrorServicesSpec{
 							HTTP: httpService().HTTP,
 							Aliases: []mirrorv1alpha1.MirrorAlias{
 								{Path: "/CDIMAGE"},
@@ -731,13 +755,13 @@ func TestMirrorZProxySubsetAliases(t *testing.T) {
 							},
 						},
 					},
-					Status: mirrorv1alpha1.ProxyMirrorStatus{Conditions: []metav1.Condition{{
+					Status: mirrorv1alpha1.MirrorStatus{Conditions: []metav1.Condition{{
 						Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: 1,
 					}}},
 				}
 				prefix := "RN"
 				if cached {
-					proxy.Spec.Cache = &mirrorv1alpha1.ProxyMirrorCacheSpec{}
+					proxy.Spec.Storage = &mirrorv1alpha1.MirrorStorageSpec{CacheStorageClassName: "cache"}
 					prefix = "CN"
 				}
 				switch state {

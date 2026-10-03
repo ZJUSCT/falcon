@@ -112,7 +112,8 @@ func TestStorageDisabledIs404(t *testing.T) {
 
 // storageAttributionReport carries one dataset per attribution case: sync
 // PVC via status pointer, publish PVC via the <base>-snap-<ts> prefix,
-// ProxyMirror cache PVC, and a foreign dataset that must stay unattributed.
+// Cache Mirror cache PVC, and a foreign dataset
+// that must stay unattributed.
 const storageAttributionReport = `{
   "node": "storage-1", "generatedAt": "2026-08-31T12:00:00Z",
   "pools": [{"name": "tank",
@@ -144,8 +145,9 @@ func TestStorageMirrorAttribution(t *testing.T) {
 	debian := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "debian", Namespace: "mirror"},
 	}
-	ghcr := &mirrorv1alpha1.ProxyMirror{
+	ghcr := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "ghcr", Namespace: "mirror"},
+		Spec:       mirrorv1alpha1.MirrorSpec{Storage: &mirrorv1alpha1.MirrorStorageSpec{CacheStorageClassName: "cache"}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(ubuntu, debian, ghcr,
@@ -161,7 +163,7 @@ func TestStorageMirrorAttribution(t *testing.T) {
 	want := map[string]string{
 		"tank/pvc-vol-1": "ubuntu", // status.workPVC
 		"tank/pvc-vol-2": "debian", // <base>-snap-<ts> history PVC
-		"tank/pvc-vol-3": "ghcr",   // ProxyMirror cache PVC
+		"tank/pvc-vol-3": "ghcr",   // Cache Mirror cache PVC
 		"tank/foreign":   "",       // not a Mirror's dataset
 	}
 	for _, pool := range resp.Nodes[0].Pools {

@@ -113,17 +113,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	proxyReconciler := &controller.ProxyMirrorReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("falcon-controller"), //nolint:staticcheck // migrate when typed Events support is ubiquitous
-		Config:   cfg,
-	}
-	if err := proxyReconciler.SetupWithManager(mgr); err != nil {
-		logger.Error(err, "unable to register ProxyMirror controller")
-		os.Exit(1)
-	}
-
 	// Public catalog reads and authenticated administrator operations.
 	// The two surfaces listen on separate ports: the mirrorz port serves
 	// /mirrorz.json only, so a routing mistake can only break the catalog,

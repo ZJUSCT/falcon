@@ -7,7 +7,7 @@
 //   - GET /api/usage → storage usage for this mirror (refreshed every 30s;
 //     silently absent when the usage feature is not deployed — the Storage
 //     Usage card shows a hint instead of erroring).
-//   - GET /api/repos/<id> → the Mirror/ProxyMirror CR **spec** as YAML,
+//   - GET /api/repos/<id> → the Mirror CR **spec** as YAML,
 //     rendered read-only in a plain monospace block with a copy button.
 //
 // Dropped relative to the legacy component: TriggerButton (manual sync) and
@@ -106,7 +106,7 @@ function SpecViewer({ mirrorId }: { mirrorId: string }) {
 
 // Storage Usage card — per-mirror footprint from GET /api/usage (30s poll).
 // Sync PVC first, then one row per snapshot (size + age), then the total.
-// Degradations: ProxyMirror rows show "Not applicable" (no sync/snapshot
+// Degradations: proxy-mode rows show "Not applicable" (no sync/snapshot
 // concept), a missing record or a 404-ing endpoint shows a plain hint, and
 // `complete: false` adds a light "data may be partial" notice.
 function StorageUsageCard({ mirrorId, kind, syncTime }: { mirrorId: string; kind: string | undefined; syncTime?: string }) {
@@ -119,7 +119,7 @@ function StorageUsageCard({ mirrorId, kind, syncTime }: { mirrorId: string; kind
       {mirrorUsage && !mirrorUsage.complete && (
         <div className="text-xs text-amber-500">Some storage nodes did not respond; data may be partial.</div>
       )}
-      {kind === 'ProxyMirror' ? (
+      {kind === 'ProxyMirror' || kind === 'CacheMirror' ? (
         <div className="text-sm text-muted-foreground">Not applicable</div>
       ) : mirrorUsage === null ? (
         <div className="text-sm text-muted-foreground">Usage data unavailable</div>
@@ -210,7 +210,7 @@ export function MirrorDetail({ mirrorId, onBack }: MirrorDetailProps) {
             <>
               <span
                 className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
-                  job.kind === 'ProxyMirror' ? 'bg-violet-500/15 text-violet-400' : 'bg-primary/10 text-primary'
+                  job.kind === 'ProxyMirror' || job.kind === 'CacheMirror' ? 'bg-violet-500/15 text-violet-400' : 'bg-primary/10 text-primary'
                 }`}
               >
                 {job.kind || 'Mirror'}
@@ -291,7 +291,7 @@ export function MirrorDetail({ mirrorId, onBack }: MirrorDetailProps) {
         </>
       ) : (
         <div className="rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground">
-          No sync job found for this mirror (ProxyMirror resources without sync history may look like this).
+          No sync job found for this mirror (proxy-mode mirrors have no sync history).
         </div>
       )}
 

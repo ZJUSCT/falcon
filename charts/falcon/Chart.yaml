@@ -3,7 +3,7 @@ name: falcon
 description: |-
   Falcon — snapshot-based mirror sync and publish on Kubernetes. Deploys the
   namespaced controller (sync Jobs, publish Deployments/Services and Gateway
-  API routes for Mirror/ProxyMirror CRs), the admin web UI, and the admin /
+  API routes for Mirror CRs), the admin web UI, and the admin /
   catalog HTTPRoutes.
 type: application
 version: 0.0.0

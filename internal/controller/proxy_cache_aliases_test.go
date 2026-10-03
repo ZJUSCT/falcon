@@ -18,12 +18,12 @@ func TestProxyAliasesShareMirrorValidationAndRouteBehavior(t *testing.T) {
 		{Path: "/packages/python"},
 		{Path: "/pypi-subset", Subset: &mirrorv1alpha1.MirrorAliasSubset{SubPath: "simple"}},
 	}
-	if errs := validateProxyMirror(p); len(errs) != 0 {
+	if errs := validateMirror(p); len(errs) != 0 {
 		t.Fatal(errs)
 	}
-	c := fake.NewClientBuilder().WithScheme(testProxyScheme(t)).WithObjects(p).Build()
-	r := &ProxyMirrorReconciler{Client: c, Scheme: testProxyScheme(t), Config: testConfig()}
-	if err := ensureReadyProxyRoute(t.Context(), r, p); err != nil {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(p).Build()
+	r := &MirrorReconciler{Client: c, Scheme: testScheme(t), Config: testConfig()}
+	if err := ensurePublishedMirrorRoute(t.Context(), r, p); err != nil {
 		t.Fatal(err)
 	}
 	route := &gatewayv1.HTTPRoute{}
@@ -58,7 +58,7 @@ func TestProxyAliasesShareMirrorValidationAndRouteBehavior(t *testing.T) {
 	}
 	for _, aliases := range invalid {
 		p.Spec.Publish.Aliases = aliases
-		if errs := validateProxyMirror(p); len(errs) == 0 {
+		if errs := validateMirror(p); len(errs) == 0 {
 			t.Fatalf("invalid aliases accepted: %v", aliases)
 		}
 	}
@@ -67,23 +67,19 @@ func TestProxyAliasesShareMirrorValidationAndRouteBehavior(t *testing.T) {
 func TestProxyCachePresenceControlsStorage(t *testing.T) {
 	p := testProxyMirror()
 	p.Spec.Publish.HTTP = nil
-	c := fake.NewClientBuilder().WithScheme(testProxyScheme(t)).WithObjects(p).Build()
-	r := &ProxyMirrorReconciler{Client: c, Scheme: testProxyScheme(t), Config: testConfig()}
-	if err := r.ensureCachePVC(t.Context(), p); err != nil {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(p).Build()
+	r := &MirrorReconciler{Client: c, Scheme: testScheme(t), Config: testConfig()}
+	if err := r.ensureProxyCachePVC(t.Context(), p); err != nil {
 		t.Fatal(err)
 	}
 	key := client.ObjectKey{Namespace: p.Namespace, Name: "pypi-proxy-cache"}
 	get(t, t.Context(), c, key, &corev1.PersistentVolumeClaim{})
-	p.Spec.Cache = nil
-	if errs := validateProxyMirror(p); len(errs) != 0 {
-		t.Fatal(errs)
-	}
-	if err := r.cleanupDisabledProxyChildren(t.Context(), p); err != nil {
+	if err := r.cleanupProxyChildren(t.Context(), p); err != nil {
 		t.Fatal(err)
 	}
-	assertNotFound(t, t.Context(), c, key, &corev1.PersistentVolumeClaim{})
-	p.Spec.Cache = &mirrorv1alpha1.ProxyMirrorCacheSpec{}
-	if errs := validateProxyMirror(p); len(errs) == 0 {
-		t.Fatal("present cache must require a usable PVC template even without HTTP")
+	get(t, t.Context(), c, key, &corev1.PersistentVolumeClaim{})
+	p.Spec.Storage.PVCSpec = corev1.PersistentVolumeClaimSpec{}
+	if errs := validateMirror(p); len(errs) == 0 {
+		t.Fatal("cache must require a usable PVC template even without HTTP")
 	}
 }

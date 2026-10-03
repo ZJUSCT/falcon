@@ -22,6 +22,37 @@ const syncComponent = "sync"
 
 var errSyncPaused = errors.New("automatic synchronization is paused")
 
+// storageClassFingerprint covers the mode discriminator and every
+// StorageClass used by a derived data PVC. The CRD enforces the same rule at
+// admission; this persisted value also protects objects created before that
+// validation or clients that bypass admission in tests.
+func storageClassFingerprint(mirror *mirrorv1alpha1.Mirror) string {
+	storage := mirror.Spec.Storage
+	var value string
+	if storage != nil {
+		value = storage.SyncStorageClassName + "\x00" + storage.PublishStorageClassName + "\x00" + storage.CacheStorageClassName + "\x00" + storage.VolumeSnapshotClassName
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(value)))
+}
+
+func (r *MirrorReconciler) enforceStorageClassFingerprint(ctx context.Context, mirror *mirrorv1alpha1.Mirror) (bool, error) {
+	fingerprint := storageClassFingerprint(mirror)
+	if mirror.Status.StorageClassFingerprint != "" && mirror.Status.StorageClassFingerprint != fingerprint {
+		_, err := r.patchStatus(ctx, mirror, func() {
+			mirror.Status.ObservedGeneration = mirror.Generation
+			setCondition(mirror, conditionReady, conditionStatus(mirrorWasReady(mirror)), "InvalidSpec", "StorageClass fields and Mirror mode are immutable; delete and recreate the Mirror to change them")
+			setCondition(mirror, conditionProgressing, metav1.ConditionFalse, "InvalidSpec", "")
+			setCondition(mirror, conditionDegraded, metav1.ConditionTrue, "InvalidSpec", "StorageClass fields and Mirror mode are immutable; delete and recreate the Mirror to change them")
+		})
+		return true, err
+	}
+	if mirror.Status.StorageClassFingerprint == "" {
+		_, err := r.patchStatus(ctx, mirror, func() { mirror.Status.StorageClassFingerprint = fingerprint })
+		return false, err
+	}
+	return false, nil
+}
+
 func (r *MirrorReconciler) liveReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
