@@ -256,8 +256,9 @@ export function MirrorDetail({ mirrorId, onBack }: MirrorDetailProps) {
 
           {mirrorMode(job) === 'sync' && <StorageUsageCard job={job} />}
           {mirrorMode(job) === 'cache' && <CacheStorageCard job={job} />}
-          {mirrorMode(job) === 'sync' && <SyncLogs key={mirrorId} mirrorId={mirrorId} />}
-          <SpecViewer key={mirrorId} mirrorId={mirrorId} />
+          {/* Sibling keys must differ while still resetting each panel on mirror changes. */}
+          {mirrorMode(job) === 'sync' && <SyncLogs key={`logs:${mirrorId}`} mirrorId={mirrorId} />}
+          <SpecViewer key={`spec:${mirrorId}`} mirrorId={mirrorId} />
         </>}
     </div>
   );
