@@ -80,5 +80,8 @@ case "${1:?check name required}" in
     e2e)
         exec bash scripts/e2e/run.sh
         ;;
+    e2e-full)
+        exec bash scripts/e2e/run.sh full
+        ;;
     *) echo "Unknown check: $1" >&2; exit 2 ;;
 esac

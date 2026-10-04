@@ -16,6 +16,9 @@ kind: Mirror
 metadata:
   name: demo
   namespace: mirror
+  annotations:
+    # Exercise the pipeline immediately, independent of the automatic phase.
+    mirrors.zjusct.io/sync-request: "true"
 spec:
   info:
     cname: demo

@@ -1,9 +1,5 @@
-# Chainsaw configuration for the falcon e2e scenario: tests run in the
-# namespace falcon is installed in (created by the bootstrap), and the
-# assert timeout covers the full sync -> snapshot -> publish chain. The
-# default cleanup deletes the demo Mirror again, which exercises falcon's
-# deletion flow (foreground workload deletion, PVCs, snapshots, finalizer)
-# — hence the generous delete/cleanup timeouts.
+# Optional full integration scenario. Resource cleanup is deferred to run.sh
+# so failures retain Mirror status and children for diagnostics.
 apiVersion: chainsaw.kyverno.io/v1alpha2
 kind: Configuration
 metadata:

@@ -1,6 +1,5 @@
-# Single control-plane node. Storage and gateway components are installed
-# explicitly by run.sh so the scenario only exercises what falcon itself
-# depends on, not any distribution defaults.
+# Single control-plane node. run.sh installs API definitions for the smoke
+# test, adding storage and gateway workloads only for the full scenario.
 
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4

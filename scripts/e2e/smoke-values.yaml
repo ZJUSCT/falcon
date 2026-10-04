@@ -1,0 +1,15 @@
+# Helm --create-namespace and a locally loaded controller image. External
+# integrations stay disabled; their manifests are covered by chart-checks.
+namespace:
+  create: false
+global:
+  imageRegistry: ""
+controller:
+  image:
+    tag: e2e
+  config:
+    mirrorz:
+      enabled: false
+  metrics:
+    serviceMonitor:
+      enabled: false

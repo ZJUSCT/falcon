@@ -1,0 +1,9 @@
+# No storage or publish workload: only exercise CRD admission, the controller
+# watch, namespaced RBAC, status persistence and finalizer cleanup.
+apiVersion: mirrors.zjusct.io/v1alpha1
+kind: Mirror
+metadata:
+  name: smoke
+spec:
+  info:
+    upstream: https://example.org/

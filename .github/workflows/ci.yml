@@ -22,7 +22,7 @@ jobs:
       # Let every leg finish so one failure doesn't hide others.
       fail-fast: false
       matrix:
-        # Each containerized check group (and the e2e scenario) runs as its
+        # Each containerized check group (including the e2e smoke test) runs as its
         # own leg: the tool image builds overlap instead of stacking behind
         # `make check`'s sequential run (the groups are also the local
         # entry points).

@@ -1,4 +1,4 @@
-# E2E chart overrides: the locally loaded falcon:e2e image (no registry),
+# Full integration chart overrides: the locally loaded falcon:e2e image,
 # the site hostname on the e2e Gateway, and no ServiceMonitor because the
 # cluster has no Prometheus Operator CRDs. Everything else stays at chart
 # defaults (ui/zfsAgent disabled).

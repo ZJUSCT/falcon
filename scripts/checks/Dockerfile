@@ -20,9 +20,8 @@ RUN pip install --no-cache-dir pre-commit==4.3.0 PyYAML==6.0.2
 
 # E2E runner: kind, kubectl, the docker CLI, helm, chainsaw and jq, talking
 # to the host Docker daemon through the mounted socket (kind shells out to
-# `docker` for daemon inspection). The scenario asserts with chainsaw (see
-# tests/e2e); cluster dependencies live in scripts/e2e/cluster as a
-# kustomization and are applied by kubectl at run time.
+# `docker` for daemon inspection). The default smoke test uses kubectl;
+# Chainsaw and the gateway/storage dependencies are used only by e2e-full.
 FROM debian:bookworm-slim AS e2e-tools
 ARG KIND_VERSION=v0.33.0
 ARG KUBECTL_VERSION=v1.36.4

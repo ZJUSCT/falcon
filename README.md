@@ -883,12 +883,15 @@ make ui-checks chart-checks  # 选择多个检查组
 pre-commit 为可选的提交入口：安装后运行 `pre-commit install`，提交时只做文件格式等轻量校验与修复（即 hygiene 检查组的内容，配置见 `.pre-commit-config.yaml`）；完整检查（`make check`）由开发者自行运行，CI 始终执行完整检查。
 
 ```sh
-make e2e
+make e2e       # 默认：安装冒烟，CI 的 e2e job 使用此入口
+make e2e-full  # 可选：真实存储与网关下的完整同步/发布集成场景
 ```
 
-`make e2e` 在本地 Docker 上创建一个单节点 [kind](https://kind.sigs.k8s.io/) 集群：Envoy Gateway（v1.9.0，helm chart——其 release `install.yaml` 不含 GatewayClass）与 volume snapshot（v8.6.0）、hostpath CSI（v1.18.0，上游 URL 由 `scripts/e2e/cluster` kustomization 引用并钉版本）一键装齐后，用本地构建的 `falcon:e2e` 镜像部署 Chart，然后以 demo Mirror 断言完整链路：同步 → 快照 → 发布 → 路由就绪（`Ready`）→ 网关取回内容 → `mirrorz.json` 收录。场景还验证普通及子集 alias 的 301、Cache Mirror 子集经真实代理 backend 获取内容、Reloader 配置更新，以及启用 302 重定向期间继续同步、移除重定向后发布最新快照。装配由 `scripts/e2e/run.sh` 负责，断言用 [chainsaw](https://kyverno.github.io/chainsaw/) 声明式编写（`tests/e2e/`：apply → 断言资源状态 → 校验命令输出），经 NodePort 直连 Envoy 数据面；测试结束的清理会删除 demo Mirror，顺带验证删除流程。宿主机需求与检查相同（Git、Make、Docker；kind、kubectl、chainsaw 等钉在 `scripts/checks/Dockerfile` 的 `e2e-tools` target 中，经 Docker socket 操作宿主 daemon）。镜像不推送 registry，直接 `kind load` 进节点。首次运行需拉取基础镜像，约需数分钟。
+`make e2e` 在本地 Docker 上创建一个单节点 [kind](https://kind.sigs.k8s.io/) 集群，安装控制器 watch 所需的 Gateway API（v1.4.1）和 VolumeSnapshot（v8.6.0）CRD，再用本地构建的 `falcon:e2e` 镜像安装 Helm Chart。检查 Falcon CRD Established、控制器 Deployment 就绪，以及一个无存储/无发布负载的最小 Mirror 能被接收、写回 observedGeneration 且未 Degraded，最后删除 Mirror 并卸载 Chart。该检查只验证安装与基本集成，不等待周期同步，也不安装 Envoy Gateway、CSI 驱动或 Reloader。
 
-e2e 是独立入口，不并入 `make check`；CI 中亦为独立 job，失败时诊断（集群对象、控制器与同步 Job 日志、kind 节点日志）导出到 `.e2e-dump/` 并作为 artifact 上传。
+具体控制器规则通过简洁的单元测试验证，重点覆盖调度、资源生成与清理安全；不为了覆盖率重复模拟整个 Kubernetes 生命周期。`make e2e-full` 保留已有的完整场景，供存储、网关或发布链路变更时按需运行：安装 Envoy Gateway、snapshot controller、hostpath CSI 和 Reloader，使用 [Chainsaw](https://kyverno.github.io/chainsaw/) 验证同步 → 快照 → 发布、alias/subset、缓存代理、重定向和 Reloader。demo Mirror 显式请求首次同步，避免断言依赖自动排程的时间相位。
+
+两种入口共用 `scripts/e2e/run.sh`，宿主机只需 Git、Make、Docker；工具运行在容器内，镜像通过 `kind load` 导入，不推送 registry。失败时先向日志打印资源状态和控制器日志，再删除测试集群；完整场景在失败前不自动删除测试资源，以保留诊断现场。E2E 不并入 `make check`，CI 仅运行默认安装冒烟。
 
 检查只报告问题，写回源码需显式执行：
 

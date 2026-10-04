@@ -20,12 +20,10 @@ $(CHECKS) $(WRITE_TASKS):
 	$(COMPOSE) build $@
 	$(COMPOSE) run --rm --no-deps -T $@
 
-# End-to-end scenario on a kind cluster: not part of `check`. Builds the
-# controller image on the host, brings up the cluster through the e2e-tools
-# container (Docker socket), asserts the demo Mirror flow, tears everything
-# down. On failure the cluster state dumps straight into the output.
-e2e:
+# Default CI E2E is an installation smoke test. The full sync/publish scenario
+# is opt-in; both run in kind and print diagnostics before cluster cleanup.
+e2e e2e-full:
 	$(COMPOSE) build e2e
 	docker build -t falcon:e2e -f Dockerfile .
-	$(COMPOSE) run --rm --no-deps -T e2e
-.PHONY: e2e
+	$(COMPOSE) run --rm --no-deps -T e2e $@
+.PHONY: e2e e2e-full

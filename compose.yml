@@ -70,10 +70,9 @@ services:
   # E2E talks to the host Docker daemon through the socket and shares the
   # host network stack: the kubeconfig kind writes (127.0.0.1:<port> bound
   # to the host loopback) is valid as-is, and the kind node addresses are
-  # directly reachable — no endpoint rewriting or network plumbing. Asserts
-  # with chainsaw (tests/e2e); the cluster bootstrap is `kubectl apply -k`
-  # over scripts/e2e/cluster. Runs as the image default user (root) for
-  # socket access; diagnostics land in .e2e-dump/.
+  # directly reachable. Default: installation smoke test; command e2e-full
+  # opts into the Chainsaw integration scenario. Runs as root for Docker
+  # socket access; failures print diagnostics before deleting the cluster.
   e2e:
     <<: *check
     build:

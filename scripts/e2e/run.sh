@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# End-to-end scenario bootstrap: a single-node kind cluster on the host
-# Docker daemon (this container drives it through the mounted socket), the
-# cluster dependencies from the scripts/e2e/cluster kustomization, the falcon
-# chart, and the demo Mirror. The assertions run with chainsaw (tests/e2e).
+# Default: install Falcon and verify basic reconciliation on a real API server.
+# Pass full for the optional sync/snapshot/publish integration scenario.
 set -euo pipefail
+
+MODE=${1:-smoke}
+case "$MODE" in
+    smoke|full) ;;
+    *) echo "Unknown e2e mode: $MODE" >&2; exit 2 ;;
+esac
 
 CLUSTER=falcon-e2e
 NAMESPACE=mirror
@@ -22,7 +26,10 @@ dump() {
     k=(kubectl --request-timeout=10s)
     echo "==== e2e diagnostics ===="
     "${k[@]}" get pods -A || true
-    "${k[@]}" get events -A --sort-by=.lastTransitionTime || true
+    "${k[@]}" get events -A --sort-by=.metadata.creationTimestamp || true
+    "${k[@]}" -n "$NAMESPACE" get mirrors -o yaml || true
+    "${k[@]}" -n "$NAMESPACE" logs deploy/falcon --tail=300 || true
+    if [ "$MODE" = smoke ]; then return; fi
     "${k[@]}" get mirror,httproute,gateway,pvc,volumesnapshot -A || true
     "${k[@]}" -n "$NAMESPACE" get deployment,replicaset,pod \
         -l mirrors.zjusct.io/mirror=demo -o yaml || true
@@ -33,7 +40,6 @@ dump() {
     "${k[@]}" -n default logs statefulset/csi-hostpathplugin --all-containers --tail=60 || true
     "${k[@]}" get csidriver,csinode -o wide || true
     "${k[@]}" describe -n "$NAMESPACE" mirror demo || true
-    "${k[@]}" -n "$NAMESPACE" logs deploy/falcon --tail=300 || true
     "${k[@]}" -n reloader logs deploy/reloader-reloader --tail=300 || true
     jobs=$("${k[@]}" -n "$NAMESPACE" get jobs -o name 2>/dev/null || true)
     for job in $jobs; do
@@ -46,9 +52,14 @@ cleanup() {
     if [ "$rc" -ne 0 ]; then
         dump
     fi
-    kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+    kind delete cluster --name "$CLUSTER" || rc=1
     exit "$rc"
 }
+# Never tear down a cluster belonging to another invocation.
+if kind get clusters | grep -Fxq "$CLUSTER"; then
+    echo "Cluster $CLUSTER already exists; refusing to replace it" >&2
+    exit 1
+fi
 trap cleanup EXIT
 
 log "creating kind cluster ($NODE_IMAGE)"
@@ -65,6 +76,32 @@ kubectl wait --for=condition=Ready nodes --all --timeout=180s
 
 log "loading $IMAGE into the cluster"
 kind load docker-image "$IMAGE" --name "$CLUSTER"
+
+if [ "$MODE" = smoke ]; then
+    log "installing API dependencies (no gateway or storage workloads)"
+    kubectl apply --server-side -k scripts/e2e/smoke-crds
+    kubectl wait --for=condition=Established \
+        crd/httproutes.gateway.networking.k8s.io \
+        crd/volumesnapshots.snapshot.storage.k8s.io --timeout=120s
+
+    log "installing Falcon chart"
+    helm install falcon charts/falcon -n "$NAMESPACE" --create-namespace \
+        -f scripts/e2e/smoke-values.yaml --wait --timeout 180s
+    kubectl wait --for=condition=Established crd/mirrors.mirrors.zjusct.io --timeout=60s
+    kubectl -n "$NAMESPACE" rollout status deploy/falcon --timeout=60s
+
+    log "checking CR admission and controller status writes"
+    kubectl -n "$NAMESPACE" apply -f tests/e2e/smoke-mirror.yaml
+    kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.observedGeneration}'=1 \
+        mirror/smoke --timeout=60s
+    kubectl -n "$NAMESPACE" wait --for=condition=Degraded=false mirror/smoke --timeout=60s
+
+    log "checking cleanup"
+    kubectl -n "$NAMESPACE" delete mirror smoke --wait --timeout=60s
+    helm uninstall falcon -n "$NAMESPACE" --wait --timeout 120s
+    log "PASS (installation smoke test)"
+    exit 0
+fi
 
 log "installing Envoy Gateway (v1.9.0)"
 # Via the helm chart rather than the release install.yaml: the latter ships
@@ -116,6 +153,8 @@ log "running the e2e test suite"
 node_ip=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
 export E2E_SITE_HOST="$SITE_HOST"
 export E2E_ENVOY_ADDR="$node_ip:$node_port"
-chainsaw test --config scripts/e2e/chainsaw.yaml tests/e2e
+# Preserve failed resources for dump(); the cluster is always removed on exit.
+chainsaw test --config scripts/e2e/chainsaw.yaml --skip-delete tests/e2e/demo-mirror
+kubectl -n "$NAMESPACE" delete mirror demo proxy-demo --wait --timeout=180s
 
 log "PASS"
