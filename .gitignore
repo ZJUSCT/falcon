@@ -404,3 +404,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Frontend source helpers are not Python build output.
+!ui/lib/
+!ui/lib/*.ts

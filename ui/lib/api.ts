@@ -28,7 +28,7 @@ class ApiClient {
     return response.json();
   }
 
-  // GET /api/jobs — legacy-compatible list of Mirror/ProxyMirror jobs.
+  // GET /api/jobs — list of mirrors in all modes.
   async getJobs(): Promise<Job[]> {
     return this.fetchJson<Job[]>('/jobs');
   }
@@ -54,7 +54,7 @@ class ApiClient {
     return data.version;
   }
 
-  // GET /api/repos/<name> — spec-only view of one Mirror/ProxyMirror.
+  // GET /api/repos/<name> — spec-only view of one Mirror.
   // Default serialization is YAML; pass ext: 'json' for JSON.
   async getRepoSpec(name: string, ext: '' | 'json' = ''): Promise<string> {
     const suffix = ext ? `.${ext}` : '';

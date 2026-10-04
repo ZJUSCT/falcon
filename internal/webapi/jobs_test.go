@@ -11,6 +11,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -109,21 +110,23 @@ func TestListJobsMirrorEntry(t *testing.T) {
 		t.Fatalf("got %d entries, want 1", len(entries))
 	}
 	got := entries[0]
+	duration := finished.Sub(started).Seconds()
 	want := JobEntry{
-		Conditions:       m.Status.Conditions,
-		ID:               "debian",
-		Status:           "Waiting", // Ready = idle until next interval
-		Kind:             "Mirror",
-		Namespace:        "mirrors",
-		Phase:            "Ready",
-		ActivePVC:        "debian-sync-1756521600",
-		Actions:          []string{},
-		UpdatedAt:        finished,
-		LastSuccessAt:    finished,
-		LastAttemptAt:    started,
-		LastFinishedAt:   finished,
-		NextAttemptAt:    finished.Add(6 * time.Hour),
-		LastActionStatus: "Succeeded",
+		LastSyncDurationSeconds: &duration,
+		Conditions:              m.Status.Conditions,
+		ID:                      "debian",
+		Status:                  "Waiting", // Ready = idle until next interval
+		Kind:                    "Mirror",
+		Namespace:               "mirrors",
+		Phase:                   "Ready",
+		ActivePVC:               "debian-sync-1756521600",
+		Actions:                 []string{},
+		UpdatedAt:               finished,
+		LastSuccessAt:           finished,
+		LastAttemptAt:           started,
+		LastFinishedAt:          finished,
+		NextAttemptAt:           finished.Add(6 * time.Hour),
+		LastActionStatus:        "Succeeded",
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("job entry mismatch (-want +got):\n%s", diff)
@@ -235,6 +238,44 @@ func TestListJobsProxyModesUseModeKinds(t *testing.T) {
 	}
 }
 
+func TestMirrorJobEntryStorageQuota(t *testing.T) {
+	for _, tc := range []struct {
+		name, syncClass, cacheClass, capacity string
+		want                                  int64
+	}{
+		{"sync", "sync", "", "30Ti", 30 * 1024 * 1024 * 1024 * 1024},
+		{"cache", "", "cache", "500Gi", 500 * 1024 * 1024 * 1024},
+		{"decimal", "sync", "", "2T", 2_000_000_000_000},
+		{"missing", "sync", "", "", 0},
+		{"zero", "sync", "", "0", 0},
+		{"proxy", "", "", "1Ti", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			storage := &mirrorv1alpha1.MirrorStorageSpec{SyncStorageClassName: tc.syncClass, CacheStorageClassName: tc.cacheClass}
+			if tc.capacity != "" {
+				storage.PVCSpec.Resources.Requests = corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(tc.capacity)}
+			}
+			entry := mirrorJobEntry(&mirrorv1alpha1.Mirror{Spec: mirrorv1alpha1.MirrorSpec{Storage: storage}})
+			encoded, err := json.Marshal(entry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire map[string]interface{}
+			if err := json.Unmarshal(encoded, &wire); err != nil {
+				t.Fatal(err)
+			}
+			value, present := wire["storage_quota_bytes"]
+			if tc.want == 0 {
+				if present {
+					t.Fatalf("unknown/non-storage quota must be omitted, got %v", value)
+				}
+			} else if !present || value != float64(tc.want) {
+				t.Fatalf("quota = %v, want %d bytes", value, tc.want)
+			}
+		})
+	}
+}
+
 // TestHandleJobsLegacyFieldNames pins the wire field names to the legacy
 // (pre-Kubernetes, Docker/SQLite) /api/jobs response shape.
 func TestHandleJobsLegacyFieldNames(t *testing.T) {
@@ -284,5 +325,43 @@ func TestHandleJobsLegacyFieldNames(t *testing.T) {
 		if _, ok := raw[0][key]; !ok {
 			t.Errorf("new field %q missing from /api/jobs entry", key)
 		}
+	}
+}
+
+func TestJobDurationUsesPreviousRunWhileSyncing(t *testing.T) {
+	start := metav1.NewTime(time.Date(2026, 10, 3, 1, 0, 0, 0, time.UTC))
+	finish := metav1.NewTime(start.Add(90 * time.Minute))
+	currentStart := metav1.NewTime(finish.Add(time.Hour))
+	for _, tc := range []struct {
+		name              string
+		started, finished *metav1.Time
+		want              float64
+	}{
+		{"previous completed", &start, &finish, 5400},
+		{"no start", nil, &finish, 0},
+		{"no finish", &start, nil, 0},
+		{"reversed", &finish, &start, 0},
+		{"zero length", &start, &start, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mirrorv1alpha1.Mirror{
+				Spec: mirrorv1alpha1.MirrorSpec{Storage: &mirrorv1alpha1.MirrorStorageSpec{SyncStorageClassName: "sync"}},
+				Status: mirrorv1alpha1.MirrorStatus{
+					CurrentSync: &mirrorv1alpha1.MirrorCurrentSyncStatus{Phase: mirrorv1alpha1.SyncPhaseRunning, StartedAt: &currentStart},
+					LastSync:    &mirrorv1alpha1.MirrorSyncStatus{StartedAt: tc.started, FinishedAt: tc.finished},
+				},
+			}
+			entry := mirrorJobEntry(m)
+			if !entry.LastAttemptAt.Equal(currentStart.Time) {
+				t.Fatal("current attempt timestamp changed")
+			}
+			if tc.want == 0 {
+				if entry.LastSyncDurationSeconds != nil {
+					t.Fatal("invalid duration should be absent")
+				}
+			} else if entry.LastSyncDurationSeconds == nil || *entry.LastSyncDurationSeconds != tc.want {
+				t.Fatalf("duration = %v, want %v", entry.LastSyncDurationSeconds, tc.want)
+			}
+		})
 	}
 }

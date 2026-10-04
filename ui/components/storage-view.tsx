@@ -9,9 +9,9 @@
 // renders a single hint card instead of erroring; `complete: false` adds
 // an amber banner listing the per-agent errors.
 //
-// Layout: one section per storage node (agent order preserved), one card
-// per ZFS pool — health badge + capacity numbers/bar in the header, and a
-// datasets table below. Dataset rows expand in place (chevron, click or
+// Layout: collapsed node summaries → collapsed pools → datasets. Pool and
+// node summaries retain capacity/health while closed; native disclosures
+// support keyboard navigation and retain expansion across polling updates. Dataset rows expand in place (chevron, click or
 // Enter/Space) to reveal the snapshots of that dataset; multiple rows can
 // be expanded at the same time.
 
@@ -21,7 +21,7 @@ import { Badge } from '@/components/ui/badge';
 import { RelativeTime } from '@/components/relative-time';
 import { useStorage } from '@/lib/hooks';
 import { cn, formatBytes } from '@/lib/utils';
-import { StoragePool, StorageDataset, StorageSnapshot } from '@/types';
+import { StoragePool, StorageDataset, StorageSnapshot, StorageNode } from '@/types';
 import { ChevronRight } from 'lucide-react';
 
 // ZFS pool health → badge palette, in the spirit of status-badge's
@@ -45,7 +45,7 @@ function getPoolHealthColor(health: string): string {
 
 function PoolHealthBadge({ health }: { health: string }) {
   return (
-    <Badge className={`border font-mono ${getPoolHealthColor(health)}`}>
+    <Badge variant="outline" className={`border font-mono ${getPoolHealthColor(health)}`}>
       {health || 'UNKNOWN'}
     </Badge>
   );
@@ -145,10 +145,12 @@ function PoolCard({ pool }: { pool: StoragePool }) {
     : null;
 
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card">
+    <details className="group/pool overflow-hidden rounded-lg border border-border bg-card">
+      <summary className="cursor-pointer list-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary [&::-webkit-details-marker]:hidden">
       {/* Pool header */}
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b px-4 py-3">
         <div className="flex items-center gap-2">
+          <ChevronRight className="h-4 w-4 shrink-0 transition-transform group-open/pool:rotate-90" aria-hidden="true" />
           <span className="font-mono text-sm font-semibold">{pool.name}</span>
           <PoolHealthBadge health={pool.health} />
         </div>
@@ -185,6 +187,8 @@ function PoolCard({ pool }: { pool: StoragePool }) {
         )}
       </div>
 
+      </summary>
+
       {/* Datasets */}
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
@@ -210,7 +214,8 @@ function PoolCard({ pool }: { pool: StoragePool }) {
                   <tr
                     onClick={expandable ? () => toggleDataset(dataset.name) : undefined}
                     onKeyDown={event => handleRowKeyDown(event, dataset.name, expandable)}
-                    tabIndex={expandable ? 0 : -1}
+                    tabIndex={expandable ? 0 : undefined}
+                    aria-expanded={expandable ? isExpanded : undefined}
                     className={cn(
                       'bg-background transition-colors',
                       expandable && 'cursor-pointer hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60'
@@ -276,7 +281,47 @@ function PoolCard({ pool }: { pool: StoragePool }) {
           </tbody>
         </table>
       </div>
-    </div>
+    </details>
+  );
+}
+
+// Sum pools, not datasets: parent datasets already include their descendants.
+function NodeCard({ node }: { node: StorageNode }) {
+  const used = node.pools.reduce((sum, pool) => sum + pool.allocatedBytes, 0);
+  const capacityKnown = node.pools.length > 0 && node.pools.every(pool => pool.sizeBytes > 0);
+  const capacity = node.pools.reduce((sum, pool) => sum + pool.sizeBytes, 0);
+  const percent = capacityKnown ? used / capacity * 100 : null;
+  const health = Array.from(new Set(node.pools.map(pool => pool.health)));
+
+  return (
+    <details className="group/node rounded-lg border border-border bg-card">
+      <summary className="cursor-pointer list-none space-y-3 rounded-lg p-4 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary [&::-webkit-details-marker]:hidden">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <ChevronRight className="h-4 w-4 shrink-0 transition-transform group-open/node:rotate-90" aria-hidden="true" />
+            <span className="font-mono text-sm font-bold">{node.node}</span>
+            <span className="text-xs text-muted-foreground">{node.pools.length} {node.pools.length === 1 ? 'pool' : 'pools'}</span>
+            {health.map(value => <PoolHealthBadge key={value} health={value} />)}
+          </div>
+          <span className="font-mono text-xs tabular-nums">
+            {node.pools.length === 0 ? 'No pools reported' : (
+              <>{formatBytes(used)} used / {capacityKnown ? formatBytes(capacity) : 'unknown capacity'}
+                {percent !== null && <span className="ml-3 text-muted-foreground">{percent.toFixed(1)}%</span>}
+              </>
+            )}
+          </span>
+        </div>
+        {percent !== null && (
+          <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+            <div className={cn('h-full rounded-full', capacityBarColor(percent))} style={{ width: `${Math.min(100, percent)}%` }} />
+          </div>
+        )}
+      </summary>
+      <div className="space-y-3 border-t p-4">
+        {node.pools.length === 0 ? <p className="text-xs text-muted-foreground">No pools reported for this node.</p> :
+          node.pools.map(pool => <PoolCard key={pool.name} pool={pool} />)}
+      </div>
+    </details>
   );
 }
 
@@ -327,23 +372,7 @@ export function StorageView() {
               No storage nodes reported.
             </div>
           ) : (
-            storage.nodes.map(node => (
-              <section key={node.node} className="space-y-3">
-                <div className="flex items-baseline gap-2">
-                  <h3 className="font-mono text-sm font-bold">{node.node}</h3>
-                  <span className="font-mono text-xs text-muted-foreground">
-                    {node.pools.length} {node.pools.length === 1 ? 'pool' : 'pools'}
-                  </span>
-                </div>
-                {node.pools.length === 0 ? (
-                  <div className="rounded-lg border border-border bg-card p-4 text-xs text-muted-foreground">
-                    No pools reported for this node.
-                  </div>
-                ) : (
-                  node.pools.map(pool => <PoolCard key={pool.name} pool={pool} />)
-                )}
-              </section>
-            ))
+            storage.nodes.map(node => <NodeCard key={node.node} node={node} />)
           )}
         </>
       )}

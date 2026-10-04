@@ -8,12 +8,7 @@ import {
   Sun, Moon, MonitorSmartphone,
 } from 'lucide-react';
 
-// The admin UI is read-only: three pages instead of the legacy seven.
-// Storage is the one removed view that came back — as a read-only ZFS
-// inventory (GET /api/storage, agent-backed usage aggregation) instead of
-// the legacy mutation-capable panel. Workers, Queue, Actions and Configs
-// stay removed along with their backend endpoints (the Kubernetes
-// controller serves a strictly read-only API).
+// Main administration views. Sync controls live in the mirror list.
 export type PageId = 'overview' | 'mirrors' | 'storage';
 
 interface SidebarProps {

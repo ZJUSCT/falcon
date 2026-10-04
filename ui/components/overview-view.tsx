@@ -13,17 +13,18 @@
 //   - last failure  (red, last_failure_at within a ±12h window)
 //   - running sync  (blue, last_attempt_at of currently Running jobs)
 //
-// Labels are pushed outward on concentric "radius levels" to avoid
-// collisions. Data source: GET /api/jobs (the controller's legacy-compatible
+// Markers are separated on concentric radial lanes. Only labels with free
+// space are drawn; every event retains hover details and mirror navigation. Data source: GET /api/jobs (the controller's legacy-compatible
 // job list; see internal/webapi/jobs.go for the field semantics).
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { RelativeTime } from '@/components/relative-time';
 import { StatusBadge } from '@/components/status-badge';
 import { apiClient } from '@/lib/api';
-import { Job } from '@/types';
+import { Job, displaySyncPhase, mirrorMode } from '@/types';
 import { isZeroTime } from '@/types';
-import { ZoomIn, ZoomOut, RotateCcw, Move } from 'lucide-react';
+import { SyncTimeline } from '@/components/sync-timeline';
+import { ZoomIn, ZoomOut, RotateCcw, Move, Clock3, GanttChart } from 'lucide-react';
 
 interface TimeEvent {
   time: Date;
@@ -44,10 +45,18 @@ interface OverviewViewProps {
   onNavigateToJob?: (jobId: string) => void;
 }
 
-const stepping_radius = 12;
+const stepping_radius = 24;
 
 export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [view, setView] = useState<'clock' | 'timeline'>('timeline');
+  useEffect(() => {
+    try { if (localStorage.getItem('falcon-overview-view') === 'clock') setView('clock'); } catch { /* Session-only preference. */ }
+  }, []);
+  const changeView = (next: 'clock' | 'timeline') => {
+    setView(next);
+    try { localStorage.setItem('falcon-overview-view', next); } catch { /* Session-only preference. */ }
+  };
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -172,7 +181,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
     const twelveHoursLater = new Date(now.getTime() + 12 * 60 * 60 * 1000);
 
     jobs.forEach(job => {
-      if (job.kind !== 'Mirror') return;
+      if (mirrorMode(job) !== 'sync') return;
       const syncActive = job.sync_phase === 'Syncing' || job.sync_phase === 'Cancelling';
       // Scheduled attempts only run when the schedule is enabled and no sync is active.
       if (!isZeroTime(job.next_attempt_at) && !syncActive && !job.paused) {
@@ -183,7 +192,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
             time: nextAttempt,
             type: 'nextAttempt',
             jobId: job.id,
-            jobStatus: job.sync_phase ?? 'Waiting'
+            jobStatus: displaySyncPhase(job) ?? 'Waiting'
           });
         }
       }
@@ -196,7 +205,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
             time: lastSuccess,
             type: 'lastSuccess',
             jobId: job.id,
-            jobStatus: job.sync_phase ?? 'Waiting'
+            jobStatus: displaySyncPhase(job) ?? 'Waiting'
           });
         }
       }
@@ -209,7 +218,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
             time: lastFailure,
             type: 'lastFailure',
             jobId: job.id,
-            jobStatus: job.sync_phase ?? 'Waiting'
+            jobStatus: displaySyncPhase(job) ?? 'Waiting'
           });
         }
       }
@@ -221,7 +230,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
           time: lastAttempt,
           type: 'lastAttempt',
           jobId: job.id,
-          jobStatus: job.sync_phase ?? 'Waiting'
+          jobStatus: displaySyncPhase(job) ?? 'Waiting'
         });
       }
     });
@@ -239,189 +248,62 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   // Get current time angle
   const currentAngle = timeToAngle(currentTime);
 
+  // Keep exact time angles. Separate markers radially, then label only those
+  // with enough room. Dense events remain individually available on hover.
   const calculateLabelPositions = useMemo(() => {
-    if (timeEvents.length === 0) return [];
-
-    const sortedEvents = [...timeEvents].sort((a, b) => a.time.getTime() - b.time.getTime());
-
-    const buckets: Array<Array<{
-      event: TimeEvent;
-      radiusLevel: number;
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      angle: number;
-    }>> = Array(360).fill(null).map(() => []);
-
-    const BASE_RADIUS = clockDims.eventRadius + 45;
-    const CHAR_WIDTH = 8;
-
-    const getLabelWidth = (jobId: string): number => {
-      return CHAR_WIDTH + jobId.length * CHAR_WIDTH;
-    };
-
-    const circleRadius = 12;
-
-    const getBodyRectangle = (angle: number, radius: number, labelWidth: number): { x: number, y: number, width: number, height: number } => {
-      const rad = (angle - 90) * Math.PI / 180;
-      return {
-        x: Math.cos(rad) * radius - circleRadius,
-        y: Math.sin(rad) * radius - circleRadius,
-        width: labelWidth + circleRadius * 2,
-        height: circleRadius * 2
-      };
-    };
-
-    const getBodyRectangleDegrees = (
-      rect: BodyRectangle,
-      angle: number,
-    ): [number, number] => {
-      const rad = (angle - 90) * Math.PI / 180;
-
-      const x = rect.x;
-      const y = rect.y;
-      const width = rect.width;
-      const height = rect.height;
-
-      const corners: Array<[number, number]> = [
-        [x, y],
-        [x + width, y],
-        [x, y + height],
-        [x + width, y + height],
-      ];
-
-      const norm = (d: number) => ((d % 360) + 360) % 360;
-      const toUiDeg = (px: number, py: number) =>
-        norm(Math.atan2(py, px) * 180 / Math.PI + 90);
-
-      const angs = corners.map(([px, py]) => toUiDeg(px, py)).sort((a, b) => a - b);
-
-      let maxGap = -1;
-      let idx = -1;
-      for (let i = 0; i < angs.length; i++) {
-        const a = angs[i];
-        const b = i === angs.length - 1 ? angs[0] + 360 : angs[i + 1];
-        const gap = b - a;
-        if (gap > maxGap) {
-          maxGap = gap;
-          idx = i;
-        }
-      }
-
-      const start = angs[(idx + 1) % angs.length];
-      const end = angs[idx];
-
-      return [Math.floor(start), Math.ceil(end)];
-    };
-
-    type BodyRectangle = ReturnType<typeof getBodyRectangle>;
-
-    const doLabelsOverlap = (rect1: BodyRectangle, rect2: BodyRectangle): boolean => {
-
-      if (rect1.x < rect2.x + rect2.width &&
-        rect1.x + rect1.width > rect2.x &&
-        rect1.y < rect2.y + rect2.height &&
-        rect1.y + rect1.height > rect2.y) {
-        return true;
-      }
-
-      return false;
-    };
-
-
-    sortedEvents.forEach((event) => {
+    const positions: Array<TimeEvent & {
+      index: number; angle: number; radiusLevel: number;
+      x: number; y: number; left: boolean; showLabel: boolean;
+    }> = [];
+    const sortedEvents = [...timeEvents].sort((a, b) => a.time.getTime() - b.time.getTime() || a.jobId.localeCompare(b.jobId));
+    for (let index = 0; index < sortedEvents.length; index++) {
+      const event = sortedEvents[index];
       const angle = timeToAngle(event.time);
-      const labelWidth = getLabelWidth(event.jobId);
-
+      const radian = (angle - 90) * Math.PI / 180;
       let radiusLevel = 0;
-      let hasOverlap = true;
-
-      let currentRadius = BASE_RADIUS;
-
-      let bodyRectangle = { x: 0, y: 0, width: 0, height: 0 };
-      let bodyRectangleDegrees: [number, number] = [0, 0];
-
-      while (hasOverlap) {
-        hasOverlap = false;
-
-        currentRadius = BASE_RADIUS + radiusLevel * stepping_radius;
-
-        bodyRectangle = getBodyRectangle(angle, currentRadius, labelWidth);
-        bodyRectangleDegrees = getBodyRectangleDegrees(bodyRectangle, angle);
-
-        const exactBucketIndex = Math.floor(angle) % 360;
-        const surroundingBuckets = [];
-
-        for (let offset = -bodyRectangleDegrees[1]; offset <= bodyRectangleDegrees[1]; offset++) {
-          const checkBucketIndex = (exactBucketIndex + offset + 360) % 360;
-          surroundingBuckets.push(checkBucketIndex);
-        }
-
-        const uniqueBuckets = Array.from(new Set(surroundingBuckets));
-
-        for (const checkBucketIndex of uniqueBuckets) {
-          const bucket = buckets[checkBucketIndex];
-
-          for (const existingLabel of bucket) {
-            const existingBodyRectangle = { x: existingLabel.x, y: existingLabel.y, width: existingLabel.width, height: existingLabel.height };
-
-            if (doLabelsOverlap(bodyRectangle, existingBodyRectangle)) {
-              hasOverlap = true;
-              break;
-            }
-          }
-
-          if (hasOverlap) break;
-        }
-
-        if (hasOverlap) {
-          radiusLevel++;
-        }
-      }
-
-      if (bodyRectangleDegrees[0] <= bodyRectangleDegrees[1]) {
-      for (let i = bodyRectangleDegrees[0]; i <= bodyRectangleDegrees[1]; i++) {
-          buckets[i % 360].push({ event, radiusLevel, x: bodyRectangle.x, y: bodyRectangle.y, width: bodyRectangle.width, height: bodyRectangle.height, angle: angle });
-        }
-      } else {
-        for (let i = bodyRectangleDegrees[0]; i < 360; i++) {
-          buckets[i % 360].push({ event, radiusLevel, x: bodyRectangle.x, y: bodyRectangle.y, width: bodyRectangle.width, height: bodyRectangle.height, angle: angle });
-        }
-        for (let i = 0; i <= bodyRectangleDegrees[1]; i++) {
-          buckets[i % 360].push({ event, radiusLevel, x: bodyRectangle.x, y: bodyRectangle.y, width: bodyRectangle.width, height: bodyRectangle.height, angle: angle });
-        }
-      }
-    });
-
-    // Convert back to the original format
-    const positions = timeEvents.map((event, index) => {
-      const angle = timeToAngle(event.time);
-      const exactBucketIndex = Math.floor(angle) % 360;
-      const bucket = buckets[exactBucketIndex];
-
-      // Find the radius level for this event
-      const existingLabel = bucket.find(label =>
-        label.event.jobId === event.jobId && label.event.type === event.type
-      );
-      const radiusLevel = existingLabel ? existingLabel.radiusLevel : 0;
-
-      return {
-        ...event,
-        index,
-        angle,
-        radiusLevel
-      };
-    });
-
+      let x: number, y: number;
+      do {
+        const radius = clockDims.eventRadius + 45 + radiusLevel * stepping_radius;
+        x = Math.cos(radian) * radius;
+        y = Math.sin(radian) * radius;
+        if (!positions.some(other => Math.hypot(other.x - x, other.y - y) < 24)) break;
+        radiusLevel++;
+      } while (true);
+      positions.push({ ...event, index, angle, radiusLevel, x, y, left: x < 0, showLabel: false });
+    }
+    const labels: Array<{ x: number; y: number; width: number }> = [];
+    for (const position of positions) {
+      const width = position.jobId.length * 7.5 + 4;
+      const x = position.left ? position.x - 16 - width : position.x + 16;
+      const y = position.y - 9;
+      const overlapsMarker = positions.some(other => other.x + 12 > x && other.x - 12 < x + width && other.y + 12 > y && other.y - 12 < y + 18);
+      const overlapsLabel = labels.some(other => other.x < x + width && other.x + other.width > x && other.y < y + 18 && other.y + 18 > y);
+      position.showLabel = !overlapsMarker && !overlapsLabel;
+      if (position.showLabel) labels.push({ x, y, width });
+    }
     return positions;
   }, [timeEvents, clockDims.eventRadius]);
+
+  // Fit the complete layout, including labels, rather than clipping outward
+  // lanes against a fixed viewBox. Zoom and Reset are relative to this fit.
+  const clockViewBox = useMemo(() => {
+    let minX = -220, minY = -220, maxX = 220, maxY = 220;
+    for (const point of calculateLabelPositions) {
+      const labelWidth = point.showLabel ? point.jobId.length * 7.5 + 24 : 14;
+      minX = Math.min(minX, point.x - (point.left ? labelWidth : 14));
+      maxX = Math.max(maxX, point.x + (point.left ? 14 : labelWidth));
+      minY = Math.min(minY, point.y - 14);
+      maxY = Math.max(maxY, point.y + 14);
+    }
+    const center = clockDims.centerX + 200;
+    return `${center + minX - 24} ${center + minY - 24} ${maxX - minX + 48} ${maxY - minY + 48}`;
+  }, [calculateLabelPositions, clockDims.centerX]);
 
   // Sync activity and schedule controls are independent of publication conditions.
   const totalJobs = jobs.length;
   const runningJobs = jobs.filter(j => j.sync_phase === 'Syncing' || j.sync_phase === 'Cancelling').length;
-  const waitingJobs = jobs.filter(j => j.sync_phase === 'Waiting').length;
-  const pausedJobs = jobs.filter(j => j.kind === 'Mirror' && j.paused).length;
+  const waitingJobs = jobs.filter(j => displaySyncPhase(j) === 'Waiting').length;
+  const pausedJobs = jobs.filter(j => displaySyncPhase(j) === 'Paused').length;
   const failedJobs = jobs.filter(j => j.last_action_status === 'Failed').length;
 
   if (loading) {
@@ -464,7 +346,20 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
   return (
     <div className="h-full min-h-0 p-4 sm:p-6 flex flex-col gap-4 overflow-hidden">
       {/* Page title */}
-      <h1 className="text-lg font-bold shrink-0">24-Hour Sync Activity</h1>
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
+        <h1 className="text-lg font-bold">Sync Activity</h1>
+        <div role="group" aria-label="Overview display style" className="flex rounded-lg border border-border bg-card p-1">
+          {([['timeline', 'Timeline', GanttChart], ['clock', 'Clock', Clock3]] as const).map(([id, label, Icon]) => (
+            <button key={id} type="button" aria-pressed={view === id} onClick={() => changeView(id)}
+              className={`inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-xs ${view === id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}`}>
+              <Icon className="h-3.5 w-3.5" aria-hidden="true" />{label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {view === 'timeline' ? <SyncTimeline jobs={jobs} now={currentTime} onNavigateToJob={onNavigateToJob} /> : <>
+
 
       {/* B. 24-hour sync activity clock */}
       <div className="rounded-lg border bg-card flex-1 min-h-0 flex flex-col overflow-hidden">
@@ -474,7 +369,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
             <span className="uppercase tracking-wide text-[10px]">Status:</span>
             <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500 inline-block" /> Active syncs <span className="font-semibold tabular-nums text-foreground">{runningJobs}</span></span>
             <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-yellow-500 inline-block" /> Waiting <span className="font-semibold tabular-nums text-foreground">{waitingJobs}</span></span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-500 inline-block" /> Manual mode <span className="font-semibold tabular-nums text-foreground">{pausedJobs}</span></span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-500 inline-block" /> Paused <span className="font-semibold tabular-nums text-foreground">{pausedJobs}</span></span>
             <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500 inline-block" /> Last Sync Failed <span className="font-semibold tabular-nums text-foreground">{failedJobs}</span></span>
           </div>
         </div>
@@ -513,8 +408,8 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                 width="100%"
                 height="100%"
                 className="drop-shadow-lg max-w-full max-h-full"
-                viewBox={`0 0 ${clockDims.size + 400} ${clockDims.size + 400}`}
-                style={{ overflow: 'visible' }}
+                viewBox={clockViewBox}
+                aria-label="24-hour synchronization events"
               >
                 {/* Background gradient */}
                 <defs>
@@ -699,7 +594,7 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
 
                   // Calculate label position with radius level offset (primary position)
                   const baseLabelRadius = clockDims.eventRadius + 45;
-                  const levelOffset = eventPos.radiusLevel * stepping_radius; // 12px between levels
+                  const levelOffset = eventPos.radiusLevel * stepping_radius; // 24px between levels
                   const labelRadius = baseLabelRadius + levelOffset;
                   const labelX = clockDims.centerX + 200 + Math.cos(radian) * labelRadius;
                   const labelY = clockDims.centerY + 200 + Math.sin(radian) * labelRadius;
@@ -716,15 +611,15 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                       onMouseEnter={(e: React.MouseEvent) => {
                         setHoveredEvent(eventPos);
                         setTooltipPosition({
-                          x: e.clientX + 15,
-                          y: e.clientY - 10
+                          x: Math.max(8, Math.min(e.clientX + 15, window.innerWidth - 300)),
+                          y: Math.max(8, Math.min(e.clientY - 10, window.innerHeight - 170))
                         });
                       }}
                       onMouseMove={(e: React.MouseEvent) => {
                         if (hoveredEvent) {
                           setTooltipPosition({
-                            x: e.clientX + 15,
-                            y: e.clientY - 10
+                            x: Math.max(8, Math.min(e.clientX + 15, window.innerWidth - 300)),
+                            y: Math.max(8, Math.min(e.clientY - 10, window.innerHeight - 170))
                           });
                         }
                       }}
@@ -738,7 +633,17 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                         }
                       }}
                       className="cursor-pointer"
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`${eventPos.jobId}: ${getEventName(eventPos.type)}`}
+                      onKeyDown={event => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          onNavigateToJob?.(eventPos.jobId);
+                        }
+                      }}
                     >
+                      <title>{`${eventPos.jobId}: ${getEventName(eventPos.type)} — ${eventPos.time.toLocaleString()}`}</title>
                       {/* Event line to clock */}
                       <line
                         x1={clockDims.centerX + 200 + Math.cos(radian) * clockDims.radius}
@@ -764,20 +669,20 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
                       />
 
                       {/* Job name label with level-based styling - positioned next to event circle */}
-                      <text
-                        x={labelX + (isHovered ? 18 : 15)} // Offset to the right of the larger circle
+                      {eventPos.showLabel && <text
+                        x={labelX + (eventPos.left ? -16 : 16)}
                         y={labelY}
-                        textAnchor="start"
+                        textAnchor={eventPos.left ? "end" : "start"}
                         dominantBaseline="central"
                         className={`fill-current text-sm font-mono transition-all duration-200 ${isHovered ? 'text-foreground opacity-100' : 'text-muted-foreground opacity-80'
                           }`}
                         style={{
-                          fontSize: isHovered ? '16px' : '12px',
+                          fontSize: '12px',
                           fontWeight: isHovered ? 'bold' : 'normal'
                         }}
                       >
                         {eventPos.jobId}
-                      </text>
+                      </text>}
                     </g>
                   );
                 })}
@@ -786,8 +691,10 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
           </div>
         </div>
 
+        <p className="px-4 pb-2 text-center text-xs text-muted-foreground">Hover over an event for details; click to open its mirror. Drag to pan.</p>
+
         {/* Canvas Controls */}
-        <div className="shrink-0 flex flex-wrap justify-center gap-2 pb-4">
+        <div className="shrink-0 flex flex-wrap items-center justify-center gap-2 pb-4">
           <button
             onClick={handleZoomIn}
             className="flex items-center gap-1 px-3 py-1 text-sm bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/80 transition-colors"
@@ -819,8 +726,10 @@ export function OverviewView({ onNavigateToJob }: OverviewViewProps = {}) {
         </div>
       </div>
 
+      </>}
+
       {/* Floating Tooltip */}
-      {hoveredEvent && tooltipPosition && (
+      {view === 'clock' && hoveredEvent && tooltipPosition && (
         <div
           className="fixed z-50 pointer-events-none"
           style={{

@@ -3,7 +3,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'Falcon Dashboard',
-  description: 'Read-only dashboard for the Falcon Kubernetes controller',
+  description: 'Administration dashboard for the Falcon Kubernetes controller',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

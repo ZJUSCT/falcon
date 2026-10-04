@@ -52,6 +52,10 @@ type JobEntry struct {
 	Paused         bool               `json:"paused"`
 	SyncBusy       bool               `json:"sync_busy"`
 	CanAbort       bool               `json:"can_abort"`
+	// Configured PVC capacity; absent for proxy-only mirrors or unknown requests.
+	StorageQuotaBytes *int64 `json:"storage_quota_bytes,omitempty"`
+	// Last completed run, even while another sync is active. Missing means unknown.
+	LastSyncDurationSeconds *float64 `json:"last_sync_duration_seconds,omitempty"`
 }
 
 // legacyStatusForMirrorPhase maps the derived presentation phase onto the
@@ -164,32 +168,41 @@ func (s *Server) listJobs(ctx context.Context) ([]JobEntry, error) {
 
 // mirrorJobEntry maps a Mirror CR onto the legacy job shape.
 func mirrorJobEntry(m *mirrorv1alpha1.Mirror) JobEntry {
+	var quota *int64
+	if storage := m.Spec.Storage; storage != nil && (m.IsSynchronized() || m.IsCacheMirror()) {
+		if quantity := storage.PVCSpec.Resources.Requests.Storage(); quantity != nil && quantity.Sign() > 0 {
+			bytes := quantity.Value()
+			quota = &bytes
+		}
+	}
 	if m.IsProxyMirror() {
 		phase := proxyPresentationPhaseMirror(m)
 		return JobEntry{
-			ID:         m.Name,
-			Conditions: append([]metav1.Condition{}, m.Status.Conditions...),
-			Status:     phase,
-			Kind:       mirrorModeKind(m),
-			Namespace:  m.Namespace,
-			Phase:      phase,
-			Actions:    []string{},
+			ID:                m.Name,
+			Conditions:        append([]metav1.Condition{}, m.Status.Conditions...),
+			Status:            phase,
+			Kind:              mirrorModeKind(m),
+			Namespace:         m.Namespace,
+			Phase:             phase,
+			Actions:           []string{},
+			StorageQuotaBytes: quota,
 		}
 	}
 	phase := mirrorPresentationPhase(m)
 	entry := JobEntry{
-		ID:            m.Name,
-		Conditions:    append([]metav1.Condition{}, m.Status.Conditions...),
-		SyncPhase:     m.Status.Sync.Phase,
-		Status:        legacyStatusForMirrorPhase(phase),
-		Kind:          "Mirror",
-		Namespace:     m.Namespace,
-		Phase:         phase,
-		ActivePVC:     m.Status.ActivePVC,
-		Actions:       []string{}, // legacy field, no action history anymore
-		NextAttemptAt: timeOrZero(m.Status.NextSyncAt),
-		Paused:        m.SyncPaused(),
-		SyncBusy:      m.Status.CurrentSync != nil || m.SyncRequested(),
+		ID:                m.Name,
+		Conditions:        append([]metav1.Condition{}, m.Status.Conditions...),
+		SyncPhase:         m.Status.Sync.Phase,
+		Status:            legacyStatusForMirrorPhase(phase),
+		Kind:              "Mirror",
+		Namespace:         m.Namespace,
+		Phase:             phase,
+		ActivePVC:         m.Status.ActivePVC,
+		Actions:           []string{}, // legacy field, no action history anymore
+		NextAttemptAt:     timeOrZero(m.Status.NextSyncAt),
+		Paused:            m.SyncPaused(),
+		SyncBusy:          m.Status.CurrentSync != nil || m.SyncRequested(),
+		StorageQuotaBytes: quota,
 	}
 	if m.SyncPaused() {
 		entry.NextAttemptAt = time.Time{}
@@ -207,6 +220,10 @@ func mirrorJobEntry(m *mirrorv1alpha1.Mirror) JobEntry {
 	if last := m.Status.LastSync; last != nil {
 		started := timeOrZero(last.StartedAt)
 		finished := timeOrZero(last.FinishedAt)
+		if !started.IsZero() && finished.After(started) {
+			duration := finished.Sub(started).Seconds()
+			entry.LastSyncDurationSeconds = &duration
+		}
 		if m.Status.CurrentSync == nil || m.Status.CurrentSync.Phase == mirrorv1alpha1.SyncPhaseSnapshotting {
 			entry.LastAttemptAt = started
 			entry.UpdatedAt = started

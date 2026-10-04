@@ -31,6 +31,22 @@ export function formatBytes(bytes: number | null | undefined): string | null {
   return `${text} ${units[unit]}`;
 }
 
+// Use the same unit for both values so used/quota can be compared directly.
+export function formatStorageQuota(used: number | undefined, quota: number | undefined): string {
+  const knownUsed = used !== undefined && Number.isFinite(used) && used >= 0;
+  const knownQuota = quota !== undefined && Number.isFinite(quota) && quota > 0;
+  if (!knownQuota) return knownUsed ? `${formatBytes(used)} / —` : '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const unit = Math.min(units.length - 1, Math.max(0, Math.floor(Math.log(quota) / Math.log(1024))));
+  const divisor = 1024 ** unit;
+  const number = (bytes: number) => {
+    const value = bytes / divisor;
+    if (value > 0 && value < 0.01) return '<0.01';
+    return Number(value.toFixed(2)).toString();
+  };
+  return `${knownUsed ? number(used) : '—'}/${number(quota)} ${units[unit]}`;
+}
+
 // Signed relative duration in the shape of .NET TimeSpan invariant format
 // "c", prefixed with the direction: "+" for the future, "-" for the past.
 // The days segment is omitted when zero, so five minutes ahead is
@@ -62,10 +78,10 @@ export function getStatusColor(status: string): string {
     case 'Scheduled':
       return 'bg-purple-600 border-purple-200 hover:bg-purple-700';
     case 'Paused':
-      return 'text-orange-600 bg-orange-50 border-orange-200 hover:bg-orange-100';
+      return 'bg-orange-800 border-orange-700 hover:bg-orange-900';
     case 'Orphan':
       return 'text-gray-600 bg-gray-400 border-gray-200 hover:bg-gray-600';
-    // Raw CR phases (ProxyMirror rows, detail views).
+    // Presentation phases (proxy modes and detail views).
     case 'Ready':
       return 'bg-green-600 border-green-200 hover:bg-green-700';
     case 'Syncing':
@@ -87,7 +103,7 @@ export function getStatusColor(status: string): string {
     case 'D':
       return 'text-red-600 bg-red-50 border-red-200 hover:bg-red-100';
     case 'P':
-      return 'text-orange-600 bg-orange-50 border-orange-200 hover:bg-orange-100';
+      return 'bg-orange-800 border-orange-700 hover:bg-orange-900';
     default:
       return 'text-gray-600 bg-gray-400 border-gray-200 hover:bg-gray-600';
   }

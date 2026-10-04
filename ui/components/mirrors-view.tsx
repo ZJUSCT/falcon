@@ -9,13 +9,14 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import type { KeyboardEvent } from 'react';
+import { MirrorModeBadge } from '@/components/mirror-mode-badge';
 import { ConditionBadges } from '@/components/condition-badges';
 import { StatusBadge } from '@/components/status-badge';
 import { RelativeTime } from '@/components/relative-time';
 import { apiClient } from '@/lib/api';
 import { useUsage } from '@/lib/hooks';
-import { formatBytes } from '@/lib/utils';
-import { Job, MirrorUsage, isZeroTime } from '@/types';
+import { formatStorageQuota } from '@/lib/utils';
+import { Job, MirrorUsage, isZeroTime, displaySyncPhase, mirrorMode } from '@/types';
 import {
   Pause, Play, RefreshCw, Search, Square, SlidersHorizontal, ArrowUpDown, ChevronUp, ChevronDown,
 } from 'lucide-react';
@@ -37,8 +38,8 @@ const statusPriority: Record<string, number> = {
 };
 
 function compareJobs(a: Job, b: Job): number {
-  const pA = statusPriority[a.sync_phase ?? ''] ?? 4;
-  const pB = statusPriority[b.sync_phase ?? ''] ?? 4;
+  const pA = statusPriority[displaySyncPhase(a) ?? ''] ?? 4;
+  const pB = statusPriority[displaySyncPhase(b) ?? ''] ?? 4;
   if (pA !== pB) return pA - pB;
 
   const zeroDate = '0001-01-01T00:00:00Z';
@@ -52,7 +53,7 @@ function compareJobs(a: Job, b: Job): number {
 // Table column metadata: drives the sortable headers and the column chooser.
 // The identity column is sortable but not choosable — always visible.
 type ColumnKey =
-  | 'mirror' | 'kind' | 'conditions' | 'syncPhase' | 'size' | 'lastAction'
+  | 'mirror' | 'conditions' | 'syncPhase' | 'size' | 'lastAction'
   | 'nextAttempt' | 'lastAttempt' | 'lastSuccess' | 'lastFailure';
 
 interface ColumnSpec {
@@ -63,23 +64,23 @@ interface ColumnSpec {
   // Responsive hiding keeps the condensed mobile table; the chooser only
   // governs additional hiding.
   responsiveClass?: string;
+  alignment?: 'left' | 'center';
   // false: fixed column — sortable, but not offered by the column chooser.
   choosable?: boolean;
 }
 
 // The identity column shows the Mirror CR name.
-const identityColumn: ColumnSpec = { key: 'mirror', label: 'Mirror', choosable: false, sortValue: job => job.id };
+const identityColumn: ColumnSpec = { key: 'mirror', label: 'Mirror', alignment: 'left', choosable: false, sortValue: job => job.id };
 
 const columns: ColumnSpec[] = [
-  { key: 'kind', label: 'Kind', sortValue: job => job.kind || 'Mirror' },
   { key: 'conditions', label: 'Conditions', sortValue: job => (job.conditions ?? []).filter(condition => condition.status === 'True').length },
-  { key: 'syncPhase', label: 'Sync phase', sortValue: job => statusPriority[job.sync_phase ?? ''] ?? 4 },
+  { key: 'syncPhase', label: 'Sync phase', sortValue: job => statusPriority[displaySyncPhase(job) ?? ''] ?? 4 },
   { key: 'size', label: 'Size', responsiveClass: 'hidden md:table-cell', sortValue: (_job, usage) => usage?.totalBytes ?? Infinity },
   { key: 'lastAction', label: 'Last Action', responsiveClass: 'hidden md:table-cell', sortValue: job => (job.last_action_status || '').trim() },
-  { key: 'nextAttempt', label: 'Next Attempt', responsiveClass: 'hidden md:table-cell', sortValue: job => isZeroTime(job.next_attempt_at) ? Infinity : Date.parse(job.next_attempt_at) },
-  { key: 'lastAttempt', label: 'Last Attempt', responsiveClass: 'hidden md:table-cell', sortValue: job => isZeroTime(job.last_attempt_at) ? Infinity : Date.parse(job.last_attempt_at) },
-  { key: 'lastSuccess', label: 'Last Success', responsiveClass: 'hidden lg:table-cell', sortValue: job => isZeroTime(job.last_success_at) ? Infinity : Date.parse(job.last_success_at) },
-  { key: 'lastFailure', label: 'Last Failure', responsiveClass: 'hidden lg:table-cell', sortValue: job => isZeroTime(job.last_failure_at) ? Infinity : Date.parse(job.last_failure_at) },
+  { key: 'nextAttempt', alignment: 'left', label: 'Next Attempt', responsiveClass: 'hidden md:table-cell', sortValue: job => isZeroTime(job.next_attempt_at) ? Infinity : Date.parse(job.next_attempt_at) },
+  { key: 'lastAttempt', alignment: 'left', label: 'Last Attempt', responsiveClass: 'hidden md:table-cell', sortValue: job => isZeroTime(job.last_attempt_at) ? Infinity : Date.parse(job.last_attempt_at) },
+  { key: 'lastSuccess', alignment: 'left', label: 'Last Success', responsiveClass: 'hidden lg:table-cell', sortValue: job => isZeroTime(job.last_success_at) ? Infinity : Date.parse(job.last_success_at) },
+  { key: 'lastFailure', alignment: 'left', label: 'Last Failure', responsiveClass: 'hidden lg:table-cell', sortValue: job => isZeroTime(job.last_failure_at) ? Infinity : Date.parse(job.last_failure_at) },
 ];
 
 const hiddenColumnsKey = 'falcon-mirrors-hidden-columns';
@@ -99,7 +100,7 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
     setActionError(null);
     try {
       const updated = await apiClient.mirrorAction(job.id, action);
-      setJobs(previous => previous.map(item => item.kind === 'Mirror' && item.id === updated.id && item.namespace === updated.namespace ? updated : item));
+      setJobs(previous => previous.map(item => mirrorMode(item) === 'sync' && item.id === updated.id && item.namespace === updated.namespace ? updated : item));
     } catch (error) {
       setActionError(`${job.id}: ${error instanceof Error ? error.message : 'Action failed'}`);
     } finally {
@@ -213,7 +214,7 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
   const filtered = sorted.filter(job => {
     if (search && !job.id.toLowerCase().includes(search.toLowerCase())) return false;
     if (conditionFilter !== 'All' && !(job.conditions ?? []).some(condition => condition.type === conditionFilter && condition.status === 'True')) return false;
-    if (phaseFilter !== 'All' && job.sync_phase !== phaseFilter) return false;
+    if (phaseFilter !== 'All' && displaySyncPhase(job) !== phaseFilter) return false;
     return true;
   });
 
@@ -292,7 +293,7 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
         </select>
         <select aria-label="Filter sync phase" value={phaseFilter} onChange={e => setPhaseFilter(e.target.value)} className="rounded-lg border border-input bg-background px-3 py-2 text-sm">
           <option value="All">All sync phases</option>
-          {['Waiting', 'Pending', 'Syncing', 'Snapshotting', 'Retrying', 'Cancelling'].map(value => <option key={value}>{value}</option>)}
+          {['Paused', 'Waiting', 'Pending', 'Syncing', 'Snapshotting', 'Retrying', 'Cancelling'].map(value => <option key={value}>{value}</option>)}
         </select>
         <div className="relative">
           <button
@@ -331,12 +332,13 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
       ) : (
         <div className="rounded-lg border border-border bg-card overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full text-xs">
+            <table className="w-full whitespace-nowrap text-xs">
               <thead className="bg-muted/40 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 <tr>
+                  {canAdminister && <th className="w-px px-1.5 py-1.5 text-center">Actions</th>}
                   <th
                     aria-sort={sort?.key === identityColumn.key ? (sort.dir === 1 ? 'ascending' : 'descending') : undefined}
-                    className="px-3 py-2 text-center"
+                    className="px-1.5 py-1.5 text-left"
                   >
                     {sortHeader(identityColumn)}
                   </th>
@@ -344,19 +346,19 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                     <th
                       key={spec.key}
                       aria-sort={sort?.key === spec.key ? (sort.dir === 1 ? 'ascending' : 'descending') : undefined}
-                      className={`px-3 py-2 text-center ${spec.responsiveClass ?? ''}`}
+                      className={`px-1.5 py-1.5 ${spec.alignment === 'left' ? 'text-left' : 'text-center'} ${spec.responsiveClass ?? ''}`}
                     >
                       {sortHeader(spec)}
                     </th>
                   ))}
-                  {canAdminister && <th className="w-px px-3 py-2 text-center">Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {filtered.map(job => {
                   const lastActionStatus = (job.last_action_status || '').trim();
                   const mirrorUsage = usageByName.get(job.id);
-                  const sizeText = mirrorUsage ? formatBytes(mirrorUsage.totalBytes) : null;
+                  const sizeText = formatStorageQuota(mirrorUsage?.totalBytes, job.storage_quota_bytes);
+                  const syncPhase = displaySyncPhase(job);
                   return (
                     <tr
                       key={`${job.namespace}/${job.id}`}
@@ -365,55 +367,9 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                       tabIndex={0}
                       className="group cursor-pointer bg-background transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
                     >
-                      <td className="px-3 py-2 align-top">
-                        <div className="font-mono text-sm">{job.id}</div>
-                        {job.kind === 'Mirror' && job.sync_phase && (
-                          <div className="mt-0.5 text-[11px] text-muted-foreground md:hidden">
-                            <span className="uppercase tracking-wide whitespace-nowrap">Phase </span>
-                            <StatusBadge status={job.sync_phase} />
-                            {job.paused && <span className="ml-1 text-[10px]">Manual mode</span>}
-                          </div>
-                        )}
-                        <div className="mt-0.5 text-[11px] text-muted-foreground md:hidden">
-                          <span className="uppercase tracking-wide whitespace-nowrap">Next </span>
-                          <RelativeTime date={job.next_attempt_at} />
-                        </div>
-                        <div className="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground md:hidden">
-                          <span className="uppercase tracking-wide whitespace-nowrap">Last Action</span>
-                          {lastActionStatus ? (
-                            <StatusBadge status={lastActionStatus} />
-                          ) : (
-                            <span className="font-mono">—</span>
-                          )}
-                        </div>
-                      </td>
-                      {show('kind') && (
-                        <td className="px-3 py-2 text-center align-top whitespace-nowrap">
-                          <span
-                            className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
-                              (job.kind === 'ProxyMirror' || job.kind === 'CacheMirror')
-                                ? 'bg-violet-500/15 text-violet-400'
-                                : 'bg-primary/10 text-primary'
-                            }`}
-                          >
-                            {job.kind || 'Mirror'}
-                          </span>
-                        </td>
-                      )}
-                      {show('conditions') && (
-                        <td className="px-3 py-2 text-center align-top">
-                          <ConditionBadges conditions={job.conditions} />
-                        </td>
-                      )}
-                      {show('syncPhase') && (
-                        <td className="px-3 py-2 text-center align-top">
-                          {job.sync_phase ? <StatusBadge status={job.sync_phase} /> : <span className="text-muted-foreground">—</span>}
-                          {job.kind === 'Mirror' && job.paused && <div className="mt-1 text-[10px] text-muted-foreground">Manual mode</div>}
-                        </td>
-                      )}
                       {canAdminister && (
-                        <td className="w-px px-3 py-2 align-top" onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
-                          {job.kind === 'Mirror' && (
+                        <td className="w-px px-1.5 py-1.5 text-center align-middle" onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
+                          {mirrorMode(job) === 'sync' && (
                             <div className="flex items-center justify-center gap-1">
                               <button type="button" className={actionButtonClass} disabled={busyActions.has(`${job.namespace}/${job.id}`)} aria-label={job.paused ? 'Resume schedule' : 'Pause schedule'} title={job.paused ? 'Resume automatic synchronization' : 'Pause automatic synchronization; manual sync remains available'} onClick={() => runAction(job, job.paused ? 'resume' : 'pause')}>
                                 {job.paused ? <Play className="h-4 w-4" aria-hidden="true" /> : <Pause className="h-4 w-4" aria-hidden="true" />}
@@ -424,10 +380,26 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                           )}
                         </td>
                       )}
+                      <td className="px-1.5 py-1.5 text-left align-middle">
+                        <div className="flex items-center gap-2 whitespace-nowrap font-mono text-xs">
+                          <MirrorModeBadge job={job} />
+                          {job.id}
+                        </div>
+                      </td>
+                      {show('conditions') && (
+                        <td className="px-1.5 py-1.5 text-center align-middle">
+                          <ConditionBadges conditions={job.conditions} />
+                        </td>
+                      )}
+                      {show('syncPhase') && (
+                        <td className="px-1.5 py-1.5 text-center align-middle">
+                          {syncPhase ? <StatusBadge status={syncPhase} /> : <span className="text-muted-foreground">—</span>}
+                        </td>
+                      )}
                       {show('size') && (
-                        <td className="hidden md:table-cell px-3 py-2 text-center align-top whitespace-nowrap">
+                        <td className="hidden md:table-cell px-1.5 py-1.5 text-center align-middle whitespace-nowrap">
                           {sizeText ? (
-                            <span className="font-mono tabular-nums">
+                            <span className="font-mono tabular-nums" title="ZFS space used (including snapshots) / configured PVC capacity">
                               {sizeText}
                               {mirrorUsage && !mirrorUsage.complete && (
                                 <span
@@ -444,7 +416,7 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                         </td>
                       )}
                       {show('lastAction') && (
-                        <td className="hidden md:table-cell px-3 py-2 text-center align-top">
+                        <td className="hidden md:table-cell px-1.5 py-1.5 text-center align-middle">
                           {lastActionStatus ? (
                             <StatusBadge status={lastActionStatus} />
                           ) : (
@@ -453,22 +425,22 @@ export function MirrorsView({ onMirrorClick }: MirrorsViewProps) {
                         </td>
                       )}
                       {show('nextAttempt') && (
-                        <td className="hidden md:table-cell px-3 py-2 align-top">
+                        <td className="hidden md:table-cell px-1.5 py-1.5 text-left align-middle">
                           <RelativeTime date={job.next_attempt_at} />
                         </td>
                       )}
                       {show('lastAttempt') && (
-                        <td className="hidden md:table-cell px-3 py-2 align-top">
+                        <td className="hidden md:table-cell px-1.5 py-1.5 text-left align-middle">
                           <RelativeTime date={job.last_attempt_at} />
                         </td>
                       )}
                       {show('lastSuccess') && (
-                        <td className="hidden lg:table-cell px-3 py-2 align-top">
+                        <td className="hidden lg:table-cell px-1.5 py-1.5 text-left align-middle">
                           <RelativeTime date={job.last_success_at} />
                         </td>
                       )}
                       {show('lastFailure') && (
-                        <td className="hidden lg:table-cell px-3 py-2 align-top">
+                        <td className="hidden lg:table-cell px-1.5 py-1.5 text-left align-middle">
                           <RelativeTime date={job.last_failure_at} />
                         </td>
                       )}

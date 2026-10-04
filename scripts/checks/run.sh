@@ -44,6 +44,7 @@ case "${1:?check name required}" in
     ui-checks)
         cd ui
         npm ci --no-audit --no-fund
+        npm test
         npm run build
         ;;
     chart-checks)

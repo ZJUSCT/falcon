@@ -24,7 +24,7 @@ export interface Job {
   actions: string[]; // legacy field, always empty
 
   // New fields.
-  kind: 'Mirror' | 'CacheMirror' | 'ProxyMirror';
+  kind: 'Mirror' | 'CacheMirror' | 'ProxyMirror'; // legacy wire field describing the mode, not the CR kind
   namespace?: string;
   phase: string; // raw CR status.phase
   active_pvc?: string;
@@ -32,6 +32,20 @@ export interface Job {
   paused: boolean;
   sync_busy: boolean;
   can_abort: boolean;
+  storage_quota_bytes?: number; // configured PVC request, not observed backend enforcement
+  last_sync_duration_seconds?: number;
+}
+
+export function mirrorMode(job: Job): 'sync' | 'cache' | 'proxy' {
+  return job.kind === 'CacheMirror' ? 'cache' : job.kind === 'ProxyMirror' ? 'proxy' : 'sync';
+}
+
+// Pausing the schedule does not stop an already running manual/automatic sync.
+export function displaySyncPhase(job: Job): string | undefined {
+  if (mirrorMode(job) !== 'sync') return undefined;
+  if (job.paused && (job.phase === 'Paused' || !job.sync_busy) &&
+      !['Syncing', 'Snapshotting', 'Cancelling'].includes(job.sync_phase ?? '')) return 'Paused';
+  return job.sync_phase;
 }
 
 export const zeroTime = '0001-01-01T00:00:00Z';
