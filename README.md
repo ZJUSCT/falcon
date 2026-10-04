@@ -798,7 +798,9 @@ MirrorZ 字段与 Falcon 字段的映射：
 
 - `mirrorz.json` 中的容量信息直接走 K8s API 获取发布 PVC 的使用量，无需额外采集。
 - K8s 无法采集 ZFS refer、written 等详细信息，这些主要供 Falcon WebUI 展示。
-- zfs-agent 还采集其他 ZFS 指标，尤其是性能数据，使用 OpenTelemetry 协议上报，供 ZFS 性能分析使用。
+- zfs-agent 直接读取内核 kstat，采集 dataset 逻辑 I/O 和 ARC 指标，通过 OpenTelemetry 上报；不再运行 `zpool iostat` 采集 pool/vdev I/O。
+- Helm Chart 可选安装 Grafana Dashboard（`zfsAgent.dashboard.enabled`），默认选择所有主机。dataset IOPS/带宽及 ARC 容量按主机堆叠；ARC 命中率显示各主机和按请求数加权的整体值。
+- 磁盘面板使用 node-exporter 的整盘统计，只显示各 ZFS 裸盘独立的读写平均延迟，不做主机或集群聚合。分区的 ZFS metadata 仅用于识别父盘，不叠加分区与整盘 I/O。依赖和采集配置见 [Chart 文档](charts/falcon/README.md#zfs-dashboard)。
 
 ### WebUI
 
@@ -908,8 +910,5 @@ Action 有检查和发版两个 workflow。在检查的 workflow 通过之前，
 
 ### Roadmap & Todo
 
-- [ ] v0.1.9
-    - [ ] zfs-agent：在 Grafana 中对采集的信息进行校验，并制作 Dashboard。
-
 - 未排期：
-    - [ ] Before the next OpenEBS ZFS LocalPV release: enable snapshotter creation metadata, verify ZFS annotations, and align Falcon zfs-agent handling（好像已经发布了包含该特性的 commit）
+    - [ ] Before the next OpenEBS ZFS LocalPV release: enable snapshotter creation metadata, verify ZFS annotations, and align Falcon zfs-agent handling（v2.11.1 尚未包含该特性，等待上游发布）

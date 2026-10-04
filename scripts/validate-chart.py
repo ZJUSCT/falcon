@@ -11,6 +11,7 @@ identity.
 Usage: validate-chart.py [chart-path]
 """
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -42,7 +43,11 @@ controller:
       http:
         gatewayRef: {name: mirror-gateway}
         hostnames: [mirrors.example.org]
-zfsAgent: {enabled: true}
+zfsAgent:
+  enabled: true
+  dashboard:
+    enabled: true
+    datasourceUid: 'test-"datasource'
 mirrorz:
   route: {enabled: true}
 ui:
@@ -140,12 +145,41 @@ def main() -> None:
         ("HTTPRoute", "falcon-mirrorz"),
         ("HTTPRoute", "falcon-ui"),
         ("Secret", "falcon-auth"),
+        ("ConfigMap", "falcon-zfs-dashboard"),
     ]
     failures += [
         f"expected resource present: {r}"
         for r in expected
         if r not in identities
     ]
+
+    for label, docs in renders.items():
+        dashboards = [d for d in docs if d.get("metadata", {}).get("name") == "falcon-zfs-dashboard"]
+        if label == "defaults":
+            if dashboards:
+                failures.append("dashboard ConfigMap must be opt-in")
+            continue
+        if len(dashboards) != 1:
+            failures.append("expected one enabled dashboard ConfigMap")
+            continue
+        resource = dashboards[0]
+        filename, payload = next(iter(resource["data"].items()))
+        dashboard = json.loads(payload)
+        if filename != dashboard["uid"] + ".json":
+            failures.append("dashboard filename must match its instance UID")
+        if resource["metadata"]["labels"].get("grafana_dashboard") != "1":
+            failures.append("dashboard sidecar discovery label missing")
+        host = next(v for v in dashboard["templating"]["list"] if v["name"] == "host")
+        if host["current"]["value"] != ["$__all"] or not host["multi"]:
+            failures.append("Host must default to All and support multiple selections")
+        for panel in dashboard["panels"]:
+            for target in panel.get("targets", []):
+                if target["datasource"]["uid"] != 'test-"datasource':
+                    failures.append("configured datasource UID was not preserved")
+        if "{{node}} / {{device}}" not in payload:
+            failures.append("Grafana legend templates were lost during Helm rendering")
+        if "__FALCON_DATASOURCE_UID__" in payload:
+            failures.append("unresolved dashboard datasource placeholder")
 
     if failures:
         sys.exit("\n".join(f"FAIL: {f}" for f in failures))

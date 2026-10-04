@@ -35,20 +35,6 @@ type DatasetIO struct {
 	NreadBytes, NwrittenBytes int64
 }
 
-// VdevIO is the physical I/O of a pool or one of its vdevs, from
-// `zpool iostat -Hp -v -y -T u <pool> 15`: rates averaged over a full collection
-// interval, never cumulative counters. Leaf vdevs
-// report 0 for alloc/free (only the top-level rows account space).
-type VdevIO struct {
-	Pool, Vdev string // Vdev equals Pool on the pool's own summary row
-	// AllocBytes and FreeBytes are the row's space accounting columns.
-	AllocBytes, FreeBytes int64
-	// ReadOps and WriteOps are operations per second.
-	ReadOps, WriteOps int64
-	// ReadBytes and WriteBytes are bytes per second.
-	ReadBytes, WriteBytes int64
-}
-
 // PerfSample is everything one performance collection gathered. Like Report
 // it is best-effort: parts that could not be read are absent, not errors.
 type PerfSample struct {
@@ -56,14 +42,11 @@ type PerfSample struct {
 	Arc map[string]int64
 	// Datasets holds one entry per mounted dataset with an objset kstat.
 	Datasets []DatasetIO
-	// Vdevs holds the pool row and every vdev row of interval `zpool iostat`,
-	// per pool.
-	Vdevs []VdevIO
 }
 
 // CollectPerf gathers the node's ZFS performance counters: ARC hit/miss and
-// size kstats, per-dataset logical I/O from the objset kstats, and per-pool /
-// per-vdev physical I/O from zpool iostat. Every part degrades independently
+// size kstats and per-dataset logical I/O from the objset kstats.
+// Every part degrades independently
 // (warning + skip), mirroring Report's philosophy: perf data is telemetry, so
 // a missing part must never fail the whole sample.
 func (c *Collector) CollectPerf(ctx context.Context) *PerfSample {
@@ -78,14 +61,12 @@ func (c *Collector) CollectPerf(ctx context.Context) *PerfSample {
 	if err != nil {
 		c.log().WarnContext(ctx, "skipping ZFS perf collection", "path", root, "error", err.Error())
 	} else {
-		sample.Vdevs = c.collectIostat(ctx, pools)
 		for _, pool := range pools {
 			c.collectObjsets(sample, root, pool)
 		}
 	}
 
-	// Read instantaneous kstats after the interval commands finish, so they
-	// are fresh when the completed sample reaches the exporter.
+	// Read ARC directly from the kernel, just like dataset counters.
 	if out, err := os.ReadFile(filepath.Join(root, "arcstats")); err != nil {
 		c.log().WarnContext(ctx, "skipping ARC stats", "path", root, "error", err.Error())
 	} else {
@@ -205,51 +186,4 @@ func parseKstat(out []byte) (ints map[string]int64, strs map[string]string) {
 		strs[name] = value
 	}
 	return ints, strs
-}
-
-// parseZpoolIostat parses the output of
-//
-//	zpool iostat -Hp -v -y -T u <pool> 15
-//
-// One row per vdev, the
-// pool's own summary row first (its name column equals the pool name), with
-// tab-separated columns name/alloc/free/read_ops/write_ops/read_bytes/
-// write_bytes — bare integers; I/O values are rates per second. The CLI
-// truncates fractional rates. Capacity fields can be "-" on leaf vdevs.
-// Rows with the wrong column count or unparsable numbers are skipped.
-func parseZpoolIostat(pool string, out []byte) []VdevIO {
-	var vdevs []VdevIO
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Split(strings.TrimRight(line, "\r"), "\t")
-		if len(fields) != 7 {
-			continue
-		}
-		nums := make([]int64, 6)
-		ok := true
-		for i, field := range fields[1:] {
-			if i < 2 && field == "-" {
-				continue
-			}
-			v, err := strconv.ParseInt(field, 10, 64)
-			if err != nil || v < 0 {
-				ok = false
-				break
-			}
-			nums[i] = v
-		}
-		if !ok {
-			continue
-		}
-		vdevs = append(vdevs, VdevIO{
-			Pool:       pool,
-			Vdev:       fields[0],
-			AllocBytes: nums[0],
-			FreeBytes:  nums[1],
-			ReadOps:    nums[2],
-			WriteOps:   nums[3],
-			ReadBytes:  nums[4],
-			WriteBytes: nums[5],
-		})
-	}
-	return vdevs
 }

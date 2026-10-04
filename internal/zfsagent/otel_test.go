@@ -2,7 +2,6 @@ package zfsagent
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -110,55 +109,20 @@ func TestOTLPPusherDatasetPVCAttribute(t *testing.T) {
 	t.Fatal("zfs_dataset_reads missing from export")
 }
 
-// Interval rates may decrease without any counter reset. They must retain
-// gauge semantics end-to-end and never reuse the old invalid counter names.
-func TestOTLPPusherRateGaugesAndMissingSeries(t *testing.T) {
+// Missing or stale sources must disappear rather than replay old counters.
+func TestOTLPPusherMissingAndStaleSamples(t *testing.T) {
 	reader := metric.NewManualReader()
 	pusher, err := newPusher("storage-1", reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, rate := range []int64{100, 20} {
-		pusher.Push(&PerfSample{Vdevs: []VdevIO{
-			{Pool: "tank", Vdev: "tank", ReadOps: rate, WriteOps: rate, ReadBytes: rate, WriteBytes: rate},
-			{Pool: "tank", Vdev: "sda", ReadOps: rate, WriteOps: rate, ReadBytes: rate, WriteBytes: rate},
-		}}, nil)
-		var md metricdata.ResourceMetrics
-		if err := reader.Collect(context.Background(), &md); err != nil {
-			t.Fatal(err)
-		}
-		count := 0
-		for _, sm := range md.ScopeMetrics {
-			for _, m := range sm.Metrics {
-				if !strings.HasSuffix(m.Name, "_per_second") {
-					t.Fatalf("unexpected metric %s", m.Name)
-				}
-				g, ok := m.Data.(metricdata.Gauge[int64])
-				if !ok || len(g.DataPoints) != 1 || g.DataPoints[0].Value != rate {
-					t.Fatalf("%s: want gauge %d, got %+v", m.Name, rate, m.Data)
-				}
-				attrs := g.DataPoints[0].Attributes
-				pool, _ := attrs.Value("pool")
-				if pool.AsString() != "tank" {
-					t.Fatalf("missing pool label: %v", attrs)
-				}
-				if strings.HasPrefix(m.Name, "zfs_vdev_") {
-					vdev, _ := attrs.Value("vdev")
-					if vdev.AsString() != "sda" {
-						t.Fatalf("missing vdev label: %v", attrs)
-					}
-				}
-				count++
-			}
-		}
-		if count != 8 {
-			t.Fatalf("got %d rate gauges, want 8", count)
-		}
-	}
-
 	// A failed/missing source must disappear, not persist as a fresh zero.
-	pusher.Push(&PerfSample{}, nil)
 	var md metricdata.ResourceMetrics
+	pusher.Push(&PerfSample{Arc: map[string]int64{"hits": 1}}, nil)
+	if err := reader.Collect(context.Background(), &md); err != nil {
+		t.Fatal(err)
+	}
+	pusher.Push(&PerfSample{}, nil)
 	if err := reader.Collect(context.Background(), &md); err != nil {
 		t.Fatal(err)
 	}

@@ -146,6 +146,14 @@ ui:
 # GET /api/usage.
 zfsAgent:
   enabled: false
+  # Optional Grafana sidecar ConfigMap, independent of the agent DaemonSet.
+  dashboard:
+    enabled: false
+    datasourceUid: prometheus
+    labels:
+      grafana_dashboard: "1"
+    annotations:
+      k8s-sidecar-target-directory: /tmp/dashboards/Falcon
   image:
     repository: zfs-agent
     # Empty tag defaults to Chart.AppVersion; a digest takes precedence.

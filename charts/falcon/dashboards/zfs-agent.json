@@ -1,0 +1,1107 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "target": {
+          "limit": 100,
+          "matchAny": false,
+          "tags": [],
+          "type": "dashboard"
+        },
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Logical dataset I/O and ARC across selected hosts, plus individual ZFS backing-disk read/write latency. Disk panels never aggregate across devices or hosts. Each whole disk is identified using node-exporter udev member metadata.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__FALCON_DATASOURCE_UID__"
+      },
+      "description": "Whole block devices backing ZFS. Discover member signatures via udev and map sd/hd/vd/xvd and NVMe/MMC/MD partitions to their parent disk. Deduplicate parents before joining I/O counters. Shared disks include non-ZFS traffic; dedicated ZFS disks are assumed.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "min": 0,
+          "noValue": "N/A",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "__FALCON_DATASOURCE_UID__"
+          },
+          "editorMode": "code",
+          "expr": "count((max by (instance, device) (label_replace(label_replace(label_replace(max by (instance, device) (node_disk_filesystem_info{job=\"node-exporter\",type=\"zfs_member\"}), \"member\", \"$1\", \"device\", \"(.+)\"), \"device\", \"$1\", \"device\", \"((sd|hd|vd|xvd)[a-z]+)[0-9]+\"), \"device\", \"$1\", \"device\", \"(.+[0-9])p[0-9]+\"))) * on (instance) group_left (node) (label_replace(max by (instance, nodename) (node_uname_info{job=\"node-exporter\",nodename=~\"$host\"}), \"node\", \"$1\", \"nodename\", \"(.+)\")))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "ZFS disks",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__FALCON_DATASOURCE_UID__"
+      },
+      "description": "Logical dataset activity summed across selected hosts. Includes reads served from ARC; not physical disk traffic.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "min": 0,
+          "noValue": "N/A",
+          "unit": "iops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "__FALCON_DATASOURCE_UID__"
+          },
+          "editorMode": "code",
+          "expr": "sum (max by (node, pool, dataset) (rate(zfs_dataset_reads_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval])))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Dataset read IOPS",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__FALCON_DATASOURCE_UID__"
+      },
+      "description": "Logical dataset activity summed across selected hosts. Includes reads served from ARC; not physical disk traffic.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "min": 0,
+          "noValue": "N/A",
+          "unit": "iops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "__FALCON_DATASOURCE_UID__"
+          },
+          "editorMode": "code",
+          "expr": "sum (max by (node, pool, dataset) (rate(zfs_dataset_writes_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval])))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Dataset write IOPS",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__FALCON_DATASOURCE_UID__"
+      },
+      "description": "Logical dataset activity summed across selected hosts. Includes reads served from ARC; not physical disk traffic.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "min": 0,
+          "noValue": "N/A",
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "__FALCON_DATASOURCE_UID__"
+          },
+          "editorMode": "code",
+          "expr": "sum (max by (node, pool, dataset) (rate(zfs_dataset_read_bytes_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval])))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Dataset read BW",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__FALCON_DATASOURCE_UID__"
+      },
+      "description": "Logical dataset activity summed across selected hosts. Includes reads served from ARC; not physical disk traffic.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "min": 0,
+          "noValue": "N/A",
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "__FALCON_DATASOURCE_UID__"
+          },
+          "editorMode": "code",
+          "expr": "sum (max by (node, pool, dataset) (rate(zfs_dataset_write_bytes_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval])))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Dataset write BW",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__FALCON_DATASOURCE_UID__"
+      },
+      "description": "Total hit rate / total lookup rate across selected hosts. Weighted by requests, not an average of host percentages. N/A means no lookups.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "min": 0,
+          "noValue": "N/A",
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "id": 6,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "__FALCON_DATASOURCE_UID__"
+          },
+          "editorMode": "code",
+          "expr": "sum(max by (node) (rate(zfs_arc_hits_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval]))) / (sum(max by (node) (rate(zfs_arc_hits_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval]))) + sum(max by (node) (rate(zfs_arc_misses_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval]))))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "ARC hit ratio",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "id": 7,
+      "panels": [],
+      "title": "Logical dataset I/O",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__FALCON_DATASOURCE_UID__"
+      },
+      "description": "Logical activity across mounted ZFS datasets, stacked by host. Includes reads served from ARC. This measures activity, not end-to-end application latency. The top edge is the selected cluster total.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "drawStyle": "line",
+            "fillOpacity": 35,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "min": 0,
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "__FALCON_DATASOURCE_UID__"
+          },
+          "editorMode": "code",
+          "expr": "sum by (node) (max by (node, pool, dataset) (rate(zfs_dataset_read_bytes_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval])))",
+          "legendFormat": "{{node}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Dataset read bandwidth",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__FALCON_DATASOURCE_UID__"
+      },
+      "description": "Logical activity across mounted ZFS datasets, stacked by host. Includes reads served from ARC. This measures activity, not end-to-end application latency. The top edge is the selected cluster total.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "drawStyle": "line",
+            "fillOpacity": 35,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "min": 0,
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "__FALCON_DATASOURCE_UID__"
+          },
+          "editorMode": "code",
+          "expr": "sum by (node) (max by (node, pool, dataset) (rate(zfs_dataset_write_bytes_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval])))",
+          "legendFormat": "{{node}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Dataset write bandwidth",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__FALCON_DATASOURCE_UID__"
+      },
+      "description": "Logical activity across mounted ZFS datasets, stacked by host. Includes reads served from ARC. This measures activity, not end-to-end application latency. The top edge is the selected cluster total.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "drawStyle": "line",
+            "fillOpacity": 35,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "min": 0,
+          "unit": "iops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "__FALCON_DATASOURCE_UID__"
+          },
+          "editorMode": "code",
+          "expr": "sum by (node) (max by (node, pool, dataset) (rate(zfs_dataset_reads_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval])))",
+          "legendFormat": "{{node}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Dataset read IOPS",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__FALCON_DATASOURCE_UID__"
+      },
+      "description": "Logical activity across mounted ZFS datasets, stacked by host. Includes reads served from ARC. This measures activity, not end-to-end application latency. The top edge is the selected cluster total.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "drawStyle": "line",
+            "fillOpacity": 35,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "min": 0,
+          "unit": "iops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "__FALCON_DATASOURCE_UID__"
+          },
+          "editorMode": "code",
+          "expr": "sum by (node) (max by (node, pool, dataset) (rate(zfs_dataset_writes_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval])))",
+          "legendFormat": "{{node}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Dataset write IOPS",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "id": 12,
+      "panels": [],
+      "title": "ZFS disks · read / write latency",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__FALCON_DATASOURCE_UID__"
+      },
+      "description": "Each line is one whole ZFS backing disk, labeled by host and device. rate(read/write time) / rate(completed operations), with no host or cluster aggregation. No completed operations means no latency sample. Linux block-request mean latency, not application latency or a percentile. Legend Max is the highest displayed interval mean within the selected time range, not the slowest individual I/O.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "id": 15,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "sortBy": "Max",
+          "sortDesc": true,
+          "width": 360
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "__FALCON_DATASOURCE_UID__"
+          },
+          "editorMode": "code",
+          "expr": "(sum by (node, device) ((max by (instance, device) (rate(node_disk_read_time_seconds_total{job=\"node-exporter\"}[$__rate_interval])) and on (instance, device) (max by (instance, device) (label_replace(label_replace(label_replace(max by (instance, device) (node_disk_filesystem_info{job=\"node-exporter\",type=\"zfs_member\"}), \"member\", \"$1\", \"device\", \"(.+)\"), \"device\", \"$1\", \"device\", \"((sd|hd|vd|xvd)[a-z]+)[0-9]+\"), \"device\", \"$1\", \"device\", \"(.+[0-9])p[0-9]+\")))) * on (instance) group_left (node) (label_replace(max by (instance, nodename) (node_uname_info{job=\"node-exporter\",nodename=~\"$host\"}), \"node\", \"$1\", \"nodename\", \"(.+)\"))) / sum by (node, device) ((max by (instance, device) (rate(node_disk_reads_completed_total{job=\"node-exporter\"}[$__rate_interval])) and on (instance, device) (max by (instance, device) (label_replace(label_replace(label_replace(max by (instance, device) (node_disk_filesystem_info{job=\"node-exporter\",type=\"zfs_member\"}), \"member\", \"$1\", \"device\", \"(.+)\"), \"device\", \"$1\", \"device\", \"((sd|hd|vd|xvd)[a-z]+)[0-9]+\"), \"device\", \"$1\", \"device\", \"(.+[0-9])p[0-9]+\")))) * on (instance) group_left (node) (label_replace(max by (instance, nodename) (node_uname_info{job=\"node-exporter\",nodename=~\"$host\"}), \"node\", \"$1\", \"nodename\", \"(.+)\")))) and (sum by (node, device) ((max by (instance, device) (rate(node_disk_reads_completed_total{job=\"node-exporter\"}[$__rate_interval])) and on (instance, device) (max by (instance, device) (label_replace(label_replace(label_replace(max by (instance, device) (node_disk_filesystem_info{job=\"node-exporter\",type=\"zfs_member\"}), \"member\", \"$1\", \"device\", \"(.+)\"), \"device\", \"$1\", \"device\", \"((sd|hd|vd|xvd)[a-z]+)[0-9]+\"), \"device\", \"$1\", \"device\", \"(.+[0-9])p[0-9]+\")))) * on (instance) group_left (node) (label_replace(max by (instance, nodename) (node_uname_info{job=\"node-exporter\",nodename=~\"$host\"}), \"node\", \"$1\", \"nodename\", \"(.+)\"))) > 0)",
+          "legendFormat": "{{node}} / {{device}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Disk read latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__FALCON_DATASOURCE_UID__"
+      },
+      "description": "Each line is one whole ZFS backing disk, labeled by host and device. rate(read/write time) / rate(completed operations), with no host or cluster aggregation. No completed operations means no latency sample. Linux block-request mean latency, not application latency or a percentile. Legend Max is the highest displayed interval mean within the selected time range, not the slowest individual I/O.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "id": 18,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "sortBy": "Max",
+          "sortDesc": true,
+          "width": 360
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "__FALCON_DATASOURCE_UID__"
+          },
+          "editorMode": "code",
+          "expr": "(sum by (node, device) ((max by (instance, device) (rate(node_disk_write_time_seconds_total{job=\"node-exporter\"}[$__rate_interval])) and on (instance, device) (max by (instance, device) (label_replace(label_replace(label_replace(max by (instance, device) (node_disk_filesystem_info{job=\"node-exporter\",type=\"zfs_member\"}), \"member\", \"$1\", \"device\", \"(.+)\"), \"device\", \"$1\", \"device\", \"((sd|hd|vd|xvd)[a-z]+)[0-9]+\"), \"device\", \"$1\", \"device\", \"(.+[0-9])p[0-9]+\")))) * on (instance) group_left (node) (label_replace(max by (instance, nodename) (node_uname_info{job=\"node-exporter\",nodename=~\"$host\"}), \"node\", \"$1\", \"nodename\", \"(.+)\"))) / sum by (node, device) ((max by (instance, device) (rate(node_disk_writes_completed_total{job=\"node-exporter\"}[$__rate_interval])) and on (instance, device) (max by (instance, device) (label_replace(label_replace(label_replace(max by (instance, device) (node_disk_filesystem_info{job=\"node-exporter\",type=\"zfs_member\"}), \"member\", \"$1\", \"device\", \"(.+)\"), \"device\", \"$1\", \"device\", \"((sd|hd|vd|xvd)[a-z]+)[0-9]+\"), \"device\", \"$1\", \"device\", \"(.+[0-9])p[0-9]+\")))) * on (instance) group_left (node) (label_replace(max by (instance, nodename) (node_uname_info{job=\"node-exporter\",nodename=~\"$host\"}), \"node\", \"$1\", \"nodename\", \"(.+)\")))) and (sum by (node, device) ((max by (instance, device) (rate(node_disk_writes_completed_total{job=\"node-exporter\"}[$__rate_interval])) and on (instance, device) (max by (instance, device) (label_replace(label_replace(label_replace(max by (instance, device) (node_disk_filesystem_info{job=\"node-exporter\",type=\"zfs_member\"}), \"member\", \"$1\", \"device\", \"(.+)\"), \"device\", \"$1\", \"device\", \"((sd|hd|vd|xvd)[a-z]+)[0-9]+\"), \"device\", \"$1\", \"device\", \"(.+[0-9])p[0-9]+\")))) * on (instance) group_left (node) (label_replace(max by (instance, nodename) (node_uname_info{job=\"node-exporter\",nodename=~\"$host\"}), \"node\", \"$1\", \"nodename\", \"(.+)\"))) > 0)",
+          "legendFormat": "{{node}} / {{device}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Disk write latency",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "id": 19,
+      "panels": [],
+      "title": "ARC cache",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__FALCON_DATASOURCE_UID__"
+      },
+      "description": "ARC memory stacked across selected hosts.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "drawStyle": "line",
+            "fillOpacity": 35,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "min": 0,
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 47
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "__FALCON_DATASOURCE_UID__"
+          },
+          "editorMode": "code",
+          "expr": "max by (node) (zfs_arc_size_bytes{node=~\"$host\",job=~\".*/falcon-zfs-agent\"})",
+          "legendFormat": "{{node}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "ARC memory",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__FALCON_DATASOURCE_UID__"
+      },
+      "description": "Solid lines show each host's ARC hit ratio; the dashed line shows total hits / total lookups across selected hosts, weighted by lookups. Hosts with no lookups are omitted. The vertical axis normally focuses on 95–100%, expanding downward if needed. Grafana legend Mean would average each series over time, not across hosts.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisSoftMin": 0.95,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1.5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "max": 1,
+          "unit": "percentunit"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Selected hosts · weighted"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    8,
+                    5
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 47
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "__FALCON_DATASOURCE_UID__"
+          },
+          "editorMode": "code",
+          "expr": "(sum by (node) (max by (node) (rate(zfs_arc_hits_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval]))) / (sum by (node) (max by (node) (rate(zfs_arc_hits_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval]))) + sum by (node) (max by (node) (rate(zfs_arc_misses_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval]))))) and ((sum by (node) (max by (node) (rate(zfs_arc_hits_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval]))) + sum by (node) (max by (node) (rate(zfs_arc_misses_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval])))) > 0)",
+          "legendFormat": "{{node}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "__FALCON_DATASOURCE_UID__"
+          },
+          "editorMode": "code",
+          "expr": "(sum(max by (node) (rate(zfs_arc_hits_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval]))) / (sum(max by (node) (rate(zfs_arc_hits_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval]))) + sum(max by (node) (rate(zfs_arc_misses_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval]))))) and ((sum(max by (node) (rate(zfs_arc_hits_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval]))) + sum(max by (node) (rate(zfs_arc_misses_total{node=~\"$host\",job=~\".*/falcon-zfs-agent\"}[$__rate_interval])))) > 0)",
+          "legendFormat": "Selected hosts · weighted",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "ARC hit ratio",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 42,
+  "tags": [
+    "falcon",
+    "zfs"
+  ],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "__FALCON_DATASOURCE_UID__"
+        },
+        "definition": "label_values(zfs_arc_size_bytes{job=~\".*/falcon-zfs-agent\"}, node)",
+        "includeAll": true,
+        "label": "Host",
+        "multi": true,
+        "name": "host",
+        "options": [],
+        "query": {
+          "query": "label_values(zfs_arc_size_bytes{job=~\".*/falcon-zfs-agent\"}, node)",
+          "refId": "host"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "15s",
+      "30s",
+      "1m",
+      "5m"
+    ]
+  },
+  "timezone": "browser",
+  "title": "Falcon / ZFS Agent",
+  "weekStart": "",
+  "version": 1
+}

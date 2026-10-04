@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/go-cmp/cmp"
 )
@@ -23,9 +21,8 @@ func writeKstat(t *testing.T, path, body string) {
 	}
 }
 
-// TestCollectPerf walks a faked kstat tree plus canned iostat output: ARC
-// subset, per-dataset counters from the objset kstats (only mounted datasets
-// have files; the pool list filters other pools), and the pool/vdev rows.
+// TestCollectPerf reads ARC and dataset counters without executing commands.
+// Only mounted datasets have objset files; the pool list filters other pools.
 func TestCollectPerf(t *testing.T) {
 	dir := t.TempDir()
 	writeKstat(t, filepath.Join(dir, "arcstats"), cannedKstatNamed) // hits/misses/size rows
@@ -49,14 +46,10 @@ func TestCollectPerf(t *testing.T) {
 			"writes                          4    1\nnwritten                        4    1\n")
 
 	runner := &fakeRunner{respond: func(command string) ([]byte, error) {
-		if command == "zpool iostat -Hp -v -y -T u tank 15" {
-			return []byte(cannedIostat), nil
-		}
 		return nil, fmt.Errorf("unexpected command %q", command)
 	}}
 	c := NewCollector("storage-1", []string{"tank"}, runner)
 	c.kstatDir = dir
-	defer c.ClosePerf()
 
 	sample := c.CollectPerf(context.Background())
 
@@ -78,11 +71,8 @@ func TestCollectPerf(t *testing.T) {
 		}
 	}
 
-	if len(sample.Vdevs) != 4 || sample.Vdevs[0].Vdev != "tank" || sample.Vdevs[1].Vdev != "mirror-0" {
-		t.Errorf("vdevs = %+v, want the canned iostat rows", sample.Vdevs)
-	}
-	if sample.Vdevs[0].ReadBytes != 999999999999 || sample.Vdevs[1].AllocBytes != 0 {
-		t.Errorf("vdev counters mismatch: %+v", sample.Vdevs)
+	if len(runner.commands) != 0 {
+		t.Fatalf("performance collection executed commands: %v", runner.commands)
 	}
 }
 
@@ -97,7 +87,7 @@ func TestCollectPerfNoKstats(t *testing.T) {
 	c.kstatDir = filepath.Join(t.TempDir(), "missing")
 
 	sample := c.CollectPerf(context.Background())
-	if len(sample.Arc) != 0 || len(sample.Datasets) != 0 || len(sample.Vdevs) != 0 {
+	if len(sample.Arc) != 0 || len(sample.Datasets) != 0 {
 		t.Errorf("sample = %+v, want all parts empty", sample)
 	}
 	if len(runner.commands) != 0 {
@@ -105,8 +95,8 @@ func TestCollectPerfNoKstats(t *testing.T) {
 	}
 }
 
-// TestCollectPerfSkipsBrokenParts: a failed iostat exec and an unattributable
-// objset file are skipped with warnings; the rest of the sample survives.
+// TestCollectPerfSkipsBrokenParts: an unattributable objset is skipped
+// while ARC remains available.
 func TestCollectPerfSkipsBrokenParts(t *testing.T) {
 	dir := t.TempDir()
 	writeKstat(t, filepath.Join(dir, "arcstats"), cannedKstatNamed)
@@ -115,11 +105,10 @@ func TestCollectPerfSkipsBrokenParts(t *testing.T) {
 			"reads                           4    5\n")
 
 	runner := &fakeRunner{respond: func(string) ([]byte, error) {
-		return nil, fmt.Errorf("iostat exploded")
+		return nil, fmt.Errorf("unexpected command")
 	}}
 	c := NewCollector("storage-1", nil, runner)
 	c.kstatDir = dir
-	defer c.ClosePerf()
 
 	sample := c.CollectPerf(context.Background())
 	if len(sample.Arc) != 3 {
@@ -128,61 +117,4 @@ func TestCollectPerfSkipsBrokenParts(t *testing.T) {
 	if len(sample.Datasets) != 0 {
 		t.Errorf("datasets = %+v, want the nameless objset skipped", sample.Datasets)
 	}
-	if len(sample.Vdevs) != 0 {
-		t.Errorf("vdevs = %+v, want the pool's iostat skipped", sample.Vdevs)
-	}
-}
-
-// A second pool must start sampling before the first finishes. Each gets
-// a shared collection deadline so a wedged CLI cannot freeze later samples.
-func TestCollectPerfSamplesPoolsConcurrently(t *testing.T) {
-	dir := t.TempDir()
-	writeKstat(t, filepath.Join(dir, "tank", "state"), "ONLINE")
-	writeKstat(t, filepath.Join(dir, "other", "state"), "ONLINE")
-	started := make(chan string, 2)
-	release := make(chan struct{})
-	runner := perfRunnerFunc(func(ctx context.Context, _ string, args ...string) ([]byte, error) {
-		pool := args[6]
-		started <- pool
-		<-release
-		return []byte(strings.ReplaceAll(cannedIostat, "tank", pool)), nil
-	})
-	c := NewCollector("storage-1", nil, runner)
-	c.kstatDir = dir
-	defer c.ClosePerf()
-	done := make(chan *PerfSample, 1)
-	go func() { done <- c.CollectPerf(context.Background()) }()
-	for range 2 {
-		select {
-		case <-started:
-		case <-time.After(5 * time.Second):
-			close(release)
-			t.Fatal("pool collections serialized")
-		}
-	}
-	close(release)
-	sample := <-done
-	if len(sample.Vdevs) != 8 || sample.Vdevs[0].Pool != "other" || sample.Vdevs[4].Pool != "tank" {
-		t.Fatalf("pool results lost or interleaved: %+v", sample.Vdevs)
-	}
-}
-
-type perfRunnerFunc func(context.Context, string, ...string) ([]byte, error)
-
-func (f perfRunnerFunc) Run(ctx context.Context, bin string, args ...string) ([]byte, error) {
-	return f(ctx, bin, args...)
-}
-
-func (f perfRunnerFunc) Stream(ctx context.Context, bin string, line func(string), args ...string) error {
-	out, err := f(ctx, bin, args...)
-	if err != nil {
-		return err
-	}
-	line("100")
-	for _, row := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		line(row)
-	}
-	line("115")
-	<-ctx.Done()
-	return ctx.Err()
 }

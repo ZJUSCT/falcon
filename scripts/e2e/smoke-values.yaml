@@ -4,6 +4,9 @@ namespace:
   create: false
 global:
   imageRegistry: ""
+zfsAgent:
+  dashboard:
+    enabled: true
 controller:
   image:
     tag: e2e

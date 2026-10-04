@@ -27,21 +27,6 @@ func (f *fakeRunner) Run(_ context.Context, bin string, args ...string) ([]byte,
 	return f.respond(command)
 }
 
-// Stream adapts canned finite output to a live timestamp-framed source.
-func (f *fakeRunner) Stream(ctx context.Context, bin string, line func(string), args ...string) error {
-	out, err := f.Run(ctx, bin, args...)
-	if err != nil {
-		return err
-	}
-	line("100")
-	for _, row := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		line(row)
-	}
-	line("115")
-	<-ctx.Done()
-	return ctx.Err()
-}
-
 // zpoolGetCommand is the exact zpool get invocation Report issues per pool
 // (frozen like the zfs get flags below).
 const zpoolGetPrefix = "zpool get -Hp -o name,property,value size,allocated,free,capacity,fragmentation,health "

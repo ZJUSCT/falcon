@@ -126,9 +126,8 @@ type Collector struct {
 	// discarding logger.
 	Log *slog.Logger
 
-	now       func() time.Time         // injectable for tests
-	kstatDir  string                   // overrides kstatRoot for tests; "" = kstatRoot
-	ioSources map[string]*iostatSource // owned by the serial CollectPerf loop
+	now      func() time.Time // injectable for tests
+	kstatDir string           // overrides kstatRoot for tests; "" = kstatRoot
 }
 
 // NewCollector returns a collector reporting for node.

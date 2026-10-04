@@ -129,11 +129,9 @@ func main() {
 
 // pushPerfLoop collects one PerfSample per push interval and hands it to the
 // pusher, with the dataset→PVC index rebuilt from the latest cached report
-// (small: one entry per dataset). Persistent iostat processes sample contiguous
-// windows; the first framed window arrives after two intervals. Push/export
-// failures are logged by the OTLP error handler and never stop the loop.
+// (small: one entry per dataset). Performance sampling reads kernel files only.
+// Export failures are logged by the OTLP error handler and never stop the loop.
 func pushPerfLoop(collector *zfsagent.Collector, refresher *zfsagent.Refresher, pusher *zfsagent.OTLPPusher) {
-	defer collector.ClosePerf()
 	ticker := time.NewTicker(zfsagent.PushInterval)
 	defer ticker.Stop()
 	collect := func() {

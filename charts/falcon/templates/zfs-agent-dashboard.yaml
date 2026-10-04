@@ -1,0 +1,24 @@
+{{- if .Values.zfsAgent.dashboard.enabled }}
+{{- $uid := printf "falcon-zfs-%s" (printf "%s/%s" .Release.Namespace .Release.Name | sha256sum | trunc 16) }}
+{{- $json := .Files.Get "dashboards/zfs-agent.json" | replace (toJson "__FALCON_DATASOURCE_UID__") (toJson .Values.zfsAgent.dashboard.datasourceUid) }}
+{{- $dashboard := mustFromJson $json }}
+{{- $_ := set $dashboard "uid" $uid }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "falcon.fullname" . }}-zfs-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "falcon.labels" . | nindent 4 }}
+    app.kubernetes.io/component: zfs-dashboard
+    {{- with .Values.zfsAgent.dashboard.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.zfsAgent.dashboard.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  {{ $uid }}.json: |-
+    {{- $dashboard | toPrettyJson | nindent 4 }}
+{{- end }}
