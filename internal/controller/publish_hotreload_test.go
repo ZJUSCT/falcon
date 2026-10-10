@@ -6,6 +6,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -108,5 +109,48 @@ func TestReloaderStampCarriedOnOwnUpdate(t *testing.T) {
 	}
 	if got := deployment.Spec.Template.Annotations[reloaderStampAnnotation]; got != reloaderStamp {
 		t.Fatalf("the own update must carry the live stamp along, got %q", got)
+	}
+}
+
+// TestRunningSyncStillAppliesPublishDesiredState: a sync Job writes to the
+// work PVC, not to the immutable active publication. Falcon must therefore
+// keep Service and Deployment desired-state reconciliation live during that
+// Job instead of waiting for a potentially long sync to finish.
+func TestRunningSyncStillAppliesPublishDesiredState(t *testing.T) {
+	ctx := context.Background()
+	mirror := pausedPublishedMirror(t, "smoke")
+	mirror.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{
+		QueuedAt:  timePtr(time.Unix(1756147300, 0)),
+		StartedAt: timePtr(time.Unix(1756147400, 0)),
+		Phase:     mirrorv1alpha1.SyncPhaseRunning,
+	}
+	reconciler, fakeClient, _ := hotReloadReconciler(t, ctx, mirror)
+
+	if _, err := reconciler.ensurePublish(ctx, mirror, mirror.Status.ActivePVC, false); err != nil {
+		t.Fatalf("create active publication: %v", err)
+	}
+	replicas := int32(2)
+	mirror.Spec.Publish.HTTP.Replicas = &replicas
+	mirror.Spec.Publish.HTTP.PodTemplate.Spec.Containers[0].Ports[0].ContainerPort = 8081
+
+	if _, err := reconciler.reconcileActivePublication(ctx, mirror); err != nil {
+		t.Fatalf("reconcile active publication during sync: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, deployment)
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != replicas {
+		t.Fatalf("running sync blocked replica update, got %#v", deployment.Spec.Replicas)
+	}
+	if got := deployment.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort; got != 8081 {
+		t.Fatalf("running sync blocked pod template update, got port %d", got)
+	}
+	service := &corev1.Service{}
+	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: "smoke-publish-http"}, service)
+	if got := service.Spec.Ports[0].TargetPort.IntValue(); got != 8081 {
+		t.Fatalf("running sync blocked Service target update, got port %d", got)
+	}
+	if got := findVolume(deployment.Spec.Template.Spec.Volumes, PublishDataVolumeName).PersistentVolumeClaim.ClaimName; got != mirror.Status.ActivePVC {
+		t.Fatalf("active publication PVC changed to %q", got)
 	}
 }

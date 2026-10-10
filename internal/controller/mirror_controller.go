@@ -709,11 +709,11 @@ type publicationHealth struct {
 }
 
 // reconcileActivePublication reconciles an idle active generation, but only
-// observes it while synchronization or a pending publication owns the next generation. Re-applying ActivePVC during a
-// pending publication would otherwise revert the Deployment away from the new
-// PVC on every reconcile. Availability is intentionally weaker than rollout
-// convergence: maxUnavailable=0 keeps an old pod serving while the new pod is
-// coming up.
+// observes it while a pending publication owns the next generation.
+// Re-applying ActivePVC during that handoff would otherwise revert the
+// Deployment away from the new PVC on every reconcile. Availability is
+// intentionally weaker than rollout convergence: maxUnavailable=0 keeps an old
+// pod serving while the new pod is coming up.
 func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirror *mirrorv1alpha1.Mirror) (publicationHealth, error) {
 	if !publishEnabled(mirror) {
 		drained, err := publishPodsDrained(ctx, r.Client, mirror)
@@ -731,11 +731,13 @@ func (r *MirrorReconciler) reconcileActivePublication(ctx context.Context, mirro
 	if mirror.Status.ActivePVC == "" && mirror.Status.Publication == nil {
 		return publicationHealth{reason: "Pending", message: "waiting for a ready snapshot to publish"}, nil
 	}
-	// Re-apply the active publication while no newer synchronization
-	// transaction or publication is pending; the candidate would be undone by
-	// re-asserting ActivePVC here.
-	if mirror.Status.CurrentSync == nil && mirror.Status.Publication == nil {
-		if _, err := r.ensurePublish(ctx, mirror, mirror.Status.ActivePVC); err != nil {
+	// Re-apply the active publication while no newer publication is pending;
+	// the candidate would be undone by re-asserting ActivePVC here. A running
+	// synchronization writes only the work PVC, so desired publish changes
+	// remain eligible for rollout.
+	if mirror.Status.Publication == nil {
+		preserveRolloutClaim := mirror.Status.CurrentSync != nil
+		if _, err := r.ensurePublish(ctx, mirror, mirror.Status.ActivePVC, preserveRolloutClaim); err != nil {
 			return publicationHealth{}, err
 		}
 	}

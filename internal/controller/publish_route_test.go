@@ -1041,7 +1041,7 @@ func TestCurrentSyncObservesActivePublicationWithoutRevertingRollout(t *testing.
 		WithObjects(mirror).Build()
 	addBoundPublishPVC(t, ctx, fakeClient, mirror, mirror.Status.ActivePVC)
 	reconciler := &MirrorReconciler{Client: fakeClient, Scheme: scheme, Config: testConfig(), SyncLimiter: NewSyncLimiter(0)}
-	if _, err := reconciler.ensurePublish(ctx, mirror, mirror.Status.ActivePVC); err != nil {
+	if _, err := reconciler.ensurePublish(ctx, mirror, mirror.Status.ActivePVC, false); err != nil {
 		t.Fatalf("create active publication: %v", err)
 	}
 	if err := ensurePublishedMirrorRoute(ctx, reconciler, mirror); err != nil {
@@ -1060,6 +1060,7 @@ func TestCurrentSyncObservesActivePublicationWithoutRevertingRollout(t *testing.
 		t.Fatalf("mark old publication available: %v", err)
 	}
 	markRouteAccepted(t, ctx, fakeClient, mirror.Namespace, "smoke-publish")
+	mirror.Spec.Publish.HTTP.PodTemplate.Spec.Containers[0].Image = "docker.io/library/nginx:1.27.4"
 
 	health, err := reconciler.reconcileActivePublication(ctx, mirror)
 	if err != nil {
@@ -1071,6 +1072,9 @@ func TestCurrentSyncObservesActivePublicationWithoutRevertingRollout(t *testing.
 	get(t, ctx, fakeClient, client.ObjectKey{Namespace: mirror.Namespace, Name: deployment.Name}, deployment)
 	if got := findVolume(deployment.Spec.Template.Spec.Volumes, PublishDataVolumeName).PersistentVolumeClaim.ClaimName; got != "smoke-snap-new" {
 		t.Fatalf("active observation reverted the in-flight PVC to %q", got)
+	}
+	if got := deployment.Spec.Template.Spec.Containers[0].Image; got != mirror.Spec.Publish.HTTP.PodTemplate.Spec.Containers[0].Image {
+		t.Fatalf("current sync prevented desired Deployment update, got image %q", got)
 	}
 }
 

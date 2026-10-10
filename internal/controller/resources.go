@@ -366,8 +366,10 @@ func (r *MirrorReconciler) createSyncJob(ctx context.Context, mirror *mirrorv1al
 // binding — until the publish PVC is bound to its PV no Deployment is
 // created, because a pod must not exist before the PV whose nodeAffinity it
 // relies on does (cloning the snapshot takes seconds to minutes; the caller
-// retries until then).
-func (r *MirrorReconciler) ensurePublish(ctx context.Context, mirror *mirrorv1alpha1.Mirror, claimName string) (bool, error) {
+// retries until then). preserveRolloutClaim keeps the data claim already
+// present on an owned Deployment, allowing desired-state repair without
+// reverting a generation rollout that is already in flight.
+func (r *MirrorReconciler) ensurePublish(ctx context.Context, mirror *mirrorv1alpha1.Mirror, claimName string, preserveRolloutClaim bool) (bool, error) {
 	ready := true
 	services := mirror.Spec.Publish
 	var httpSpec *mirrorv1alpha1.MirrorServiceSpec
@@ -384,7 +386,7 @@ func (r *MirrorReconciler) ensurePublish(ctx context.Context, mirror *mirrorv1al
 		if entry.spec == nil {
 			continue
 		}
-		ok, err := r.ensurePublishEntry(ctx, mirror, entry.key, entry.spec, claimName)
+		ok, err := r.ensurePublishEntry(ctx, mirror, entry.key, entry.spec, claimName, preserveRolloutClaim)
 		if err != nil {
 			return false, err
 		}
@@ -513,9 +515,21 @@ func (r *MirrorReconciler) cleanupDisabledPublishChildren(ctx context.Context, m
 //   - no workload defaults are injected: the PodTemplate is operator-owned.
 //     Placement is not touched either — volume locality is the scheduler's
 //     job (the bound clone PV's nodeAffinity), never Falcon's.
-func (r *MirrorReconciler) ensurePublishEntry(ctx context.Context, mirror *mirrorv1alpha1.Mirror, serviceKey string, service *mirrorv1alpha1.MirrorServiceSpec, claimName string) (bool, error) {
+func (r *MirrorReconciler) ensurePublishEntry(ctx context.Context, mirror *mirrorv1alpha1.Mirror, serviceKey string, service *mirrorv1alpha1.MirrorServiceSpec, claimName string, preserveRolloutClaim bool) (bool, error) {
 	base := childBase(mirror.Name)
 	role := publishRole(serviceKey)
+	if preserveRolloutClaim {
+		deployment := &appsv1.Deployment{}
+		err := r.Get(ctx, types.NamespacedName{Namespace: mirror.Namespace, Name: publishChildName(base, serviceKey)}, deployment)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return false, err
+		}
+		if err == nil && metav1.IsControlledBy(deployment, mirror) {
+			if volume := findOwnedVolume(deployment.Spec.Template.Spec.Volumes, PublishDataVolumeName); volume != nil && volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName != "" {
+				claimName = volume.PersistentVolumeClaim.ClaimName
+			}
+		}
+	}
 
 	template := service.PodTemplate.DeepCopy()
 	if template.Labels == nil {
@@ -709,3 +723,12 @@ func replicasOrDefault(replicas *int32) int32 {
 }
 
 func stringPtr(value string) *string { return &value }
+
+func findOwnedVolume(volumes []corev1.Volume, name string) *corev1.Volume {
+	for index := range volumes {
+		if volumes[index].Name == name {
+			return &volumes[index]
+		}
+	}
+	return nil
+}

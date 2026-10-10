@@ -455,7 +455,7 @@ func TestPublicationClearsOldUsageAndBackfillsNewPVC(t *testing.T) {
 		t.Fatal(err)
 	}
 	addBoundPublishPVC(t, ctx, c, mirror, newPVC)
-	if _, err := r.ensurePublish(ctx, mirror, newPVC); err != nil {
+	if _, err := r.ensurePublish(ctx, mirror, newPVC, false); err != nil {
 		t.Fatal(err)
 	}
 	markPublishDeploymentAvailable(t, ctx, c, mirror.Namespace)

@@ -72,7 +72,7 @@ func (r *MirrorReconciler) reconcilePublication(ctx context.Context, m *mirrorv1
 	}
 	workloadsReady := true
 	if publishEnabled(m) {
-		workloadsReady, err = r.ensurePublish(ctx, m, name)
+		workloadsReady, err = r.ensurePublish(ctx, m, name, false)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
