@@ -195,6 +195,8 @@ admin:
     clientSecret: ""
     # 允许访问的 GitHub 用户 ID 列表
     allowedUserIDs: []
+    # 允许访问的 GitHub 组织名称列表（忽略大小写）
+    allowedOrganizations: []
 publish:
   http:
     # HTTP 发布网关；hostnames 非空时 name 必填
@@ -209,6 +211,10 @@ publish:
 ```
 
 配置支持 `${NAME}` 环境变量代换，`$${NAME}` 保持原样，不支持 `${NAME:-default}` 等 shell 表达式。
+
+配置 GitHub OAuth 时，用户 ID 在 `allowedUserIDs` 中，或属于 `allowedOrganizations` 中任一组织的正式成员，即可访问管理面；两个列表都为空时拒绝所有人。待接受的组织邀请不算成员。
+
+配置组织列表后，OAuth 额外申请 `read:org` 权限，通过认证成员 API 检查包括非公开关系在内的组织成员资格。已有用户可能需要重新授权；启用第三方应用限制或 SSO 的组织可能需要批准 OAuth App。成员资格只在登录回调时检查，会话有效期为 24 小时；退出组织后已有会话会在到期后失效。从配置中移除授权组织，则其会话在新配置生效后失效（用户 ID 仍被允许的除外）。
 
 ### CRD
 

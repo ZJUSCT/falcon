@@ -74,9 +74,10 @@ type MirrorzConfig struct {
 // surface when configured: every admin endpoint then requires a session.
 // Without it the admin endpoints answer unauthenticated (debug/local mode).
 type AdminOAuthConfig struct {
-	ClientID       string  `json:"clientID,omitempty"`
-	ClientSecret   string  `json:"clientSecret,omitempty"`
-	AllowedUserIDs []int64 `json:"allowedUserIDs,omitempty"`
+	ClientID             string   `json:"clientID,omitempty"`
+	ClientSecret         string   `json:"clientSecret,omitempty"`
+	AllowedUserIDs       []int64  `json:"allowedUserIDs,omitempty"`
+	AllowedOrganizations []string `json:"allowedOrganizations,omitempty"`
 }
 
 // Config is the whole controller configuration file.
@@ -187,6 +188,11 @@ func (c *Config) Validate() error {
 		}
 		if c.Admin.Host == "" {
 			return fmt.Errorf("admin.host must not be empty when admin.oauth is configured")
+		}
+	}
+	for _, org := range c.Admin.OAuth.AllowedOrganizations {
+		if strings.TrimSpace(org) == "" {
+			return fmt.Errorf("admin.oauth.allowedOrganizations must not contain empty entries")
 		}
 	}
 	http := c.Publish.HTTP

@@ -5,18 +5,25 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 )
 
-type fakeGitHubTransport struct{ denied bool }
+type fakeGitHubTransport struct {
+	denied          bool
+	membershipState string
+}
 
 func (f fakeGitHubTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	var body string
-	if strings.HasSuffix(r.URL.Path, "/access_token") {
+	switch {
+	case strings.HasSuffix(r.URL.Path, "/access_token"):
 		body = `{"access_token":"token"}`
-	} else {
+	case strings.HasPrefix(r.URL.Path, "/user/memberships/orgs/"):
+		body = fmt.Sprintf(`{"state":%q}`, f.membershipState)
+	default:
 		id := int64(42)
 		if f.denied {
 			id = 99
@@ -76,13 +83,46 @@ func TestAuthenticatorCallback(t *testing.T) {
 	}
 }
 
+func TestAuthenticatorOrganizationCallback(t *testing.T) {
+	a := &Authenticator{
+		Config:    GitHubAuthConfig{ClientID: "id", ClientSecret: "secret", AllowedOrganizations: []string{"ZJUSCT"}},
+		AdminHost: "admin.example",
+		Client:    &http.Client{Transport: fakeGitHubTransport{membershipState: "active"}},
+	}
+	r := httptest.NewRequest(http.MethodGet, "https://admin.example/oauth/callback?code=c&state=s", nil)
+	r.AddCookie(&http.Cookie{Name: "falcon_oauth_state", Value: "s"})
+	w := httptest.NewRecorder()
+	a.callback(w, r)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("callback status = %d, want %d", w.Code, http.StatusSeeOther)
+	}
+	sessionReq := httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)
+	for _, cookie := range w.Result().Cookies() {
+		sessionReq.AddCookie(cookie)
+	}
+	if _, ok := a.validCookie(sessionReq); !ok {
+		t.Fatal("active organization member session rejected")
+	}
+}
+
 func TestAuthenticatorLoginRedirectURI(t *testing.T) {
 	a := &Authenticator{Config: GitHubAuthConfig{ClientID: "id", ClientSecret: "secret"}, AdminHost: "admin.example"}
-	r := httptest.NewRequest(http.MethodGet, "https://admin.example/oauth/login", nil)
-	w := httptest.NewRecorder()
-	a.login(w, r)
-	if !strings.Contains(w.Header().Get("Location"), "redirect_uri=https%3A%2F%2Fadmin.example%2Foauth%2Fcallback") {
-		t.Fatalf("redirect URI missing: %q", w.Header().Get("Location"))
+	for _, organizations := range [][]string{nil, {"ZJUSCT"}} {
+		a.Config.AllowedOrganizations = organizations
+		r := httptest.NewRequest(http.MethodGet, "https://admin.example/oauth/login", nil)
+		w := httptest.NewRecorder()
+		a.login(w, r)
+		location, err := url.Parse(w.Header().Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		scope := "read:user"
+		if len(organizations) > 0 {
+			scope += " read:org"
+		}
+		if location.Query().Get("redirect_uri") != "https://admin.example/oauth/callback" || location.Query().Get("scope") != scope {
+			t.Fatalf("unexpected login URL: %s", location)
+		}
 	}
 }
 

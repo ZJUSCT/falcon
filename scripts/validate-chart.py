@@ -55,6 +55,7 @@ ui:
   oauth:
     clientID: test-client
     clientSecret: test-secret
+    allowedOrganizations: [ZJUSCT, another-org]
   route:
     hostnames: [admin.example.org]
     parentRefs:
@@ -130,6 +131,11 @@ def main() -> None:
     for label, docs in renders.items():
         failures += [f"[{label}] {p}" for p in check(docs)]
         print(f"[{label}] {len(docs)} resources rendered")
+
+    configmap = next(d for d in renders["all-on"] if d.get("metadata", {}).get("name") == "falcon-config")
+    config = yaml.safe_load(configmap["data"]["config.yaml"])
+    if config["admin"]["oauth"]["allowedOrganizations"] != ["ZJUSCT", "another-org"]:
+        failures.append("OAuth organizations were not preserved in controller config")
 
     identities = {
         (d.get("kind"), d.get("metadata", {}).get("name"))

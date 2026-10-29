@@ -131,7 +131,7 @@ func main() {
 		Version:          version,
 	}
 	if cfg.Admin.OAuth.ClientID != "" {
-		apiServer.Auth = &webapi.Authenticator{Config: webapi.GitHubAuthConfig{ClientID: cfg.Admin.OAuth.ClientID, ClientSecret: cfg.Admin.OAuth.ClientSecret, AllowedUserIDs: cfg.Admin.OAuth.AllowedUserIDs}, AdminHost: cfg.Admin.Host}
+		apiServer.Auth = &webapi.Authenticator{Config: webapi.GitHubAuthConfig{ClientID: cfg.Admin.OAuth.ClientID, ClientSecret: cfg.Admin.OAuth.ClientSecret, AllowedUserIDs: cfg.Admin.OAuth.AllowedUserIDs, AllowedOrganizations: cfg.Admin.OAuth.AllowedOrganizations}, AdminHost: cfg.Admin.Host}
 	}
 	apiServer.UIUpstream = os.Getenv("FALCON_UI_UPSTREAM")
 	// ZFS usage aggregation behind GET /api/usage: enabled purely by the

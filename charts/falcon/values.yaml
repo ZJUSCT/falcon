@@ -130,7 +130,9 @@ ui:
     # rendered config references it via ${...} expansion only.
     clientSecret: ""
     existingSecret: ""
+    # A user ID or active membership in any listed organization grants access.
     allowedUserIDs: []
+    allowedOrganizations: []
   route:
     hostnames: []
     parentRefs: []

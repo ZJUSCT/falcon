@@ -200,6 +200,7 @@ admin:
       {{- range (.allowedUserIDs | default list) }}
       - {{ . }}
       {{- end }}
+    allowedOrganizations: {{ .allowedOrganizations | default list | toJson }}
   {{- end }}
   {{- end }}
 publish:

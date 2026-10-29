@@ -40,6 +40,7 @@ admin:
     clientID: client-id
     clientSecret: secret
     allowedUserIDs: [1, 2]
+    allowedOrganizations: [ZJUSCT]
 publish:
   http:
     gatewayRef:
@@ -79,7 +80,7 @@ publish:
 	if !cfg.Admin.Enabled || cfg.Admin.Host != "mirrors-admin.zjusct.io" {
 		t.Errorf("admin wrong: %+v", cfg.Admin)
 	}
-	if cfg.Admin.OAuth.ClientID != "client-id" || len(cfg.Admin.OAuth.AllowedUserIDs) != 2 {
+	if cfg.Admin.OAuth.ClientID != "client-id" || len(cfg.Admin.OAuth.AllowedUserIDs) != 2 || len(cfg.Admin.OAuth.AllowedOrganizations) != 1 || cfg.Admin.OAuth.AllowedOrganizations[0] != "ZJUSCT" {
 		t.Errorf("admin.oauth wrong: %+v", cfg.Admin.OAuth)
 	}
 	if !cfg.PublishEnabled() {
