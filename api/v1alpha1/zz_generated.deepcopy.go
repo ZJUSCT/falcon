@@ -326,6 +326,10 @@ func (in *MirrorStatus) DeepCopyInto(out *MirrorStatus) {
 		in, out := &in.LastSuccessfulSyncAt, &out.LastSuccessfulSyncAt
 		*out = (*in).DeepCopy()
 	}
+	if in.LastFailedSyncAt != nil {
+		in, out := &in.LastFailedSyncAt, &out.LastFailedSyncAt
+		*out = (*in).DeepCopy()
+	}
 	if in.PausedAt != nil {
 		in, out := &in.PausedAt, &out.PausedAt
 		*out = (*in).DeepCopy()

@@ -187,6 +187,44 @@ func TestListJobsUnsyncedMirrorHasZeroTimestamps(t *testing.T) {
 	}
 }
 
+func TestListJobsRetainsSuccessAndFailureHistory(t *testing.T) {
+	previous := time.Date(2026, 8, 30, 8, 0, 0, 0, time.UTC)
+	finished := previous.Add(time.Hour)
+	for _, phase := range []string{mirrorv1alpha1.SyncPhaseSucceeded, mirrorv1alpha1.SyncPhaseFailed, mirrorv1alpha1.SyncPhaseCancelled} {
+		t.Run(phase, func(t *testing.T) {
+			success, failure := previous, previous
+			if phase == mirrorv1alpha1.SyncPhaseSucceeded {
+				success = finished
+			}
+			if phase == mirrorv1alpha1.SyncPhaseFailed {
+				failure = finished
+			}
+			m := &mirrorv1alpha1.Mirror{
+				ObjectMeta: metav1.ObjectMeta{Name: "mirror", Namespace: "mirrors"},
+				Spec:       mirrorv1alpha1.MirrorSpec{Storage: &mirrorv1alpha1.MirrorStorageSpec{SyncStorageClassName: "sync"}},
+				Status: mirrorv1alpha1.MirrorStatus{
+					LastSuccessfulSyncAt: &metav1.Time{Time: success},
+					LastFailedSyncAt:     &metav1.Time{Time: failure},
+					LastSync:             mirrorPhase(t, &previous, &finished, phase),
+					CurrentSync:          &mirrorv1alpha1.MirrorCurrentSyncStatus{Phase: mirrorv1alpha1.SyncPhaseRunning, StartedAt: &metav1.Time{Time: finished.Add(time.Hour)}},
+				},
+			}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(m).Build()
+			entries, err := (&Server{Client: c}).listJobs(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 {
+				t.Fatalf("got %d entries, want 1", len(entries))
+			}
+			got := entries[0]
+			if !got.LastSuccessAt.Equal(success) || !got.LastFailureAt.Equal(failure) {
+				t.Fatalf("sync history lost: success=%v, failure=%v; want %v, %v", got.LastSuccessAt, got.LastFailureAt, success, failure)
+			}
+		})
+	}
+}
+
 func TestListJobsIncludesProxyMirror(t *testing.T) {
 	p := &mirrorv1alpha1.Mirror{
 		ObjectMeta: metav1.ObjectMeta{Name: "pypi-proxy", Namespace: "mirrors"},

@@ -200,6 +200,8 @@ func mirrorJobEntry(m *mirrorv1alpha1.Mirror) JobEntry {
 		ActivePVC:         m.Status.ActivePVC,
 		Actions:           []string{}, // legacy field, no action history anymore
 		NextAttemptAt:     timeOrZero(m.Status.NextSyncAt),
+		LastSuccessAt:     timeOrZero(m.Status.LastSuccessfulSyncAt),
+		LastFailureAt:     timeOrZero(m.Status.LastFailedSyncAt),
 		Paused:            m.SyncPaused(),
 		SyncBusy:          m.Status.CurrentSync != nil || m.SyncRequested(),
 		StorageQuotaBytes: quota,
@@ -232,9 +234,13 @@ func mirrorJobEntry(m *mirrorv1alpha1.Mirror) JobEntry {
 		entry.LastFinishedAt = finished
 		switch last.Phase {
 		case mirrorv1alpha1.SyncPhaseSucceeded:
-			entry.LastSuccessAt = finished
+			if entry.LastSuccessAt.IsZero() {
+				entry.LastSuccessAt = finished
+			}
 		case mirrorv1alpha1.SyncPhaseFailed:
-			entry.LastFailureAt = finished
+			if entry.LastFailureAt.IsZero() {
+				entry.LastFailureAt = finished
+			}
 		}
 		// updated_at is best-effort: last known sync finish, else start.
 		if m.Status.CurrentSync == nil && !finished.IsZero() {

@@ -144,6 +144,13 @@ func (r *MirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	if err := r.cleanupDisabledPublishChildren(ctx, mirror); err != nil {
 		return ctrl.Result{}, err
 	}
+	// Preserve the last failure on existing Mirrors before a later Job or
+	// cancellation replaces lastSync.
+	if last := mirror.Status.LastSync; last != nil && last.Phase == mirrorv1alpha1.SyncPhaseFailed && last.FinishedAt != nil && !last.FinishedAt.IsZero() && mirror.Status.LastFailedSyncAt == nil {
+		if _, err := r.patchStatus(ctx, mirror, func() { mirror.Status.LastFailedSyncAt = last.FinishedAt.DeepCopy() }); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 
 	if mirror.Status.RequestCleanup != nil {
 		return r.reconcileRequestCleanup(ctx, mirror)
@@ -512,6 +519,9 @@ func (r *MirrorReconciler) observeSyncJob(ctx context.Context, mirror *mirrorv1a
 			JobName: job.Name, Phase: phase, StartedAt: current.StartedAt.DeepCopy(), FinishedAt: finished.DeepCopy(), Message: message,
 		}
 		if phase == mirrorv1alpha1.SyncPhaseFailed {
+			if finished != nil && !finished.IsZero() {
+				mirror.Status.LastFailedSyncAt = finished.DeepCopy()
+			}
 			mirror.Status.LastAttempt = mirror.Status.LastSync.DeepCopy()
 			mirror.Status.LastAttempt.StartedAt = current.QueuedAt.DeepCopy()
 		}
