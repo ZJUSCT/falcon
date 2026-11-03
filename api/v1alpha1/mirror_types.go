@@ -487,6 +487,9 @@ type MirrorStatus struct {
 	// MirrorZ's O token when a later Job is running or has failed.
 	// Required before publication; only absent before the first successful Job.
 	LastSuccessfulSyncAt *metav1.Time `json:"lastSuccessfulSyncAt,omitempty"`
+	// LastFailedSyncAt retains the latest failed Job completion independently
+	// of later successful or cancelled Jobs. Operator cancellations are excluded.
+	LastFailedSyncAt *metav1.Time `json:"lastFailedSyncAt,omitempty"`
 	// PausedAt is when the controller observed syncing stop under the
 	// sync-paused annotation. Running Jobs drain first; publication proceeds
 	// independently.

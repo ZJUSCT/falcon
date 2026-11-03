@@ -35,6 +35,7 @@ func TestSyncJobResultSurvivesTransactionFailure(t *testing.T) {
 			mirror := testMirror()
 			mirror.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{QueuedAt: &queued, Phase: mirrorv1alpha1.SyncPhasePending}
 			mirror.Status.LastSuccessfulSyncAt = &previous
+			mirror.Status.LastFailedSyncAt = &previous
 			scheme := testScheme(t)
 			c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&mirrorv1alpha1.Mirror{}).WithObjects(mirror).Build()
 			r := &MirrorReconciler{Client: c, Scheme: scheme, Now: func() time.Time { return now }}
@@ -70,10 +71,54 @@ func TestSyncJobResultSurvivesTransactionFailure(t *testing.T) {
 			if !st.LastSync.StartedAt.Equal(&started) || !st.LastSync.FinishedAt.Equal(&finished) || !st.LastSuccessfulSyncAt.Equal(wantSuccess) {
 				t.Fatalf("Job, queue and transaction times must stay independent: %#v", st)
 			}
+			wantFailure := &previous
+			if failed {
+				wantFailure = &finished
+			}
+			if !st.LastFailedSyncAt.Equal(wantFailure) {
+				t.Fatalf("last failure = %v, want %v", st.LastFailedSyncAt, wantFailure)
+			}
 			if condition := findCondition(current.Status.Conditions, conditionDegraded); condition == nil || condition.Status != metav1.ConditionTrue {
 				t.Fatal("transaction failure must remain degraded while idle")
 			}
 		})
+	}
+}
+
+func TestReconcilePreservesExistingFailureHistory(t *testing.T) {
+	mirror := testMirror()
+	mirror.SetSyncPaused(true)
+	previous := metav1.Unix(1788000000, 0)
+	mirror.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{JobName: "previous-sync", Phase: mirrorv1alpha1.SyncPhaseFailed, FinishedAt: &previous}
+	scheme := testScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&mirrorv1alpha1.Mirror{}).WithObjects(mirror).Build()
+	r := &MirrorReconciler{Client: c, Scheme: scheme, Config: testConfig(), SyncLimiter: NewSyncLimiter(0)}
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mirror)}
+	// The first pass installs the finalizer; the next preserves the old result.
+	for i := 0; i < 2; i++ {
+		reconcile(t, t.Context(), r, req)
+	}
+	mirror = getMirror(t, t.Context(), c, req.NamespacedName)
+	if !mirror.Status.LastFailedSyncAt.Equal(&previous) {
+		t.Fatalf("existing failure was not retained: %#v", mirror.Status)
+	}
+
+	started := metav1.NewTime(previous.Add(time.Hour))
+	finished := metav1.NewTime(started.Add(time.Minute))
+	mirror.Status.CurrentSync = &mirrorv1alpha1.MirrorCurrentSyncStatus{QueuedAt: &started, Phase: mirrorv1alpha1.SyncPhaseRunning}
+	if err := c.Status().Update(t.Context(), mirror); err != nil {
+		t.Fatal(err)
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: currentSyncJobName(mirror)}, Status: batchv1.JobStatus{
+		StartTime: &started, CompletionTime: &finished,
+		Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}},
+	}}
+	if err := r.observeSyncJob(t.Context(), mirror, job); err != nil {
+		t.Fatal(err)
+	}
+	mirror = getMirror(t, t.Context(), c, req.NamespacedName)
+	if !mirror.Status.LastFailedSyncAt.Equal(&previous) || !mirror.Status.LastSuccessfulSyncAt.Equal(&finished) {
+		t.Fatalf("success erased the existing failure: %#v", mirror.Status)
 	}
 }
 

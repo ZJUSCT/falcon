@@ -26626,6 +26626,12 @@ spec:
                 - jobName
                 - phase
                 type: object
+              lastFailedSyncAt:
+                description: |-
+                  LastFailedSyncAt retains the latest failed Job completion independently
+                  of later successful or cancelled Jobs. Operator cancellations are excluded.
+                format: date-time
+                type: string
               lastPublishedAt:
                 format: date-time
                 type: string

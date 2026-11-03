@@ -111,6 +111,7 @@ func TestCancellationDrainsWritersAndRetainsPublication(t *testing.T) {
 			m.Status.ActivePVC = "old-publication"
 			m.Status.LastSuccessfulSyncAt = &previous
 			m.Status.LastSync = &mirrorv1alpha1.MirrorSyncStatus{Phase: mirrorv1alpha1.SyncPhaseSucceeded, FinishedAt: &previous}
+			m.Status.LastFailedSyncAt = &previous
 			m.Annotations = map[string]string{SyncRequestAnnotation: "true", mirrorv1alpha1.AbortRequestAnnotation: "true"}
 			m.SetSyncPaused(true)
 			m.Status.ConsecutiveFailures = 2
@@ -160,6 +161,9 @@ func TestCancellationDrainsWritersAndRetainsPublication(t *testing.T) {
 			}
 			if m.Status.LastAttempt.Phase != mirrorv1alpha1.SyncPhaseCancelled {
 				t.Fatal("cancellation must acknowledge request")
+			}
+			if !m.Status.LastFailedSyncAt.Equal(&previous) {
+				t.Fatal("cancellation changed the last failure timestamp")
 			}
 			expected, err := r.planAutomaticSync(t.Context(), m, now.Add(time.Minute))
 			if err != nil || !m.Status.NextSyncAt.Equal(timePtr(expected)) {
